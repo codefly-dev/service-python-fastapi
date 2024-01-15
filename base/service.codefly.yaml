@@ -1,0 +1,21 @@
+kind: service
+name: base
+application: base
+namespace: default
+version: 0.0.0
+plugin:
+    kind: runtime::service
+    name: python-fastapi
+    version: latest
+    publisher: codefly.ai
+endpoints:
+    - name: grpc
+      api: grpc
+    - name: rest
+      public: true
+      api: rest
+spec:
+    create-rest-endpoint: true
+    debug: false
+    watch: true
+    with-debug-symbols: false

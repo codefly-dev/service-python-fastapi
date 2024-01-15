@@ -1,0 +1,8 @@
+base:
+  name: base
+  domain: github.com/codefly-dev/python-fastapi/base
+ignores:
+  - service.codefly.yaml
+  - service.generation.codefly.yaml
+  - __pycache__
+  - poetry.lock
