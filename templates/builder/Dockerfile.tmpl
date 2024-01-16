@@ -1,3 +1,4 @@
+# The builder image, used to build the virtual environment
 FROM python:3.11-buster as builder
 
 RUN pip install poetry==1.4.2
@@ -10,25 +11,30 @@ ENV POETRY_NO_INTERACTION=1 \
 WORKDIR /app
 
 COPY pyproject.toml poetry.lock ./
-RUN touch README.md
 
-RUN --mount=type=cache,target=$POETRY_CACHE_DIR poetry install --without dev --no-root
+RUN poetry install --without dev --no-root && rm -rf $POETRY_CACHE_DIR
 
+# Runner
 FROM python:3.11-slim-buster as runtime
-{{ range .Envs}}
-ENV {{.Key}} {{.Value}}
-{{end}}
 
 # Set up a non-root user
-RUN adduser -D appuser
-USER appuse
+RUN adduser appuser
+USER appuser
 ENV VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
 
 COPY --chown=appuser --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --chown=appuser service.codefly.yaml .
 
-COPY annapurna ./annapurna
+# We go be smarter here
+{{ range .Dependency.Components}}
+COPY --chown=appuser {{.}} {{.}}
+{{end}}
 
 EXPOSE 8080
 
-ENTRYPOINT ["python", "-m", "annapurna.main"]
+{{ range .Envs}}
+ENV {{.Key}} {{.Value}}
+{{end}}
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

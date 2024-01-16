@@ -25,7 +25,7 @@ import (
 // Agent version
 var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(info)))
 
-var requirements = &builders.Dependency{Components: []string{"."}, Ignore: shared.NewSelect("*.py")}
+var requirements = &builders.Dependency{Components: []string{"."}, Select: shared.NewSelect("*.py")}
 
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
