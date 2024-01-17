@@ -54,7 +54,7 @@ func (s *Factory) Load(ctx context.Context, req *factoryv0.LoadRequest) (*factor
 	if err != nil {
 		return s.Factory.LoadError(err)
 	}
-	return s.Factory.LoadResponse(s.Endpoints, gettingStarted)
+	return s.Factory.LoadResponse(gettingStarted)
 }
 
 func (s *Factory) Init(ctx context.Context, req *factoryv0.InitRequest) (*factoryv0.InitResponse, error) {
@@ -169,11 +169,11 @@ func (s *Factory) Build(ctx context.Context, req *factoryv0.BuildRequest) (*fact
 		Dependency: *requirements,
 	}
 
-	if s.RestEndpoint != nil {
-		endpoint := configurations.FromProtoEndpoint(s.RestEndpoint)
-		rest := configurations.EndpointEnvironmentVariableKey(endpoint)
-		docker.Envs = append(docker.Envs, Env{Key: rest, Value: "localhost:8080"})
-	}
+	//if s.RestEndpoint != nil {
+	//	endpoint := configurations.FromProtoEndpoint(s.RestEndpoint)
+	//	rest := configurations.EndpointEnvironmentVariableKey(endpoint)
+	//	docker.Envs = append(docker.Envs, Env{Key: rest, Value: "localhost:8080"})
+	//}
 
 	err := shared.DeleteFile(ctx, s.Local("codefly/builder/Dockerfile"))
 	if err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/codefly-dev/core/runners"
@@ -25,6 +26,7 @@ type Runtime struct {
 	EnvironmentVariables *configurations.EnvironmentVariableManager
 	runner               *runners.Runner
 	port                 string
+	address              string
 }
 
 func NewRuntime() *Runtime {
@@ -54,7 +56,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 
 	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
 
-	return s.Base.Runtime.LoadResponse(s.Endpoints)
+	return s.Base.Runtime.LoadResponse()
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -67,9 +69,18 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	// Self-mapping
+	envs, err := network.ConvertToEnvironmentVariables(s.NetworkMappings)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+
+	s.EnvironmentVariables.Add(envs...)
+
 	// Setup the port
 	address := s.NetworkMappings[0].Addresses[0]
 	s.port = strings.Split(address, ":")[1]
+	s.address = address
 
 	for _, providerInfo := range req.ProviderInfos {
 		envs := configurations.ProviderInformationAsEnvironmentVariables(providerInfo)
@@ -98,25 +109,18 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	// Self-mapping
-	envs, err := network.ConvertToEnvironmentVariables(s.NetworkMappings)
-	if err != nil {
-		return s.Runtime.StartError(err)
-	}
-
-	s.EnvironmentVariables.Add(envs...)
-
 	others, err := network.ConvertToEnvironmentVariables(req.NetworkMappings)
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "convert to environment variables"))
 	}
 
 	s.EnvironmentVariables.Add(others...)
+	_, _ = s.Wool.Forward([]byte(fmt.Sprintf("running on %s", s.address)))
 
 	s.runner = &runners.Runner{
 		Dir:   s.Location,
 		Bin:   "poetry",
-		Args:  []string{"run", "uvicorn", "main:app", "--port", s.port},
+		Args:  []string{"run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", s.port},
 		Debug: s.Settings.Debug,
 	}
 
@@ -179,22 +183,13 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
  */
 
 func (s *Runtime) EventHandler(event code.Change) error {
+	if strings.Contains(event.Path, "swagger.json") {
+		return nil
+	}
+	if strings.HasSuffix(event.Path, ".py") {
+		// Dealt with the uvicorn
+		return nil
+	}
 	s.WantRestart()
 	return nil
-}
-
-func (s *Runtime) Network(ctx context.Context) ([]*runtimev0.NetworkMapping, error) {
-	pm, err := network.NewServicePortManager(ctx, s.Identity, s.Endpoints...)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create default endpoint")
-	}
-	err = pm.Expose(s.RestEndpoint)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot add rest to network manager")
-	}
-	err = pm.Reserve(ctx)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot reserve ports")
-	}
-	return pm.NetworkMapping(ctx)
 }

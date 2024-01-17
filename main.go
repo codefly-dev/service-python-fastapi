@@ -17,7 +17,6 @@ import (
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	"github.com/codefly-dev/core/shared"
 )
@@ -35,9 +34,6 @@ type Settings struct {
 
 type Service struct {
 	*services.Base
-
-	// Endpoints
-	RestEndpoint *basev0.Endpoint
 
 	// Settings
 	*Settings
@@ -78,15 +74,16 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context) error {
 	defer s.Wool.Catch()
-	var err error
-	for _, ep := range s.Configuration.Endpoints {
-		switch ep.API {
+	for _, endpoint := range s.Configuration.Endpoints {
+		endpoint.Application = s.Configuration.Application
+		endpoint.Service = s.Configuration.Name
+		switch endpoint.API {
 		case standards.REST:
-			s.RestEndpoint, err = configurations.NewRestAPIFromOpenAPI(ctx, ep, s.Local("swagger/api.swagger.json"))
+			rest, err := configurations.NewRestAPIFromOpenAPI(ctx, endpoint, s.Local("swagger/api.swagger.json"))
 			if err != nil {
 				return s.Wool.Wrapf(err, "cannot create openapi api")
 			}
-			s.Endpoints = append(s.Endpoints, s.RestEndpoint)
+			s.Endpoints = append(s.Endpoints, rest)
 			continue
 		}
 	}
