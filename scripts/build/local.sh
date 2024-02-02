@@ -4,5 +4,6 @@ FILE=agent.codefly.yaml
 AGENT=$( yq e '.name' $FILE)
 VERSION=$(yq e '.version' $FILE)
 
+go mod tidy
 echo Building ${AGENT}:${VERSION}
-go build -gcflags="all=-N -l" -o ~/.codefly/agents/services/codefly.dev/${AGENT}__${VERSION} *.go
+go build -o ~/.codefly/agents/services/codefly.dev/${AGENT}__${VERSION} *.go

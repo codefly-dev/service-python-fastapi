@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"strconv"
 	"strings"
 
 	"github.com/codefly-dev/core/runners"
@@ -15,7 +17,6 @@ import (
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
-	"github.com/codefly-dev/core/agents/network"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
 )
 
@@ -25,8 +26,10 @@ type Runtime struct {
 	// internal
 	EnvironmentVariables *configurations.EnvironmentVariableManager
 	runner               *runners.Runner
-	port                 string
-	address              string
+
+	address         string
+	Port            int
+	NetworkMappings []*basev0.NetworkMapping
 }
 
 func NewRuntime() *Runtime {
@@ -63,38 +66,35 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	var err error
-	s.NetworkMappings, err = s.Network(ctx)
+	s.NetworkMappings = req.NetworkMappings
+
+	envs, err := configurations.ExtractEndpointEnvironmentVariables(ctx, s.NetworkMappings)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-
-	// Self-mapping
-	envs, err := network.ConvertToEnvironmentVariables(s.NetworkMappings)
-	if err != nil {
-		return s.Runtime.InitError(err)
-	}
-
 	s.EnvironmentVariables.Add(envs...)
 
-	// Setup the port
-	address := s.NetworkMappings[0].Addresses[0]
-	s.port = strings.Split(address, ":")[1]
-	s.address = address
+	net, err := configurations.GetMappingInstance(s.NetworkMappings)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	s.address = net.Address
+	s.Port = net.Port
+	s.LogForward("will run on: %s", net.Address)
 
 	for _, providerInfo := range req.ProviderInfos {
-		envs := configurations.ProviderInformationAsEnvironmentVariables(providerInfo)
-		s.EnvironmentVariables.Add(envs...)
+		envs_ := configurations.ProviderInformationAsEnvironmentVariables(providerInfo)
+		s.EnvironmentVariables.Add(envs_...)
 	}
 
-	runner := &runners.Runner{
-		Dir:   s.Location,
-		Bin:   "poetry",
-		Args:  []string{"install"},
-		Debug: s.Settings.Debug,
+	runner, err := runners.NewRunner(ctx, "poetry", "install")
+	if err != nil {
+		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
+		return s.Runtime.InitError(err)
 	}
+	runner.WithDir(s.Location).WithDebug(s.Settings.Debug)
 
-	err = runner.Run(ctx)
+	err = runner.Run()
 	if err != nil {
 		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
 		return s.Runtime.InitError(err)
@@ -109,7 +109,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	others, err := network.ConvertToEnvironmentVariables(req.NetworkMappings)
+	others, err := configurations.ExtractEndpointEnvironmentVariables(ctx, req.OtherNetworkMappings)
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "convert to environment variables"))
 	}
@@ -117,39 +117,31 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.EnvironmentVariables.Add(others...)
 	_, _ = s.Wool.Forward([]byte(fmt.Sprintf("running on %s", s.address)))
 
-	s.runner = &runners.Runner{
-		Dir:   s.Location,
-		Bin:   "poetry",
-		Args:  []string{"run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", s.port},
-		Debug: s.Settings.Debug,
+	if s.runner != nil && s.Settings.Watch {
+		// Use the hot-reloading
+		return s.Runtime.StartResponse()
 	}
 
-	s.runner.Envs = s.EnvironmentVariables.Get()
+	runningContext := s.Wool.Inject(context.Background())
+	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--Port", strconv.Itoa(s.Port))
+	if err != nil {
+		return s.Runtime.StartError(err, wool.Field("in", "runner"))
+	}
+	s.runner = runner
+	s.runner.WithDir(s.Location).WithDebug(s.Settings.Debug).WithEnvs(s.EnvironmentVariables.Get())
 
 	if s.Settings.Watch {
 		conf := services.NewWatchConfiguration(requirements)
-		err := s.SetupWatcher(ctx, conf, s.EventHandler)
+		err = s.SetupWatcher(ctx, conf, s.EventHandler)
 		if err != nil {
 			s.Wool.Warn("error in watcher", wool.ErrField(err))
 		}
 	}
 
-	// Create a new context as the runner will be running in the background
-	runningContext := context.Background()
-	runningContext = s.Wool.Inject(runningContext)
-
-	out, err := s.runner.Start(runningContext)
+	err = s.runner.Start()
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
-
-	go func() {
-		for event := range out.Events {
-			if event.Err != nil && event.Message != "" {
-				s.Wool.Error("event", wool.Field("event", event))
-			}
-		}
-	}()
 
 	return s.Runtime.StartResponse()
 }
@@ -160,18 +152,22 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
-
 	s.Wool.Debug("stopping service")
-	err := s.runner.Kill(ctx)
+	err := s.runner.Stop()
 	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot kill go")
+		return s.Runtime.StopError(err)
+	}
+
+	err = runners.WaitForPortUnbound(ctx, s.Port)
+	if err != nil {
+		s.Wool.Warn("cannot wait for port to be free", wool.ErrField(err))
 	}
 
 	err = s.Base.Stop()
 	if err != nil {
-		return nil, err
+		return s.Runtime.StopError(err)
 	}
-	return &runtimev0.StopResponse{}, nil
+	return s.Runtime.StopResponse()
 }
 
 func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
@@ -190,6 +186,8 @@ func (s *Runtime) EventHandler(event code.Change) error {
 		// Dealt with the uvicorn
 		return nil
 	}
-	s.WantRestart()
+	// Now, only start
+	// TODO: handle change of swagger
+	s.Runtime.DesiredStart()
 	return nil
 }

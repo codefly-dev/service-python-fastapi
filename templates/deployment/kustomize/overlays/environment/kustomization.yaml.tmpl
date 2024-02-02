@@ -1,0 +1,7 @@
+resources:
+  - ../../base
+
+images:
+  - name: image:tag
+    newName: "{{ .Image.Name }}"
+    newTag: "{{ .Image.Tag }}"
