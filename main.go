@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"embed"
-
 	"github.com/codefly-dev/core/builders"
+	v0 "github.com/codefly-dev/core/generated/go/base/v0"
 
 	"github.com/codefly-dev/core/configurations/standards"
 
@@ -25,6 +25,7 @@ import (
 var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(info)))
 
 var requirements = builders.NewDependencies(agent.Name,
+	builders.NewDependency("service.codefly.yaml"),
 	builders.NewDependency(".").WithPathSelect(shared.NewSelect("*.py")),
 )
 
@@ -77,6 +78,7 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context) error {
 	defer s.Wool.Catch()
+	s.Endpoints = []*v0.Endpoint{}
 	for _, endpoint := range s.Configuration.Endpoints {
 		endpoint.Application = s.Configuration.Application
 		endpoint.Service = s.Configuration.Name

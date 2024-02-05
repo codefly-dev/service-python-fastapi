@@ -27,7 +27,7 @@ COPY --chown=appuser --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 COPY --chown=appuser service.codefly.yaml .
 
 # We go be smarter here
-{{ range .Dependency.Components}}
+{{ range .Components}}
 COPY --chown=appuser {{.}} {{.}}
 {{end}}
 

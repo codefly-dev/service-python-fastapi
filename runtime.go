@@ -30,6 +30,7 @@ type Runtime struct {
 	address         string
 	Port            int
 	NetworkMappings []*basev0.NetworkMapping
+	Environment     *basev0.Environment
 }
 
 func NewRuntime() *Runtime {
@@ -47,6 +48,10 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.Environment = req.Environment
+
+	s.EnvironmentVariables = s.LoadEnvironmentVariables(req.Environment)
+
 	err = s.GenerateOpenAPI(ctx)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
@@ -56,8 +61,6 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
-
-	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
 
 	return s.Base.Runtime.LoadResponse()
 }
@@ -122,8 +125,10 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartResponse()
 	}
 
+	s.Wool.Focus("env", wool.Field("envs", s.EnvironmentVariables.Get()))
+
 	runningContext := s.Wool.Inject(context.Background())
-	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--Port", strconv.Itoa(s.Port))
+	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", strconv.Itoa(s.Port))
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}

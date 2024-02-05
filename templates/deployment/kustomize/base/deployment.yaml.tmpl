@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Service.Unique.DNSCase }}
+  namespace: {{ .Service.Namespace }}
 spec:
   replicas: {{ .Replicas }}
   selector:

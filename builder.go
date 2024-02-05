@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"embed"
-	"github.com/codefly-dev/core/builders"
 	"github.com/codefly-dev/core/runners"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
+	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -32,6 +32,8 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	if err != nil {
 		return nil, err
 	}
+
+	requirements.Localize(s.Location)
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -106,16 +108,18 @@ type Env struct {
 }
 
 type DockerTemplating struct {
-	Dependency builders.Dependencies
+	Components []string
 	Envs       []Env
 }
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
-	s.Wool.Debug("building docker image")
+	defer s.Wool.Catch()
+
+	s.Wool.Debug("building docker image", wool.Field("image", s.DockerImage()))
 	ctx = s.WoolAgent.Inject(ctx)
 
 	docker := DockerTemplating{
-		Dependency: *requirements,
+		Components: requirements.All(),
 	}
 
 	err := shared.DeleteFile(ctx, s.Local("codefly/builder/Dockerfile"))
@@ -133,6 +137,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		Root:        s.Location,
 		Dockerfile:  "codefly/builder/Dockerfile",
 		Destination: image,
+		Output:      s.Wool,
 	})
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create builder")
@@ -144,11 +149,22 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	return &builderv0.BuildResponse{}, nil
 }
 
-type Deployment struct{}
+type Deployment struct {
+	Replicas int
+}
+
+type DeploymentParameter struct {
+	Image *configurations.DockerImage
+	*services.Information
+	Deployment
+}
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
-	err := s.Builder.Deploy(ctx, req, deploymentFS, Deployment{})
+
+	params := DeploymentParameter{Image: s.DockerImage(), Information: s.Information, Deployment: Deployment{Replicas: 1}}
+
+	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
