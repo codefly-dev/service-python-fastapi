@@ -76,12 +76,15 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LoadEndpoints(ctx context.Context) error {
+func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
 	defer s.Wool.Catch()
 	s.Endpoints = []*v0.Endpoint{}
 	for _, endpoint := range s.Configuration.Endpoints {
 		endpoint.Application = s.Configuration.Application
 		endpoint.Service = s.Configuration.Name
+		if makePublic {
+			endpoint.Visibility = configurations.VisibilityPublic
+		}
 		switch endpoint.API {
 		case standards.REST:
 			rest, err := configurations.NewRestAPIFromOpenAPI(ctx, endpoint, s.Local("swagger/api.swagger.json"))

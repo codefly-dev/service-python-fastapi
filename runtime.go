@@ -57,7 +57,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	err = s.LoadEndpoints(ctx)
+	err = s.LoadEndpoints(ctx, configurations.IsLocal(req.Environment))
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}

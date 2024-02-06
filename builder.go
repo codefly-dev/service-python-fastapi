@@ -35,7 +35,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	err = s.LoadEndpoints(ctx)
+	err = s.LoadEndpoints(ctx, false)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}

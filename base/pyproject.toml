@@ -8,7 +8,7 @@ authors = ["Your Name <you@example.com>"]
 python = "^3.10"
 fastapi = "^0.109.0"
 uvicorn = "^0.25.0"
-codefly-sdk = "^0.0.2"
+codefly-sdk = "0.0.3"
 
 [tool.poetry.dev-dependencies]
 
