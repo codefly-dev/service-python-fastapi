@@ -69,7 +69,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.NetworkMappings = req.NetworkMappings
+	s.NetworkMappings = req.ProposedNetworkMappings
 
 	envs, err := configurations.ExtractEndpointEnvironmentVariables(ctx, s.NetworkMappings)
 	if err != nil {
@@ -105,7 +105,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Ready()
 	s.Wool.Info("successful init of runner")
 
-	return s.Runtime.InitResponse()
+	return s.Runtime.InitResponse(s.NetworkMappings)
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {

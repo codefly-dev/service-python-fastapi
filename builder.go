@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/runners"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
@@ -18,6 +19,7 @@ import (
 
 type Builder struct {
 	*Service
+	NetworkMappings []*basev0.NetworkMapping
 }
 
 func NewBuilder() *Builder {
@@ -60,12 +62,14 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
+	s.NetworkMappings = req.ProposedNetworkMappings
+
 	hash, err := requirements.Hash(ctx)
 	if err != nil {
 		return s.Builder.InitError(err)
 	}
 
-	return s.Builder.InitResponse(hash)
+	return s.Builder.InitResponse(s.NetworkMappings, hash)
 }
 
 func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
