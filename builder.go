@@ -119,7 +119,9 @@ type DockerTemplating struct {
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Wool.Debug("building docker image", wool.Field("image", s.DockerImage()))
+	image := s.DockerImage(req.BuildContext)
+
+	s.Wool.Debug("building docker image", wool.Field("image", image.FullName()))
 	ctx = s.WoolAgent.Inject(ctx)
 
 	docker := DockerTemplating{
@@ -136,7 +138,6 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return nil, s.Wool.Wrapf(err, "cannot copy and apply template")
 	}
 
-	image := s.DockerImage()
 	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
 		Root:        s.Location,
 		Dockerfile:  "codefly/builder/Dockerfile",
@@ -166,7 +167,8 @@ type DeploymentParameter struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	params := DeploymentParameter{Image: s.DockerImage(), Information: s.Information, Deployment: Deployment{Replicas: 1}}
+	image := s.DockerImage(req.BuildContext)
+	params := DeploymentParameter{Image: image, Information: s.Information, Deployment: Deployment{Replicas: 1}}
 
 	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
 	if err != nil {
@@ -206,7 +208,6 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 	create := CreateConfiguration{
 		Information: s.Information,
-		Image:       s.DockerImage(),
 		Envs:        []string{},
 	}
 	err = s.Templates(ctx, create, services.WithFactory(factoryFS))
