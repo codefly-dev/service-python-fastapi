@@ -22,11 +22,11 @@ import (
 )
 
 // Agent version
-var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(info)))
+var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("service.codefly.yaml"),
-	builders.NewDependency(".").WithPathSelect(shared.NewSelect("*.py")),
+	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")),
 )
 
 type Settings struct {
@@ -38,6 +38,8 @@ type Settings struct {
 type Service struct {
 	*services.Base
 
+	SourceLocation string
+
 	// Settings
 	*Settings
 }
@@ -45,7 +47,7 @@ type Service struct {
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
 	defer s.Wool.Catch()
 
-	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readme), "templates/agent/README.md", s.Information)
+	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readmeFS), "templates/agent/README.md", s.Information)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -78,6 +80,7 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
 	defer s.Wool.Catch()
+	swagger := s.Local("openapi/api.swagger.json")
 	s.Endpoints = []*v0.Endpoint{}
 	for _, endpoint := range s.Configuration.Endpoints {
 		endpoint.Application = s.Configuration.Application
@@ -87,7 +90,13 @@ func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
 		}
 		switch endpoint.API {
 		case standards.REST:
-			rest, err := configurations.NewRestAPIFromOpenAPI(ctx, endpoint, s.Local("swagger/api.swagger.json"))
+			if !shared.FileExists(swagger) {
+				err := s.GenerateOpenAPI(ctx)
+				if err != nil {
+					return s.Wool.Wrapf(err, "cannot generate openapi")
+				}
+			}
+			rest, err := configurations.NewRestAPIFromOpenAPI(ctx, endpoint, swagger)
 			if err != nil {
 				return s.Wool.Wrapf(err, "cannot create openapi api")
 			}
@@ -106,7 +115,7 @@ func main() {
 }
 
 //go:embed agent.codefly.yaml
-var info embed.FS
+var infoFS embed.FS
 
 //go:embed templates/agent
-var readme embed.FS
+var readmeFS embed.FS

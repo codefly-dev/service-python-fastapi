@@ -48,15 +48,19 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.SourceLocation = s.Local("src")
+
 	s.Environment = req.Environment
 
 	s.EnvironmentVariables = s.LoadEnvironmentVariables(req.Environment)
 
+	s.Wool.Focus("generate Open API")
 	err = s.GenerateOpenAPI(ctx)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.Wool.Focus("generate Open API done")
 	err = s.LoadEndpoints(ctx, configurations.IsLocal(req.Environment))
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
@@ -68,6 +72,8 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	s.Wool.Focus("init")
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
@@ -95,7 +101,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
 		return s.Runtime.InitError(err)
 	}
-	runner.WithDir(s.Location).WithDebug(s.Settings.Debug)
+	runner.WithDir(s.SourceLocation)
+	runner.WithDebug(s.Settings.Debug)
 
 	err = runner.Run()
 	if err != nil {
@@ -103,7 +110,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 	s.Ready()
-	s.Wool.Info("successful init of runner")
+	s.Wool.Focus("successful init of runner")
 
 	return s.Runtime.InitResponse(s.NetworkMappings)
 }
@@ -111,6 +118,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	s.Wool.Focus("start: go")
 
 	others, err := configurations.ExtractEndpointEnvironmentVariables(ctx, req.OtherNetworkMappings)
 	if err != nil {
@@ -132,8 +141,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
+
 	s.runner = runner
-	s.runner.WithDir(s.Location).WithDebug(s.Settings.Debug).WithEnvs(s.EnvironmentVariables.Get())
+	s.runner.WithDir(s.SourceLocation)
+	s.runner.WithDebug(s.Settings.Debug)
+	s.runner.WithEnvs(s.EnvironmentVariables.Get()...)
+	s.runner.WithEnvs("PYTHONUNBUFFERED=1")
 
 	if s.Settings.Watch {
 		conf := services.NewWatchConfiguration(requirements)
@@ -148,6 +161,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
 
+	s.Wool.Focus("start done")
 	return s.Runtime.StartResponse()
 }
 
@@ -161,11 +175,6 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	err := s.runner.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)
-	}
-
-	err = runners.WaitForPortUnbound(ctx, s.Port)
-	if err != nil {
-		s.Wool.Warn("cannot wait for port to be free", wool.ErrField(err))
 	}
 
 	err = s.Base.Stop()

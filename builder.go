@@ -37,6 +37,8 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
+	s.SourceLocation = s.Local("src")
+
 	err = s.LoadEndpoints(ctx, false)
 	if err != nil {
 		return s.Builder.LoadError(err)
@@ -90,7 +92,7 @@ func (s *Service) GenerateOpenAPI(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create runner")
 	}
-	runner.WithDir(s.Location)
+	runner.WithDir(s.SourceLocation)
 	err = runner.Run()
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot generate swagger")
@@ -128,7 +130,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		Components: requirements.All(),
 	}
 
-	err := shared.DeleteFile(ctx, s.Local("codefly/builder/Dockerfile"))
+	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot remove dockerfile")
 	}
@@ -140,7 +142,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
 		Root:        s.Location,
-		Dockerfile:  "codefly/builder/Dockerfile",
+		Dockerfile:  "builder/Dockerfile",
 		Destination: image,
 		Output:      s.Wool,
 	})
@@ -219,7 +221,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
-	runner.WithDir(s.Location)
+	runner.WithDir(s.SourceLocation)
 
 	err = runner.Run()
 	if err != nil {
@@ -235,7 +237,15 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
-	rest, err := configurations.NewRestAPIFromOpenAPI(ctx, &configurations.Endpoint{Name: "rest", Visibility: "private"}, s.Local("swagger/api.swagger.json"))
+	swagger := s.Local("openapi/api.swagger.json")
+	if !shared.FileExists(swagger) {
+		err := s.GenerateOpenAPI(ctx)
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot generate openapi")
+		}
+
+	}
+	rest, err := configurations.NewRestAPIFromOpenAPI(ctx, &configurations.Endpoint{Name: "rest", Visibility: "private"}, s.Local("openapi/api.swagger.json"))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
