@@ -134,7 +134,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartResponse()
 	}
 
-	s.Wool.Debug("env", wool.Field("envs", s.EnvironmentVariables.Get()))
+	s.Wool.Focus("env", wool.Field("envs", s.EnvironmentVariables.Get()))
 
 	runningContext := s.Wool.Inject(context.Background())
 	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", strconv.Itoa(s.Port))
