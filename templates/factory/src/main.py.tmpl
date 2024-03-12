@@ -21,4 +21,4 @@ if codefly.is_local():
 
 @app.get("/version")
 async def version():
-    return {"version": codefly.service().version}
+    return {"version": codefly.get_service().version}
