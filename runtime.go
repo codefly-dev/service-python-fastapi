@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
-	"strconv"
 	"strings"
 
 	"github.com/codefly-dev/core/runners"
@@ -24,13 +22,11 @@ type Runtime struct {
 	*Service
 
 	// internal
-	EnvironmentVariables *configurations.EnvironmentVariableManager
-	runner               *runners.Runner
 
-	address         string
-	Port            int
-	NetworkMappings []*basev0.NetworkMapping
-	Environment     *basev0.Environment
+	runner *runners.Runner
+
+	address string
+	port    int32
 }
 
 func NewRuntime() *Runtime {
@@ -48,7 +44,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	s.SourceLocation = s.Local("src")
+	s.sourceLocation = s.Local("src")
 
 	s.Environment = req.Environment
 
@@ -61,6 +57,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	}
 
 	s.Wool.Focus("generate Open API done")
+
 	err = s.LoadEndpoints(ctx, configurations.IsLocal(req.Environment))
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
@@ -81,14 +78,15 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+
 	s.EnvironmentVariables.Add(envs...)
 
-	net, err := configurations.GetMappingInstance(s.NetworkMappings)
+	net, err := configurations.FindNetworkMapping(s.restEndpoint, s.NetworkMappings)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 	s.address = net.Address
-	s.Port = net.Port
+	s.port = net.Port
 	s.LogForward("will run on: %s", net.Address)
 
 	for _, providerInfo := range req.ProviderInfos {
@@ -101,7 +99,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
 		return s.Runtime.InitError(err)
 	}
-	runner.WithDir(s.SourceLocation)
+	runner.WithDir(s.sourceLocation)
 	runner.WithDebug(s.Settings.Debug)
 
 	err = runner.Run()
@@ -112,7 +110,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Ready()
 	s.Wool.Focus("successful init of runner")
 
-	return s.Runtime.InitResponse(s.NetworkMappings)
+	return s.Runtime.InitResponse()
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
@@ -137,13 +135,13 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.Wool.Focus("env", wool.Field("envs", s.EnvironmentVariables.Get()))
 
 	runningContext := s.Wool.Inject(context.Background())
-	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", strconv.Itoa(s.Port))
+	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", fmt.Sprintf("%d", s.port))
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
 
 	s.runner = runner
-	s.runner.WithDir(s.SourceLocation)
+	s.runner.WithDir(s.sourceLocation)
 	s.runner.WithDebug(s.Settings.Debug)
 	s.runner.WithEnvs(s.EnvironmentVariables.Get()...)
 	s.runner.WithEnvs("PYTHONUNBUFFERED=1")

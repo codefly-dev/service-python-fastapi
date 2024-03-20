@@ -10,13 +10,22 @@ ENV POETRY_NO_INTERACTION=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml poetry.lock ./
+COPY src/pyproject.toml src/poetry.lock ./
 
 RUN poetry install --without dev --no-root && rm -rf $POETRY_CACHE_DIR
 
 # Runner
 FROM python:3.11-slim-buster as runtime
 
+RUN apt-get update
+
+{{range .RuntimePackages}}
+RUN apt-get install -y {{.}}
+{{end}}
+
+RUN rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
 # Set up a non-root user
 RUN adduser appuser
 USER appuser
@@ -37,4 +46,5 @@ EXPOSE 8080
 ENV {{.Key}} {{.Value}}
 {{end}}
 
+WORKDIR /app/src
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"embed"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/configurations/standards"
+	v0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/runners"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
@@ -19,7 +20,6 @@ import (
 
 type Builder struct {
 	*Service
-	NetworkMappings []*basev0.NetworkMapping
 }
 
 func NewBuilder() *Builder {
@@ -37,7 +37,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	s.SourceLocation = s.Local("src")
+	s.sourceLocation = s.Local("src")
 
 	err = s.LoadEndpoints(ctx, false)
 	if err != nil {
@@ -64,14 +64,21 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
-	s.NetworkMappings = req.ProposedNetworkMappings
+	s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
 
-	hash, err := requirements.Hash(ctx)
-	if err != nil {
-		return s.Builder.InitError(err)
+	s.Base.NetworkMappings = req.ProposedNetworkMappings
+
+	for _, info := range req.ProviderInfos {
+		s.Base.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
 	}
 
-	return s.Builder.InitResponse(s.NetworkMappings, hash)
+	//
+	//hash, err := requirements.Hash(ctx)
+	//if err != nil {
+	//	return s.Builder.InitError(err)
+	//}
+
+	return s.Builder.InitResponse()
 }
 
 func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
@@ -92,7 +99,7 @@ func (s *Service) GenerateOpenAPI(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create runner")
 	}
-	runner.WithDir(s.SourceLocation)
+	runner.WithDir(s.sourceLocation)
 	err = runner.Run()
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot generate swagger")
@@ -114,8 +121,9 @@ type Env struct {
 }
 
 type DockerTemplating struct {
-	Components []string
-	Envs       []Env
+	Components      []string
+	RuntimePackages []string
+	Envs            []Env
 }
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
@@ -127,7 +135,8 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	ctx = s.WoolAgent.Inject(ctx)
 
 	docker := DockerTemplating{
-		Components: requirements.All(),
+		Components:      requirements.All(),
+		RuntimePackages: s.Settings.RuntimePackages,
 	}
 
 	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -160,22 +169,30 @@ type Deployment struct {
 	Replicas int
 }
 
-type DeploymentParameter struct {
-	Image *configurations.DockerImage
-	*services.Information
-	Deployment
-}
-
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
 	image := s.DockerImage(req.BuildContext)
-	params := DeploymentParameter{Image: image, Information: s.Information, Deployment: Deployment{Replicas: 1}}
 
-	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
+	cfMap, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Get())
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
+
+	params := services.DeploymentTemplateInput{
+		Image:       image,
+		Information: s.Information,
+		DeploymentConfiguration: services.DeploymentConfiguration{
+			Replicas: 1,
+		},
+		ConfigMap: cfMap,
+	}
+
+	err = s.Builder.Deploy(ctx, req, deploymentFS, params)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
 	return s.Builder.DeployResponse()
 }
 
@@ -221,7 +238,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
-	runner.WithDir(s.SourceLocation)
+	runner.WithDir(s.sourceLocation)
 
 	err = runner.Run()
 	if err != nil {
@@ -245,11 +262,15 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 		}
 
 	}
-	rest, err := configurations.NewRestAPIFromOpenAPI(ctx, &configurations.Endpoint{Name: "rest", Visibility: "private"}, s.Local("openapi/api.swagger.json"))
+	var err error
+	endpoint := s.Configuration.BaseEndpoint(standards.REST)
+	s.restEndpoint, err = configurations.NewRestAPIFromOpenAPI(ctx,
+		endpoint,
+		s.Local("openapi/api.swagger.json"))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
-	s.Endpoints = append(s.Endpoints, rest)
+	s.Endpoints = []*v0.Endpoint{s.restEndpoint}
 	return nil
 }
 

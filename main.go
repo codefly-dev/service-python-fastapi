@@ -33,15 +33,18 @@ type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
 
 	Watch bool `yaml:"watch"`
+
+	RuntimePackages []string `yaml:"runtime-packages"`
 }
 
 type Service struct {
 	*services.Base
 
-	SourceLocation string
+	sourceLocation string
 
 	// Settings
 	*Settings
+	restEndpoint *v0.Endpoint
 }
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
@@ -55,6 +58,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	return &agentv0.AgentInformation{
 		RuntimeRequirements: []*agentv0.Runtime{
 			{Type: agentv0.Runtime_PYTHON},
+			{Type: agentv0.Runtime_PYTHON_POETRY},
 		},
 		Capabilities: []*agentv0.Capability{
 			{Type: agentv0.Capability_BUILDER},
@@ -100,8 +104,8 @@ func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
 			if err != nil {
 				return s.Wool.Wrapf(err, "cannot create openapi api")
 			}
+			s.restEndpoint = rest
 			s.Endpoints = append(s.Endpoints, rest)
-			continue
 		}
 	}
 	return nil

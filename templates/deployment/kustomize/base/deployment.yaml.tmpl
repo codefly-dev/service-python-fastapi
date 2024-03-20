@@ -1,18 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Service.Unique.DNSCase }}
-  namespace: {{ .Service.Namespace }}
+  name: {{ .Service.Name.DNSCase }}
+  namespace: {{ .Namespace }}
 spec:
   replicas: {{ .Replicas }}
   selector:
     matchLabels:
-      app: {{ .Service.Unique.DNSCase }}
+      app: {{ .Service.Name.DNSCase }}
   template:
     metadata:
       labels:
-        app: {{ .Service.Unique.DNSCase }}
+        app: {{ .Service.Name.DNSCase }}
     spec:
       containers:
-        - name: {{ .Service.Unique.DNSCase }}
+        - name: {{ .Service.Name.DNSCase }}
           image: image:tag
+          envFrom:
+            - configMapRef:
+                name: config-{{ .Service.Name.DNSCase }}
+            - secretRef:
+                name: secret-{{ .Service.Name.DNSCase }}
