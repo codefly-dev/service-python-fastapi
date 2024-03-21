@@ -57,7 +57,6 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 	return &agentv0.AgentInformation{
 		RuntimeRequirements: []*agentv0.Runtime{
-			{Type: agentv0.Runtime_PYTHON},
 			{Type: agentv0.Runtime_PYTHON_POETRY},
 		},
 		Capabilities: []*agentv0.Capability{
