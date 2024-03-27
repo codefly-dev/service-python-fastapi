@@ -6,8 +6,6 @@ import (
 	"github.com/codefly-dev/core/builders"
 	v0 "github.com/codefly-dev/core/generated/go/base/v0"
 
-	"github.com/codefly-dev/core/configurations/standards"
-
 	"google.golang.org/grpc/codes"
 
 	"google.golang.org/grpc/status"
@@ -28,6 +26,8 @@ var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("service.codefly.yaml"),
 	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")),
 )
+
+var runtimeImage = &configurations.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.1"}
 
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
@@ -57,6 +57,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 	return &agentv0.AgentInformation{
 		RuntimeRequirements: []*agentv0.Runtime{
+			{Type: agentv0.Runtime_PYTHON},
 			{Type: agentv0.Runtime_PYTHON_POETRY},
 		},
 		Capabilities: []*agentv0.Capability{
@@ -83,30 +84,16 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
 	defer s.Wool.Catch()
-	swagger := s.Local("openapi/api.swagger.json")
-	s.Endpoints = []*v0.Endpoint{}
-	for _, endpoint := range s.Configuration.Endpoints {
-		endpoint.Application = s.Configuration.Application
-		endpoint.Service = s.Configuration.Name
-		if makePublic {
+	endpoints, err := s.Base.Service.LoadEndpoints(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot load endpoints")
+	}
+	if makePublic {
+		for _, endpoint := range endpoints {
 			endpoint.Visibility = configurations.VisibilityPublic
 		}
-		switch endpoint.API {
-		case standards.REST:
-			if !shared.FileExists(swagger) {
-				err := s.GenerateOpenAPI(ctx)
-				if err != nil {
-					return s.Wool.Wrapf(err, "cannot generate openapi")
-				}
-			}
-			rest, err := configurations.NewRestAPIFromOpenAPI(ctx, endpoint, swagger)
-			if err != nil {
-				return s.Wool.Wrapf(err, "cannot create openapi api")
-			}
-			s.restEndpoint = rest
-			s.Endpoints = append(s.Endpoints, rest)
-		}
 	}
+	s.Endpoints = endpoints
 	return nil
 }
 

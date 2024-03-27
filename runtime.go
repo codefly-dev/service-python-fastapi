@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	v0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/shared"
+	"path"
 	"strings"
 
 	"github.com/codefly-dev/core/runners"
@@ -22,11 +25,10 @@ type Runtime struct {
 	*Service
 
 	// internal
-
-	runner *runners.Runner
+	runner runners.Runner
 
 	address string
-	port    int32
+	port    uint16
 }
 
 func NewRuntime() *Runtime {
@@ -44,11 +46,21 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.Runtime.Scope = req.Scope
+
 	s.sourceLocation = s.Local("src")
+
+	switch s.Runtime.Scope {
+	case v0.RuntimeScope_Container:
+		s.Wool.Info("running in container mode")
+	case v0.RuntimeScope_Native:
+		s.Wool.Info("running in native mode")
+	}
 
 	s.Environment = req.Environment
 
-	s.EnvironmentVariables = s.LoadEnvironmentVariables(req.Environment)
+	s.EnvironmentVariables.SetEnvironment(s.Environment)
+	s.EnvironmentVariables.SetRuntimeScope(s.Runtime.Scope)
 
 	s.Wool.Focus("generate Open API")
 	err = s.GenerateOpenAPI(ctx)
@@ -63,48 +75,97 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.restEndpoint, err = configurations.FindRestEndpoint(ctx, s.Endpoints)
+	if err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
+
 	return s.Base.Runtime.LoadResponse()
+}
+
+func (s *Runtime) DockerEnvPath() string {
+	return path.Join(s.sourceLocation, ".venv.container")
+}
+
+func (s *Runtime) dockerInitRunner(ctx context.Context) (runners.Runner, error) {
+	runner, err := runners.NewDocker(ctx, runtimeImage)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = shared.CheckDirectoryOrCreate(ctx, s.DockerEnvPath())
+	if err != nil {
+		return nil, err
+	}
+
+	err = runner.Init(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	runner.WithMount(s.sourceLocation, "/app")
+	runner.WithMount(s.DockerEnvPath(), "/venv")
+	runner.WithWorkDir("/app")
+	runner.WithCommand("poetry", "install", "--no-root")
+	runner.WithOut(s.Wool)
+	return runner, nil
+}
+
+func (s *Runtime) nativeInitRunner(ctx context.Context) (runners.Runner, error) {
+	runner, err := runners.NewProcess(ctx, "poetry", "install", "--no-root")
+	if err != nil {
+		return nil, err
+	}
+	runner.WithDir(s.sourceLocation)
+	runner.WithEnvironmentVariables("POETRY_VIRTUALENVS_IN_PROJECT=1")
+	runner.WithOut(s.Wool)
+	return runner, nil
+
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Focus("init")
+	w := s.Wool.In("init")
+
+	w.Focus("input",
+		wool.Field("configurations", configurations.MakeConfigurationSummary(req.Configuration)),
+		wool.Field("other configurations", configurations.MakeManyConfigurationSummary(req.DependenciesConfigurations)),
+		wool.Field("network", configurations.MakeManyNetworkMappingSummary(req.ProposedNetworkMappings)))
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	envs, err := configurations.ExtractEndpointEnvironmentVariables(ctx, s.NetworkMappings)
+	// Add to environment variables
+	err := s.EnvironmentVariables.AddConfigurations(req.DependenciesConfigurations...)
+
+	envs := s.EnvironmentVariables.Get()
+	w.Focus("env", wool.Field("envs", envs))
+	// Networking
+	net, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.restEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.EnvironmentVariables.Add(envs...)
+	w.Focus("network instance", wool.Field("instance", net))
 
-	net, err := configurations.FindNetworkMapping(s.restEndpoint, s.NetworkMappings)
+	s.LogForward("will run on http://localhost:%d", net.Port)
+	s.port = uint16(net.Port)
+
+	var runner runners.Runner
+	switch s.Runtime.Scope {
+	case v0.RuntimeScope_Container:
+		runner, err = s.dockerInitRunner(ctx)
+	case v0.RuntimeScope_Native:
+		runner, err = s.nativeInitRunner(ctx)
+	}
+
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	s.address = net.Address
-	s.port = net.Port
-	s.LogForward("will run on: %s", net.Address)
-
-	for _, providerInfo := range req.ProviderInfos {
-		envs_ := configurations.ProviderInformationAsEnvironmentVariables(providerInfo)
-		s.EnvironmentVariables.Add(envs_...)
-	}
-
-	runner, err := runners.NewRunner(ctx, "poetry", "install")
+	err = runner.Run(ctx)
 	if err != nil {
-		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
-		return s.Runtime.InitError(err)
-	}
-	runner.WithDir(s.sourceLocation)
-	runner.WithDebug(s.Settings.Debug)
-
-	err = runner.Run()
-	if err != nil {
-		s.Wool.Error("cannot init the go runner", wool.ErrField(err))
+		s.Wool.Error("cannot run poetry install", wool.ErrField(err))
 		return s.Runtime.InitError(err)
 	}
 	s.Ready()
@@ -113,19 +174,57 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	return s.Runtime.InitResponse()
 }
 
+func (s *Runtime) dockerStartRunner(ctx context.Context) (runners.Runner, error) {
+	// runner for the write endpoint
+	runner, err := runners.NewDocker(ctx, runtimeImage)
+	if err != nil {
+		return nil, err
+	}
+
+	err = runner.Init(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runner.WithPort(runners.DockerPortMapping{Container: s.port, Host: s.port})
+	runner.WithName(s.Global())
+
+	runner.WithMount(s.sourceLocation, "/app")
+	runner.WithMount(s.DockerEnvPath(), "/venv")
+	runner.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
+	runner.WithMount(s.Local("openapi"), "/openapi")
+
+	runner.WithEnvironmentVariables(s.EnvironmentVariables.Get()...)
+	runner.WithEnvironmentVariables("PYTHONUNBUFFERED=0")
+	runner.WithOut(s.Wool)
+	runner.WithCommand("poetry", "run", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
+	return runner, nil
+}
+
+func (s *Runtime) nativeStartRunner(ctx context.Context) (runners.Runner, error) {
+	runner, err := runners.NewProcess(ctx, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", fmt.Sprintf("%d", s.port))
+	if err != nil {
+		return nil, err
+	}
+	runner.WithDir(s.sourceLocation)
+	runner.WithDebug(s.Settings.Debug)
+	runner.WithEnvironmentVariables(s.EnvironmentVariables.Get()...)
+	runner.WithEnvironmentVariables("POETRY_VIRTUALENVS_IN_PROJECT=1")
+	runner.WithEnvironmentVariables("PYTHONUNBUFFERED=0")
+	runner.WithOut(s.Wool)
+	return runner, nil
+}
+
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-
-	s.Wool.Focus("start: go")
-
-	others, err := configurations.ExtractEndpointEnvironmentVariables(ctx, req.OtherNetworkMappings)
-	if err != nil {
-		return s.Runtime.StartError(err, wool.Field("in", "convert to environment variables"))
-	}
-
-	s.EnvironmentVariables.Add(others...)
-	_, _ = s.Wool.Forward([]byte(fmt.Sprintf("running on %s", s.address)))
+	//
+	//others, err := configurations.ExtractEndpointEnvironmentVariables(ctx, req.OtherNetworkMappings)
+	//if err != nil {
+	//	return s.Runtime.StartError(err, wool.Field("in", "convert to environment variables"))
+	//}
+	//
+	//s.EnvironmentVariables.Add(others...)
+	//_, _ = s.Wool.Forward([]byte(fmt.Sprintf("running on %s", s.address)))
 
 	if s.runner != nil && s.Settings.Watch {
 		// Use the hot-reloading
@@ -135,16 +234,19 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.Wool.Focus("env", wool.Field("envs", s.EnvironmentVariables.Get()))
 
 	runningContext := s.Wool.Inject(context.Background())
-	runner, err := runners.NewRunner(runningContext, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", fmt.Sprintf("%d", s.port))
-	if err != nil {
-		return s.Runtime.StartError(err, wool.Field("in", "runner"))
-	}
 
+	var runner runners.Runner
+	var err error
+	switch s.Runtime.Scope {
+	case v0.RuntimeScope_Container:
+		runner, err = s.dockerStartRunner(ctx)
+	case v0.RuntimeScope_Native:
+		runner, err = s.nativeStartRunner(ctx)
+	}
+	if err != nil {
+		return s.Runtime.StartError(err)
+	}
 	s.runner = runner
-	s.runner.WithDir(s.sourceLocation)
-	s.runner.WithDebug(s.Settings.Debug)
-	s.runner.WithEnvs(s.EnvironmentVariables.Get()...)
-	s.runner.WithEnvs("PYTHONUNBUFFERED=1")
 
 	if s.Settings.Watch {
 		conf := services.NewWatchConfiguration(requirements)
@@ -154,7 +256,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		}
 	}
 
-	err = s.runner.Start()
+	err = s.runner.Start(runningContext)
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
@@ -170,6 +272,9 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	s.Wool.Debug("stopping service")
+	if s.runner == nil {
+		return s.Runtime.StopResponse()
+	}
 	err := s.runner.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)

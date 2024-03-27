@@ -64,13 +64,13 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
+	//s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
 
 	s.Base.NetworkMappings = req.ProposedNetworkMappings
 
-	for _, info := range req.ProviderInfos {
-		s.Base.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
-	}
+	//for _, info := range req.ProviderInfos {
+	//	s.Base.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
+	//}
 
 	//
 	//hash, err := requirements.Hash(ctx)
@@ -94,13 +94,14 @@ func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*bu
 
 func (s *Service) GenerateOpenAPI(ctx context.Context) error {
 	defer s.Wool.Catch()
+	return nil
 
-	runner, err := runners.NewRunner(ctx, "poetry", "run", "python", "openapi.py")
+	runner, err := runners.NewProcess(ctx, "poetry", "run", "python", "openapi.py")
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create runner")
 	}
 	runner.WithDir(s.sourceLocation)
-	err = runner.Run()
+	err = runner.Run(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot generate swagger")
 	}
@@ -121,6 +122,7 @@ type Env struct {
 }
 
 type DockerTemplating struct {
+	Builder         string
 	Components      []string
 	RuntimePackages []string
 	Envs            []Env
@@ -135,6 +137,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	ctx = s.WoolAgent.Inject(ctx)
 
 	docker := DockerTemplating{
+		Builder:         runtimeImage.FullName(),
 		Components:      requirements.All(),
 		RuntimePackages: s.Settings.RuntimePackages,
 	}
@@ -227,13 +230,13 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return s.Base.Builder.CreateError(err)
 	}
 
-	runner, err := runners.NewRunner(ctx, "poetry", "install")
+	runner, err := runners.NewProcess(ctx, "poetry", "install")
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
 	runner.WithDir(s.sourceLocation)
 
-	err = runner.Run()
+	err = runner.Run(ctx)
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
@@ -247,8 +250,8 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
-	swagger := s.Local("openapi/api.swagger.json")
-	if !shared.FileExists(swagger) {
+	openapiFile := s.Local("openapi/api.json")
+	if !shared.FileExists(openapiFile) {
 		err := s.GenerateOpenAPI(ctx)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot generate openapi")
@@ -256,10 +259,9 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 
 	}
 	var err error
-	endpoint := s.Configuration.BaseEndpoint(standards.REST)
-	s.restEndpoint, err = configurations.NewRestAPIFromOpenAPI(ctx,
-		endpoint,
-		s.Local("openapi/api.swagger.json"))
+	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
+	rest, err := configurations.LoadRestAPI(ctx, openapiFile)
+	s.restEndpoint, err = configurations.NewAPI(ctx, endpoint, configurations.ToRestAPI(rest))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
