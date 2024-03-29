@@ -5,7 +5,6 @@ import (
 	"embed"
 	"github.com/codefly-dev/core/configurations/standards"
 	v0 "github.com/codefly-dev/core/generated/go/base/v0"
-	"github.com/codefly-dev/core/runners"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/wool"
@@ -39,7 +38,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	s.sourceLocation = s.Local("src")
 
-	err = s.LoadEndpoints(ctx, false)
+	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -64,15 +63,16 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
-	//s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
+	s.Builder.LogInitRequest(req)
 
 	s.Base.NetworkMappings = req.ProposedNetworkMappings
 
-	//for _, info := range req.ProviderInfos {
-	//	s.Base.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
-	//}
+	s.EnvironmentVariables.SetEnvironment(s.Environment)
+	err := s.EnvironmentVariables.AddConfigurations(s.Configuration)
+	if err != nil {
+		return s.Builder.InitError(err)
+	}
 
-	//
 	//hash, err := requirements.Hash(ctx)
 	//if err != nil {
 	//	return s.Builder.InitError(err)
@@ -90,24 +90,6 @@ func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*bu
 	}
 
 	return &builderv0.UpdateResponse{}, nil
-}
-
-func (s *Service) GenerateOpenAPI(ctx context.Context) error {
-	defer s.Wool.Catch()
-	return nil
-
-	runner, err := runners.NewProcess(ctx, "poetry", "run", "python", "openapi.py")
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create runner")
-	}
-	runner.WithDir(s.sourceLocation)
-	err = runner.Run(ctx)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot generate swagger")
-	}
-
-	return nil
-
 }
 
 func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
@@ -175,12 +157,20 @@ type Deployment struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	secrets, err := services.EnvsAsSecretData(s.EnvironmentVariables.Get()...)
+	s.Builder.LogDeployRequest(req)
+
+	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	secrets, err := services.EnvsAsSecretData(s.EnvironmentVariables.Secrets()...)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
 
 	params := services.DeploymentParameters{
+		ConfigMap: cm,
 		SecretMap: secrets,
 	}
 
@@ -230,17 +220,6 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return s.Base.Builder.CreateError(err)
 	}
 
-	runner, err := runners.NewProcess(ctx, "poetry", "install")
-	if err != nil {
-		return s.Base.Builder.CreateError(err)
-	}
-	runner.WithDir(s.sourceLocation)
-
-	err = runner.Run(ctx)
-	if err != nil {
-		return s.Base.Builder.CreateError(err)
-	}
-
 	err = s.CreateEndpoints(ctx)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
@@ -251,13 +230,6 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.json")
-	if !shared.FileExists(openapiFile) {
-		err := s.GenerateOpenAPI(ctx)
-		if err != nil {
-			return s.Wool.Wrapf(err, "cannot generate openapi")
-		}
-
-	}
 	var err error
 	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
 	rest, err := configurations.LoadRestAPI(ctx, openapiFile)

@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/codefly-dev/core v0.1.62
+	github.com/hashicorp/go-multierror v1.1.1
 	google.golang.org/grpc v1.62.1
 )
 
@@ -46,7 +47,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-hclog v1.6.2 // indirect
-	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/hashicorp/go-plugin v1.6.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

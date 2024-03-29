@@ -82,21 +82,6 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LoadEndpoints(ctx context.Context, makePublic bool) error {
-	defer s.Wool.Catch()
-	endpoints, err := s.Base.Service.LoadEndpoints(ctx)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot load endpoints")
-	}
-	if makePublic {
-		for _, endpoint := range endpoints {
-			endpoint.Visibility = configurations.VisibilityPublic
-		}
-	}
-	s.Endpoints = endpoints
-	return nil
-}
-
 func main() {
 	agents.Register(
 		services.NewServiceAgent(agent.Of(configurations.ServiceAgent), NewService()),

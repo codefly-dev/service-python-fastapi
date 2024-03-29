@@ -22,10 +22,10 @@ WORKDIR /app
 # Set up a non-root user
 RUN adduser appuser
 USER appuser
-ENV VIRTUAL_ENV=/app/.venv \
-    PATH="/app/.venv/bin:$PATH"
+ENV VIRTUAL_ENV=/venv \
+    PATH="/venv/bin:$PATH"
 
-COPY --chown=appuser --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --chown=appuser --from=builder /venv /venv
 COPY --chown=appuser service.codefly.yaml .
 
 # We go be smarter here
