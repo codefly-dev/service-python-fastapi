@@ -41,33 +41,34 @@ func NewRuntime() *Runtime {
 func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
 	var generator runners.Runner
 	if s.Runtime.Container() {
-		s.Wool.Warn("NOT IMPLEMENTED: FIX ME")
-		return nil
+		runner, err := runners.NewDocker(ctx, runtimeImage)
+		if err != nil {
+			return err
+		}
+		err = runner.Init(ctx)
+		if err != nil {
+			return err
+		}
+		runner.WithMount(s.sourceLocation, "/app")
+		runner.WithMount(s.Local("openapi"), "/openapi")
+		runner.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
+		runner.WithMount(s.DockerEnvPath(), "/venv")
+		runner.WithWorkDir("/app")
+		runner.WithOut(s.Wool)
+		runner.WithCommand("poetry", "run", "python", "openapi.py")
+		generator = runner
 	}
-	//runner, err := runners.NewDocker(ctx, runtimeImage)
-	//if err != nil {
-	//	return err
-	//}
-	//err = runner.Init(ctx)
-	//if err != nil {
-	//	return err
-	//}
-	//runner.WithMount(s.sourceLocation, "/app")
-	//runner.WithMount(s.Local("openapi"), "/openapi")
-	//runner.WithMount(s.DockerEnvPath(), "/venv")
-	//runner.WithWorkDir("/app")
-	//runner.WithOut(s.Wool)
-	//runner.WithCommand("poetry", "run", "python", "openapi.py")
-	//generator = runner
-	runner, err := runners.NewProcess(ctx, "poetry", "run", "python", "openapi.py")
-	if err != nil {
-		return err
+	if s.Runtime.Native() {
+		runner, err := runners.NewProcess(ctx, "poetry", "run", "python", "openapi.py")
+		if err != nil {
+			return err
+		}
+		runner.WithDir(s.sourceLocation)
+		runner.WithOut(s.Wool)
+		generator = runner
 	}
-	runner.WithDir(s.sourceLocation)
-	runner.WithOut(s.Wool)
-	generator = runner
 	s.otherRunners = append(s.otherRunners, generator)
-	err = generator.Run(ctx)
+	err := generator.Run(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot generate open api")
 	}
@@ -93,7 +94,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	s.Environment = req.Environment
 
 	s.EnvironmentVariables.SetEnvironment(s.Environment)
-	s.EnvironmentVariables.SetRuntimeScope(s.Runtime.Scope)
+	s.EnvironmentVariables.SetNetworkScope(s.Runtime.Scope)
 
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
@@ -158,11 +159,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Add to environment variables
 	// Filter configurations for the scope
+
 	confs := configurations.FilterConfigurations(req.DependenciesConfigurations, s.Runtime.Scope)
 	err := s.EnvironmentVariables.AddConfigurations(confs...)
 
 	// Networking
-	net, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.restEndpoint)
+	net, err := s.Runtime.NetworkInstance(ctx, s.NetworkMappings, s.restEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -196,7 +198,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitError(err)
 	}
 
-	s.Wool.Focus("generate Open API done")
+	s.Wool.Debug("generate Open API done")
 
 	return s.Runtime.InitResponse()
 }
@@ -254,7 +256,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartResponse()
 	}
 
-	s.Wool.Focus("env", wool.Field("envs", s.EnvironmentVariables.All()))
+	s.Wool.Debug("env", wool.Field("envs", s.EnvironmentVariables.All()))
 
 	runningContext := s.Wool.Inject(context.Background())
 
@@ -285,7 +287,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
 	}
 
-	s.Wool.Focus("start done")
+	s.Wool.Debug("start done")
 	return s.Runtime.StartResponse()
 }
 

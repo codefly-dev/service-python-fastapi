@@ -65,14 +65,6 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 
 	s.Builder.LogInitRequest(req)
 
-	s.Base.NetworkMappings = req.ProposedNetworkMappings
-
-	s.EnvironmentVariables.SetEnvironment(s.Environment)
-	err := s.EnvironmentVariables.AddConfigurations(s.Configuration)
-	if err != nil {
-		return s.Builder.InitError(err)
-	}
-
 	//hash, err := requirements.Hash(ctx)
 	//if err != nil {
 	//	return s.Builder.InitError(err)
@@ -157,8 +149,19 @@ type Deployment struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Builder.LogDeployRequest(req)
+	s.Builder.LogDeployRequest(req, s.Wool.Debug)
 
+	s.EnvironmentVariables.SetRunning(true)
+
+	err := s.EnvironmentVariables.AddConfigurations(req.Configuration)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	err = s.EnvironmentVariables.AddConfigurations(req.DependenciesConfigurations...)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
 	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
 	if err != nil {
 		return s.Builder.DeployError(err)
