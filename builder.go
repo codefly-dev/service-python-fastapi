@@ -4,10 +4,11 @@ import (
 	"context"
 	"embed"
 	"github.com/codefly-dev/core/configurations/standards"
-	v0 "github.com/codefly-dev/core/generated/go/base/v0"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/wool"
+	"path"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -104,8 +105,12 @@ type DockerTemplating struct {
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
+	dockerRequest, err := s.Builder.DockerBuildRequest(ctx, req)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "can only do docker build request")
+	}
 
-	image := s.DockerImage(req.BuildContext)
+	image := s.DockerImage(dockerRequest)
 
 	s.Wool.Debug("building docker image", wool.Field("image", image.FullName()))
 	ctx = s.WoolAgent.Inject(ctx)
@@ -116,7 +121,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		RuntimePackages: s.Settings.RuntimePackages,
 	}
 
-	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
+	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot remove dockerfile")
 	}
@@ -144,7 +149,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 }
 
 type Deployment struct {
-	Replicas int
+	LoadBalancedHost string
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
@@ -178,12 +183,37 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		SecretMap: secrets,
 	}
 
-	err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
+	var k *builderv0.KubernetesDeployment
+	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+		return s.Builder.DeployError(err)
+	}
+	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
-
+	if req.Deployment.LoadBalancer {
+		inst, err := configurations.FindNetworkInstance(ctx, req.NetworkMappings, s.restEndpoint, basev0.NetworkScope_Public)
+		if err != nil {
+			return s.Builder.DeployError(err)
+		}
+		params.Parameters = Deployment{LoadBalancedHost: inst.Host}
+		base := s.Builder.CreateKubernetesBase(req.Environment, k.Namespace, k.BuildContext)
+		err = s.deployKustomizeVirtualService(ctx, k, base, params)
+		if err != nil {
+			return s.Builder.DeployError(err)
+		}
+	}
 	return s.Builder.DeployResponse()
+}
+
+func (s *Builder) deployKustomizeVirtualService(ctx context.Context, k *builderv0.KubernetesDeployment, base *services.DeploymentBase, params any) error {
+	destination := path.Join(k.Destination, "applications", s.Base.Service.Application, "services", s.Base.Service.Name)
+	wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
+	err := s.Templates(ctx, wrapper, services.WithDeployment(deploymentFS, "kustomize/overlays/virtualservice").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 const Watch = "with-hot-reload"
@@ -241,7 +271,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
-	s.Endpoints = []*v0.Endpoint{s.restEndpoint}
+	s.Endpoints = []*basev0.Endpoint{s.restEndpoint}
 	return nil
 }
 
