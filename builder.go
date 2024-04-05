@@ -159,7 +159,13 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.EnvironmentVariables.SetRunning(true)
 
-	err := s.EnvironmentVariables.AddConfigurations(req.Configuration)
+	var k *builderv0.KubernetesDeployment
+	var err error
+	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	err = s.EnvironmentVariables.AddConfigurations(req.Configuration)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -183,10 +189,6 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		SecretMap: secrets,
 	}
 
-	var k *builderv0.KubernetesDeployment
-	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
-		return s.Builder.DeployError(err)
-	}
 	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)

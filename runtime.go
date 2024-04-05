@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/hashicorp/go-multierror"
 	"path"
@@ -23,6 +24,7 @@ import (
 
 type Runtime struct {
 	*Service
+	Environment *basev0.Environment
 
 	// internal
 	runner       runners.Runner
@@ -297,31 +299,31 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
-	var combined error
+	var agg error
 	s.Wool.Debug("stopping service")
-	for _, runner := range s.otherRunners {
-		err := runner.Stop()
+	if s.runner != nil {
+		err := s.runner.Stop()
 		if err != nil {
-			s.Wool.Warn("cannot kill runner", wool.ErrField(err))
-			combined = multierror.Append(combined, err)
-		}
-
-	}
-	err := s.runner.Stop()
-	if err != nil {
-		if err != nil {
-			s.Wool.Warn("cannot kill runner", wool.ErrField(err))
-			combined = multierror.Append(combined, err)
+			agg = multierror.Append(agg, err)
 		}
 	}
-
-	err = s.Base.Stop()
-	if err != nil {
-		s.Wool.Warn("cannot kill runner", wool.ErrField(err))
-		combined = multierror.Append(combined, err)
+	for _, run := range s.otherRunners {
+		err := run.Stop()
+		if err != nil {
+			agg = multierror.Append(agg, err)
+			s.Wool.Warn("error stopping runner", wool.ErrField(err))
+		}
 	}
-	if combined != nil {
-		return s.Runtime.StopError(combined)
+	s.Wool.Debug("runner stopped")
+	err := s.Base.Stop()
+	if err != nil {
+		if err != nil {
+			agg = multierror.Append(agg, err)
+			s.Wool.Warn("error stopping runner", wool.ErrField(err))
+		}
+	}
+	if agg != nil {
+		return s.Base.Runtime.StopError(agg)
 	}
 	return s.Runtime.StopResponse()
 }
