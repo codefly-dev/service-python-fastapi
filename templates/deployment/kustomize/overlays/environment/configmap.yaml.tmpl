@@ -4,6 +4,6 @@ metadata:
   name: config-{{ .Service.Name.DNSCase }}
   namespace: "{{ .Namespace }}"
 data:
-{{- range $key, $value := .Parameters.ConfigMap }}
+{{- range $key, $value := .Deployment.ConfigMap }}
   {{$key}}: "{{$value}}"
 {{- end }}

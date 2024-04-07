@@ -3,19 +3,17 @@ package main
 import (
 	"context"
 	"embed"
-	"github.com/codefly-dev/core/configurations/standards"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
-	"github.com/codefly-dev/core/shared"
-	"github.com/codefly-dev/core/templates"
-	"github.com/codefly-dev/core/wool"
-	"path"
-
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/configurations"
+	"github.com/codefly-dev/core/configurations/standards"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
+	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/templates"
+	"github.com/codefly-dev/core/wool"
 )
 
 type Builder struct {
@@ -40,6 +38,11 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	s.sourceLocation = s.Local("src")
 
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
+	if err != nil {
+		return s.Builder.LoadError(err)
+	}
+
+	s.restEndpoint, err = configurations.FindRestEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -144,12 +147,18 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot build image")
 	}
+
 	s.Builder.WithDockerImages(image)
-	return &builderv0.BuildResponse{}, nil
+	return s.Builder.BuildResponse()
 }
 
-type Deployment struct {
-	LoadBalancedHost string
+type LoadBalancer struct {
+	Enabled bool
+	Host    string
+}
+
+type Parameters struct {
+	LoadBalancer
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
@@ -174,6 +183,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
+
 	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
 	if err != nil {
 		return s.Builder.DeployError(err)
@@ -185,37 +195,22 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 
 	params := services.DeploymentParameters{
-		ConfigMap: cm,
-		SecretMap: secrets,
-	}
-
-	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
-	if err != nil {
-		return s.Builder.DeployError(err)
+		ConfigMap:  cm,
+		SecretMap:  secrets,
+		Parameters: Parameters{LoadBalancer{}},
 	}
 	if req.Deployment.LoadBalancer {
 		inst, err := configurations.FindNetworkInstance(ctx, req.NetworkMappings, s.restEndpoint, basev0.NetworkScope_Public)
 		if err != nil {
 			return s.Builder.DeployError(err)
 		}
-		params.Parameters = Deployment{LoadBalancedHost: inst.Host}
-		base := s.Builder.CreateKubernetesBase(req.Environment, k.Namespace, k.BuildContext)
-		err = s.deployKustomizeVirtualService(ctx, k, base, params)
-		if err != nil {
-			return s.Builder.DeployError(err)
-		}
-	}
-	return s.Builder.DeployResponse()
-}
 
-func (s *Builder) deployKustomizeVirtualService(ctx context.Context, k *builderv0.KubernetesDeployment, base *services.DeploymentBase, params any) error {
-	destination := path.Join(k.Destination, "applications", s.Base.Service.Application, "services", s.Base.Service.Name)
-	wrapper := &services.DeploymentWrapper{DeploymentBase: base, Parameters: params}
-	err := s.Templates(ctx, wrapper, services.WithDeployment(deploymentFS, "kustomize/overlays/virtualservice").WithDestination(path.Join(destination, "overlays", base.Environment.Name)))
-	if err != nil {
-		return err
+		params.Parameters = Parameters{LoadBalancer{Host: inst.Host, Enabled: true}}
 	}
-	return nil
+
+	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
+
+	return s.Builder.DeployResponse()
 }
 
 const Watch = "with-hot-reload"

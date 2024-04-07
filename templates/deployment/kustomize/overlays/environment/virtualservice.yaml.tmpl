@@ -5,7 +5,7 @@ metadata:
   namespace: {{.Namespace}}
 spec:
   hosts:
-    - "{{.Parameters.Parameters.LoadBalancerHost}}"
+    - "{{.Deployment.Parameters.LoadBalancer.Host}}"
   gateways:
     - istio-system/gateway
   http:
