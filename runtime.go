@@ -87,9 +87,9 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	s.Runtime.Scope = req.Scope
-
 	s.sourceLocation = s.Local("src")
+
+	s.Runtime.Scope = req.Scope
 
 	s.LogForward("running in %s mode", s.Runtime.Scope)
 
@@ -148,7 +148,6 @@ func (s *Runtime) nativeInitRunner(ctx context.Context) (runners.Runner, error) 
 	runner.WithEnvironmentVariables("POETRY_VIRTUALENVS_IN_PROJECT=1")
 	runner.WithOut(s.Wool)
 	return runner, nil
-
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -182,10 +181,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if s.Runtime.Native() {
 		runner, err = s.nativeInitRunner(ctx)
 	}
+	if runner == nil {
+		return s.Runtime.InitError(s.Wool.NewError("no runner found"))
+	}
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 	s.otherRunners = append(s.otherRunners, runner)
+
 	err = runner.Run(ctx)
 	if err != nil {
 		s.Wool.Error("cannot run poetry install", wool.ErrField(err))

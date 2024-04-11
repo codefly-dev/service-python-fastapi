@@ -201,7 +201,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Parameters: Parameters{LoadBalancer{}},
 	}
 	if req.Deployment.LoadBalancer {
-		inst, err := configurations.FindNetworkInstance(ctx, req.NetworkMappings, s.restEndpoint, basev0.NetworkScope_Public)
+		inst, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.restEndpoint, basev0.NetworkScope_Public)
 		if err != nil {
 			return s.Builder.DeployError(err)
 		}
