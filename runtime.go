@@ -70,6 +70,10 @@ func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
 		generator = runner
 	}
 	s.otherRunners = append(s.otherRunners, generator)
+	if generator == nil {
+		return s.Wool.NewError("no runner found")
+
+	}
 	err := generator.Run(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot generate open api")
@@ -135,7 +139,7 @@ func (s *Runtime) dockerInitRunner(ctx context.Context) (runners.Runner, error) 
 	runner.WithMount(s.DockerEnvPath(), "/venv")
 	runner.WithWorkDir("/app")
 	runner.WithCommand("poetry", "install", "--no-root")
-	runner.WithOut(s.Wool)
+	runner.WithOut(s.Logger)
 	return runner, nil
 }
 
@@ -145,8 +149,11 @@ func (s *Runtime) nativeInitRunner(ctx context.Context) (runners.Runner, error) 
 		return nil, err
 	}
 	runner.WithDir(s.sourceLocation)
-	runner.WithEnvironmentVariables("POETRY_VIRTUALENVS_IN_PROJECT=1")
-	runner.WithOut(s.Wool)
+	runner.WithEnvironmentVariables(configurations.Env("POETRY_VIRTUALENVS_IN_PROJECT", 1))
+	err = runner.WithOut(s.Logger)
+	if err != nil {
+		return nil, err
+	}
 	return runner, nil
 }
 
@@ -158,9 +165,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	// Add to environment variables
 	// Filter configurations for the scope
-
 	confs := configurations.FilterConfigurations(req.DependenciesConfigurations, s.Runtime.Scope)
 	err := s.EnvironmentVariables.AddConfigurations(confs...)
 
@@ -228,8 +233,8 @@ func (s *Runtime) dockerStartRunner(ctx context.Context) (runners.Runner, error)
 	runner.WithMount(s.Local("openapi"), "/openapi")
 
 	runner.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
-	runner.WithEnvironmentVariables("PYTHONUNBUFFERED=0")
-	runner.WithOut(s.Wool)
+	runner.WithEnvironmentVariables(configurations.Env("PYTHONUNBUFFERED", 0))
+	runner.WithOut(s.Logger)
 	runner.WithCommand("poetry", "run", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
 	return runner, nil
 }
@@ -242,9 +247,12 @@ func (s *Runtime) nativeStartRunner(ctx context.Context) (runners.Runner, error)
 	runner.WithDir(s.sourceLocation)
 	runner.WithDebug(s.Settings.Debug)
 	runner.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
-	runner.WithEnvironmentVariables("POETRY_VIRTUALENVS_IN_PROJECT=1")
-	runner.WithEnvironmentVariables("PYTHONUNBUFFERED=0")
-	runner.WithOut(s.Wool)
+	runner.WithEnvironmentVariables(configurations.Env("POETRY_VIRTUALENVS_IN_PROJECT", 1))
+	runner.WithEnvironmentVariables(configurations.Env("PYTHONUNBUFFERED", 0))
+	err = runner.WithOut(s.Logger)
+	if err != nil {
+		return nil, err
+	}
 	return runner, nil
 }
 

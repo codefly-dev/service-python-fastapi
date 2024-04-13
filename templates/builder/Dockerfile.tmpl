@@ -49,4 +49,5 @@ ENV {{.Key}} {{.Value}}
 {{end}}
 
 WORKDIR /app/src
+# Standards port for REST is 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

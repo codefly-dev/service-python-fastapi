@@ -117,7 +117,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	image := s.DockerImage(dockerRequest)
 
 	s.Wool.Debug("building docker image", wool.Field("image", image.FullName()))
-	ctx = s.WoolAgent.Inject(ctx)
+	ctx = s.Wool.Inject(ctx)
 
 	docker := DockerTemplating{
 		Builder:         runtimeImage.FullName(),
@@ -206,7 +206,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			return s.Builder.DeployError(err)
 		}
 
-		params.Parameters = Parameters{LoadBalancer{Host: inst.Host, Enabled: true}}
+		params.Parameters = Parameters{LoadBalancer{Host: inst.Hostname, Enabled: true}}
 	}
 
 	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
@@ -231,7 +231,7 @@ type CreateConfiguration struct {
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
-	ctx = s.WoolAgent.Inject(ctx)
+	ctx = s.Wool.Inject(ctx)
 
 	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
 	if err != nil {
@@ -264,7 +264,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.json")
 	var err error
 	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
-	rest, err := configurations.LoadRestAPI(ctx, openapiFile)
+	rest, err := configurations.LoadRestAPI(ctx, shared.Pointer(openapiFile))
 	s.restEndpoint, err = configurations.NewAPI(ctx, endpoint, configurations.ToRestAPI(rest))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
