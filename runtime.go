@@ -9,7 +9,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/codefly-dev/core/runners"
+	runners "github.com/codefly-dev/core/runners/base"
 
 	"github.com/codefly-dev/core/configurations"
 
@@ -27,8 +27,8 @@ type Runtime struct {
 	Environment *basev0.Environment
 
 	// internal
-	runner       runners.Runner
-	otherRunners []runners.Runner
+	runnerEnvironment runners.RunnerEnvironment
+	runner            runners.Proc
 
 	address string
 	port    uint16
@@ -41,45 +41,15 @@ func NewRuntime() *Runtime {
 }
 
 func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
-	var generator runners.Runner
-	if s.Runtime.Container() {
-		runner, err := runners.NewDocker(ctx, runtimeImage)
-		if err != nil {
-			return err
-		}
-		err = runner.Init(ctx)
-		if err != nil {
-			return err
-		}
-		runner.WithMount(s.sourceLocation, "/app")
-		runner.WithMount(s.Local("openapi"), "/openapi")
-		runner.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
-		runner.WithMount(s.DockerEnvPath(), "/venv")
-		runner.WithWorkDir("/app")
-		runner.WithOut(s.Wool)
-		runner.WithCommand("poetry", "run", "python", "openapi.py")
-		generator = runner
-	}
-	if s.Runtime.Native() {
-		runner, err := runners.NewProcess(ctx, "poetry", "run", "python", "openapi.py")
-		if err != nil {
-			return err
-		}
-		runner.WithDir(s.sourceLocation)
-		runner.WithOut(s.Wool)
-		generator = runner
-	}
-	s.otherRunners = append(s.otherRunners, generator)
-	if generator == nil {
-		return s.Wool.NewError("no runner found")
-
-	}
-	err := generator.Run(ctx)
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "python", "openapi.py")
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot generate open api")
+		return s.Wool.Wrapf(err, "cannot create openapi runner")
+	}
+	err = proc.Run(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot run openapi")
 	}
 	return nil
-
 }
 
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
@@ -116,45 +86,50 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 }
 
 func (s *Runtime) DockerEnvPath() string {
-	return path.Join(s.sourceLocation, ".venv.container")
+	return path.Join(s.sourceLocation, "container/.venv")
 }
 
-func (s *Runtime) dockerInitRunner(ctx context.Context) (runners.Runner, error) {
-	runner, err := runners.NewDocker(ctx, runtimeImage)
-	if err != nil {
-		return nil, err
+func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
+	s.Wool.Debug("creating runner environment in", wool.DirField(s.sourceLocation))
+	if s.Runtime.Container() {
+		s.Wool.Debug("running in container")
+
+		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.sourceLocation, s.UniqueWithProject())
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create docker runner")
+		}
+		dockerEnv.WithPause()
+		err = dockerEnv.Clear(ctx)
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot clear the docker environment")
+		}
+		// Need to bind the ports
+		instance, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.restEndpoint, s.Runtime.Scope)
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot find network instance")
+		}
+		dockerEnv.WithPort(ctx, uint16(instance.Port))
+		dockerEnv.WithMount(s.Local("openapi"), "/openapi")
+		dockerEnv.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
+		envPath := s.DockerEnvPath()
+		_, err = shared.CheckDirectoryOrCreate(ctx, envPath)
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create docker venv environment")
+		}
+		dockerEnv.WithMount(s.DockerEnvPath(), "/venv")
+		s.runnerEnvironment = dockerEnv
+	} else {
+		s.Wool.Debug("running locally")
+		localEnv, err := runners.NewLocalEnvironment(ctx, s.sourceLocation)
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create local runner")
+		}
+		s.runnerEnvironment = localEnv
 	}
 
-	_, err = shared.CheckDirectoryOrCreate(ctx, s.DockerEnvPath())
-	if err != nil {
-		return nil, err
-	}
-
-	err = runner.Init(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	runner.WithMount(s.sourceLocation, "/app")
-	runner.WithMount(s.DockerEnvPath(), "/venv")
-	runner.WithWorkDir("/app")
-	runner.WithCommand("poetry", "install", "--no-root")
-	runner.WithOut(s.Logger)
-	return runner, nil
-}
-
-func (s *Runtime) nativeInitRunner(ctx context.Context) (runners.Runner, error) {
-	runner, err := runners.NewProcess(ctx, "poetry", "install", "--no-root")
-	if err != nil {
-		return nil, err
-	}
-	runner.WithDir(s.sourceLocation)
-	runner.WithEnvironmentVariables(configurations.Env("POETRY_VIRTUALENVS_IN_PROJECT", 1))
-	err = runner.WithOut(s.Logger)
-	if err != nil {
-		return nil, err
-	}
-	return runner, nil
+	s.runnerEnvironment.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
+	s.runnerEnvironment.WithEnvironmentVariables(configurations.Env("PYTHONUNBUFFERED", 1))
+	return nil
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -179,27 +154,23 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.port = uint16(net.Port)
 
 	s.LogForward("installing poetry dependencies")
-	var runner runners.Runner
-	if s.Runtime.Container() {
-		runner, err = s.dockerInitRunner(ctx)
-	}
-	if s.Runtime.Native() {
-		runner, err = s.nativeInitRunner(ctx)
-	}
-	if runner == nil {
-		return s.Runtime.InitError(s.Wool.NewError("no runner found"))
-	}
+
+	err = s.CreateRunnerEnvironment(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	s.otherRunners = append(s.otherRunners, runner)
-
-	err = runner.Run(ctx)
+	// poetry install
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "install", "--no-root")
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	err = proc.Run(ctx)
 	if err != nil {
 		s.Wool.Error("cannot run poetry install", wool.ErrField(err))
 		return s.Runtime.InitError(err)
 	}
 	s.Ready()
+
 	s.Wool.Debug("successful init of runner")
 
 	s.LogForward("generating Open API document")
@@ -213,78 +184,24 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	return s.Runtime.InitResponse()
 }
 
-func (s *Runtime) dockerStartRunner(ctx context.Context) (runners.Runner, error) {
-	// runner for the write endpoint
-	runner, err := runners.NewDocker(ctx, runtimeImage)
-	if err != nil {
-		return nil, err
-	}
-
-	err = runner.Init(ctx)
-	if err != nil {
-		return nil, err
-	}
-	runner.WithPort(runners.DockerPortMapping{Container: s.port, Host: s.port})
-	runner.WithName(s.Global())
-
-	runner.WithMount(s.sourceLocation, "/app")
-	runner.WithMount(s.DockerEnvPath(), "/venv")
-	runner.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
-	runner.WithMount(s.Local("openapi"), "/openapi")
-
-	runner.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
-	runner.WithEnvironmentVariables(configurations.Env("PYTHONUNBUFFERED", 0))
-	runner.WithOut(s.Logger)
-	runner.WithCommand("poetry", "run", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
-	return runner, nil
-}
-
-func (s *Runtime) nativeStartRunner(ctx context.Context) (runners.Runner, error) {
-	runner, err := runners.NewProcess(ctx, "poetry", "run", "uvicorn", "main:app", "--reload", "--host", "localhost", "--port", fmt.Sprintf("%d", s.port))
-	if err != nil {
-		return nil, err
-	}
-	runner.WithDir(s.sourceLocation)
-	runner.WithDebug(s.Settings.Debug)
-	runner.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
-	runner.WithEnvironmentVariables(configurations.Env("POETRY_VIRTUALENVS_IN_PROJECT", 1))
-	runner.WithEnvironmentVariables(configurations.Env("PYTHONUNBUFFERED", 0))
-	err = runner.WithOut(s.Logger)
-	if err != nil {
-		return nil, err
-	}
-	return runner, nil
-}
-
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
 	s.Runtime.LogStartRequest(req)
 
-	s.EnvironmentVariables.SetRunning(true)
-
 	if s.runner != nil && s.Settings.Watch {
 		// Use the hot-reloading
 		return s.Runtime.StartResponse()
 	}
 
-	s.Wool.Debug("env", wool.Field("envs", s.EnvironmentVariables.All()))
-
-	runningContext := s.Wool.Inject(context.Background())
-
-	var runner runners.Runner
-	var err error
-	if s.Runtime.Container() {
-		runner, err = s.dockerStartRunner(ctx)
-	}
-	if s.Runtime.Native() {
-		runner, err = s.nativeStartRunner(ctx)
-	}
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
-	s.runner = runner
+	proc.WithOutput(s.Logger)
+	proc.WithEnvironmentVariables(configurations.Env(configurations.RunningPrefix, "true"))
+	s.runner = proc
 
 	if s.Settings.Watch {
 		conf := services.NewWatchConfiguration(requirements)
@@ -295,6 +212,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	s.LogForward("starting poetry app")
+	runningContext := s.Wool.Inject(context.Background())
 	err = s.runner.Start(runningContext)
 	if err != nil {
 		return s.Runtime.StartError(err, wool.Field("in", "runner"))
@@ -313,25 +231,16 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	var agg error
 	s.Wool.Debug("stopping service")
 	if s.runner != nil {
-		err := s.runner.Stop()
+		err := s.runner.Stop(ctx)
 		if err != nil {
 			agg = multierror.Append(agg, err)
-		}
-	}
-	for _, run := range s.otherRunners {
-		err := run.Stop()
-		if err != nil {
-			agg = multierror.Append(agg, err)
-			s.Wool.Warn("error stopping runner", wool.ErrField(err))
 		}
 	}
 	s.Wool.Debug("runner stopped")
 	err := s.Base.Stop()
 	if err != nil {
-		if err != nil {
-			agg = multierror.Append(agg, err)
-			s.Wool.Warn("error stopping runner", wool.ErrField(err))
-		}
+		agg = multierror.Append(agg, err)
+		s.Wool.Warn("error stopping runner", wool.ErrField(err))
 	}
 	if agg != nil {
 		return s.Base.Runtime.StopError(agg)
