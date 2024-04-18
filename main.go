@@ -23,8 +23,8 @@ import (
 var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
-	builders.NewDependency("service.codefly.yaml"),
 	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")),
+	builders.NewDependency("service.codefly.yaml"),
 )
 
 var runtimeImage = &configurations.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.1"}
@@ -34,6 +34,7 @@ type Settings struct {
 
 	Watch bool `yaml:"watch"`
 
+	PublicEndpoint  bool     `yaml:"publicEndpoint"`
 	RuntimePackages []string `yaml:"runtime-packages"`
 }
 

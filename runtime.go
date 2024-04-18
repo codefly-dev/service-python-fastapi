@@ -86,7 +86,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 }
 
 func (s *Runtime) DockerEnvPath() string {
-	return path.Join(s.sourceLocation, "container/.venv")
+	return path.Join(s.Location, "container/.venv")
 }
 
 func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
@@ -159,6 +159,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+
+	err = s.runnerEnvironment.Init(ctx)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+
 	// poetry install
 	proc, err := s.runnerEnvironment.NewProcess("poetry", "install", "--no-root")
 	if err != nil {

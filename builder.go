@@ -215,9 +215,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 }
 
 const Watch = "with-hot-reload"
+const PublicEndpoint = "public-endpoint"
 
 func createCommunicate() *communicate.Sequence {
 	return communicate.NewSequence(
+		communicate.NewConfirm(&agentv0.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
 		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
 	)
 }
@@ -247,12 +249,16 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		Information: s.Information,
 		Envs:        []string{},
 	}
+	withPublicEndpoint, err := session.Confirm(PublicEndpoint)
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
 	err = s.Templates(ctx, create, services.WithFactory(factoryFS))
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
 	}
 
-	err = s.CreateEndpoints(ctx)
+	err = s.CreateEndpoints(ctx, withPublicEndpoint)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
@@ -260,10 +266,13 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	return s.Base.Builder.CreateResponse(ctx, s.Settings)
 }
 
-func (s *Builder) CreateEndpoints(ctx context.Context) error {
+func (s *Builder) CreateEndpoints(ctx context.Context, withPublicEndpoint bool) error {
 	openapiFile := s.Local("openapi/api.json")
 	var err error
 	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
+	if withPublicEndpoint {
+		endpoint.Visibility = configurations.VisibilityPublic
+	}
 	rest, err := configurations.LoadRestAPI(ctx, shared.Pointer(openapiFile))
 	s.restEndpoint, err = configurations.NewAPI(ctx, endpoint, configurations.ToRestAPI(rest))
 	if err != nil {
