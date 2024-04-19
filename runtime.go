@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/hashicorp/go-multierror"
@@ -32,6 +33,8 @@ type Runtime struct {
 
 	address string
 	port    uint16
+
+	cacheLocation string // Local
 }
 
 func NewRuntime() *Runtime {
@@ -117,12 +120,21 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 			return s.Wool.Wrapf(err, "cannot create docker venv environment")
 		}
 		dockerEnv.WithMount(s.DockerEnvPath(), "/venv")
+
+		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/container")
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create cache location")
+		}
 		s.runnerEnvironment = dockerEnv
 	} else {
 		s.Wool.Debug("running locally")
 		localEnv, err := runners.NewLocalEnvironment(ctx, s.sourceLocation)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create local runner")
+		}
+		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/local")
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create cache location")
 		}
 		s.runnerEnvironment = localEnv
 	}
@@ -153,8 +165,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.LogForward("will run on http://localhost:%d", net.Port)
 	s.port = uint16(net.Port)
 
-	s.LogForward("installing poetry dependencies")
-
 	err = s.CreateRunnerEnvironment(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -166,25 +176,44 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 
 	// poetry install
-	proc, err := s.runnerEnvironment.NewProcess("poetry", "install", "--no-root")
+	deps := builders.NewDependencies("poetry", builders.NewDependency(s.Local(s.sourceLocation, "pyproject.toml"))).WithCache(s.cacheLocation)
+	depUpdate, err := deps.Updated(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	err = proc.Run(ctx)
-	if err != nil {
-		s.Wool.Error("cannot run poetry install", wool.ErrField(err))
-		return s.Runtime.InitError(err)
+	if depUpdate {
+		s.LogForward("installing poetry dependencies")
+		proc, err := s.runnerEnvironment.NewProcess("poetry", "install", "--no-root")
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		err = proc.Run(ctx)
+		if err != nil {
+			s.Wool.Error("cannot run poetry install", wool.ErrField(err))
+			return s.Runtime.InitError(err)
+		}
+		err = deps.UpdateCache(ctx)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
 	}
 	s.Ready()
 
 	s.Wool.Debug("successful init of runner")
 
-	s.LogForward("generating Open API document")
-	err = s.GenerateOpenAPI(ctx)
+	openAPI := builders.NewDependencies("api", builders.NewDependency(s.Local(s.sourceLocation, "main.py"))).WithCache(s.cacheLocation)
+	openApiUpdate, err := openAPI.Updated(ctx)
 	if err != nil {
-		return s.Base.Runtime.InitError(err)
+		return s.Runtime.InitError(err)
 	}
-
+	if openApiUpdate {
+		s.LogForward("generating Open API document")
+		err = s.GenerateOpenAPI(ctx)
+		if err != nil {
+			return s.Base.Runtime.InitError(err)
+		}
+		err = openAPI.UpdateCache(ctx)
+	}
 	s.Wool.Debug("generate Open API done")
 
 	return s.Runtime.InitResponse()
@@ -268,9 +297,10 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
  */
 
 func (s *Runtime) EventHandler(event code.Change) error {
-	if strings.Contains(event.Path, "swagger.json") {
+	if strings.Contains(event.Path, "api.json") {
 		return nil
 	}
+	// TODO: OpenAPI changes...
 	if strings.HasSuffix(event.Path, ".py") {
 		// Dealt with the uvicorn
 		return nil
