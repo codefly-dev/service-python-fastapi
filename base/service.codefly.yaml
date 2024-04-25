@@ -8,14 +8,3 @@ plugin:
     name: python-fastapi
     version: latest
     publisher: codefly.ai
-endpoints:
-    - name: grpc
-      api: grpc
-    - name: rest
-      public: true
-      api: rest
-spec:
-    create-rest-endpoint: true
-    debug: false
-    watch: true
-    with-debug-symbols: false
