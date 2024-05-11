@@ -28,7 +28,7 @@ func NewBuilder() *Builder {
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
-	err := s.Base.Builder.Load(ctx, req.Identity, s.Settings)
+	err := s.Builder.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return nil, err
 	}
@@ -122,9 +122,8 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	ctx = s.Wool.Inject(ctx)
 
 	docker := DockerTemplating{
-		Builder:         runtimeImage.FullName(),
-		Components:      requirements.All(),
-		RuntimePackages: s.Settings.RuntimePackages,
+		Builder:    runtimeImage.FullName(),
+		Components: requirements.All(),
 	}
 
 	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -203,7 +202,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Parameters: Parameters{LoadBalancer{}},
 	}
 	if req.Deployment.LoadBalancer {
-		inst, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.RestEndpoint, resources.PublicNetworkAccess())
+		inst, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.RestEndpoint, resources.NewPublicNetworkAccess())
 		if err != nil {
 			return s.Builder.DeployError(err)
 		}
@@ -270,7 +269,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 	err := s.Templates(ctx, create, services.WithFactory(factoryFS))
 	if err != nil {
-		return s.Base.Builder.CreateError(err)
+		return s.Builder.CreateError(err)
 	}
 
 	err = s.CreateEndpoints(ctx)
@@ -278,7 +277,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
-	return s.Base.Builder.CreateResponse(ctx, s.Settings)
+	return s.Builder.CreateResponse(ctx, s.Settings)
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {

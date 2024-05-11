@@ -30,9 +30,7 @@ const PublicEndpoint = "public-endpoint"
 
 type Settings struct {
 	HotReload      bool `yaml:"hot-reload"`
-	PublicEndpoint bool `yaml:"publicEndpoint"`
-
-	RuntimePackages []string `yaml:"runtime-packages"`
+	PublicEndpoint bool `yaml:"public-endpoint"`
 }
 
 var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.6"}

@@ -1,7 +1,6 @@
 kind: service
 name: base
-application: base
-namespace: default
+module: base
 version: 0.0.0
 plugin:
     kind: runtime::service

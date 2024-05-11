@@ -26,18 +26,19 @@ import (
 
 func TestCreateToRunNative(t *testing.T) {
 	if languages.HasPythonPoetryRuntime(nil) {
-		testCreateToRun(t, resources.RuntimeContextNative())
+		testCreateToRun(t, resources.NewRuntimeContextNative())
 	}
 }
 
 func TestCreateToRunDocker(t *testing.T) {
-	testCreateToRun(t, resources.RuntimeContextContainer())
+	testCreateToRun(t, resources.NewRuntimeContextContainer())
 }
 
 func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	wool.SetGlobalLogLevel(wool.DEBUG)
 	agents.LogToConsole()
 
+	workspace := &resources.Workspace{Name: "test"}
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	defer func(path string) {
@@ -45,14 +46,18 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 		require.NoError(t, err)
 	}(tmpDir)
 
-	service := resources.Service{Name: "svc", Application: "app", Project: "project", Version: "test-me"}
+	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
+	service := resources.Service{Name: serviceName, Module: "mod", Version: "test-me"}
 	err := service.SaveAtDir(ctx, tmpDir)
 	require.NoError(t, err)
+
 	identity := &basev0.ServiceIdentity{
-		Name:        "svc",
-		Application: "app",
-		Location:    tmpDir,
+		Name:      service.Name,
+		Module:    service.Module,
+		Workspace: workspace.Name,
+		Location:  tmpDir,
 	}
+
 	builder := NewBuilder()
 
 	resp, err := builder.Load(ctx, &builderv0.LoadRequest{Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: false}})
@@ -71,15 +76,17 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	runtime := NewRuntime()
 
+	env := resources.LocalEnvironment()
+
 	_, err = runtime.Load(ctx, &runtimev0.LoadRequest{
 		Identity:     identity,
-		Environment:  shared.Must(resources.LocalEnvironment().Proto()),
+		Environment:  shared.Must(env.Proto()),
 		DisableCatch: true})
 	require.NoError(t, err)
 
 	require.Equal(t, 1, len(runtime.Endpoints))
 
-	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, runtime.Base.Service, runtime.Endpoints, nil)
+	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Base.Service, runtime.Endpoints)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(networkMappings))
 
@@ -91,7 +98,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	// Running again should work
 	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings)
 
-	_, err = runtime.Reset(ctx, &runtimev0.ResetRequest{})
+	_, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
 	require.NoError(t, err)
 
 }
@@ -104,7 +111,7 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 	require.NoError(t, err)
 	require.NotNil(t, init)
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.RestEndpoint, resources.NativeNetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.RestEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
