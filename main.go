@@ -14,29 +14,26 @@ import (
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 )
 
 // Agent version
-var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
+var agent = shared.Must(resources.LoadFromFs[resources.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
-	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")),
-	builders.NewDependency("service.codefly.yaml"),
-)
+	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")))
 
-var runtimeImage = &configurations.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.1"}
+const HotReload = "hot-reload"
+const PublicEndpoint = "public-endpoint"
 
 type Settings struct {
-	Debug bool `yaml:"debug"` // Developer only
-
-	Watch bool `yaml:"watch"`
-
-	PublicEndpoint  bool     `yaml:"publicEndpoint"`
-	RuntimePackages []string `yaml:"runtime-packages"`
+	HotReload      bool `yaml:"hot-reload"`
+	PublicEndpoint bool `yaml:"public-endpoint"`
 }
+
+var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.6"}
 
 type Service struct {
 	*services.Base
@@ -45,7 +42,7 @@ type Service struct {
 
 	// Settings
 	*Settings
-	restEndpoint *v0.Endpoint
+	RestEndpoint *v0.Endpoint
 }
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
@@ -85,9 +82,9 @@ func NewService() *Service {
 
 func main() {
 	agents.Register(
-		services.NewServiceAgent(agent.Of(configurations.ServiceAgent), NewService()),
-		services.NewBuilderAgent(agent.Of(configurations.RuntimeServiceAgent), NewBuilder()),
-		services.NewRuntimeAgent(agent.Of(configurations.BuilderServiceAgent), NewRuntime()))
+		services.NewServiceAgent(agent.Of(resources.ServiceAgent), NewService()),
+		services.NewBuilderAgent(agent.Of(resources.RuntimeServiceAgent), NewBuilder()),
+		services.NewRuntimeAgent(agent.Of(resources.BuilderServiceAgent), NewRuntime()))
 }
 
 //go:embed agent.codefly.yaml

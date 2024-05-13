@@ -17,19 +17,11 @@ RUN poetry install --without dev --no-root
 
 
 # Runner
-FROM python:3.11-slim-buster as runtime
-
-RUN apt-get update
-
-{{range .RuntimePackages}}
-RUN apt-get install -y {{.}}
-{{end}}
-
-RUN rm -rf /var/lib/apt/lists/*
+FROM {{.Builder}} as runtime
 
 WORKDIR /app
 # Set up a non-root user
-RUN adduser appuser
+RUN adduser -D appuser
 USER appuser
 
 ENV VIRTUAL_ENV=/app/.venv \
@@ -49,5 +41,6 @@ ENV {{.Key}} {{.Value}}
 {{end}}
 
 WORKDIR /app/src
+
 # Standards port for REST is 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -6,12 +6,12 @@ import (
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
-	"github.com/codefly-dev/core/configurations/standards"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/wool"
 )
@@ -28,7 +28,7 @@ func NewBuilder() *Builder {
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
-	err := s.Base.Builder.Load(ctx, req.Identity, s.Settings)
+	err := s.Builder.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return nil, err
 	}
@@ -37,18 +37,20 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	s.sourceLocation = s.Local("src")
 
-	// communication on CreateResponse
-	err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](createCommunicate()))
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
+	if req.CreationMode != nil {
+		s.Builder.CreationMode = req.CreationMode
+		s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
+		if err != nil {
+			return s.Builder.LoadError(err)
+		}
 
-	s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
-	if req.AtCreate {
+		if req.CreationMode.Communicate {
+			// communication on CreateResponse
+			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
+			if err != nil {
+				return s.Builder.LoadError(err)
+			}
+		}
 		return s.Builder.LoadResponse()
 	}
 
@@ -57,7 +59,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
-	s.restEndpoint, err = configurations.FindRestEndpoint(ctx, s.Endpoints)
+	s.RestEndpoint, err = resources.FindRestEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -120,9 +122,8 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	ctx = s.Wool.Inject(ctx)
 
 	docker := DockerTemplating{
-		Builder:         runtimeImage.FullName(),
-		Components:      requirements.All(),
-		RuntimePackages: s.Settings.RuntimePackages,
+		Builder:    runtimeImage.FullName(),
+		Components: requirements.All(),
 	}
 
 	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -201,7 +202,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Parameters: Parameters{LoadBalancer{}},
 	}
 	if req.Deployment.LoadBalancer {
-		inst, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.restEndpoint, basev0.NetworkScope_Public)
+		inst, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.RestEndpoint, resources.NewPublicNetworkAccess())
 		if err != nil {
 			return s.Builder.DeployError(err)
 		}
@@ -214,19 +215,19 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return s.Builder.DeployResponse()
 }
 
-const Watch = "with-hot-reload"
-const PublicEndpoint = "public-endpoint"
+func (s *Builder) Options() []*agentv0.Question {
+	return []*agentv0.Question{communicate.NewConfirm(&agentv0.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
+		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
+	}
+}
 
-func createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(
-		communicate.NewConfirm(&agentv0.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
-		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
-	)
+func (s *Builder) createCommunicate() *communicate.Sequence {
+	return communicate.NewSequence(s.Options()...)
 }
 
 type CreateConfiguration struct {
 	*services.Information
-	Image *configurations.DockerImage
+	Image *resources.DockerImage
 	Envs  []string
 }
 
@@ -235,50 +236,63 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 	ctx = s.Wool.Inject(ctx)
 
-	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
+	if s.Builder.CreationMode.Communicate {
+		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
 
-	s.Settings.Watch, err = session.Confirm(Watch)
-	if err != nil {
-		return s.Builder.CreateError(err)
+		s.Settings.HotReload, err = session.Confirm(HotReload)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+		s.Settings.PublicEndpoint, err = session.Confirm(PublicEndpoint)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+	} else {
+		var err error
+		s.Settings.HotReload, err = communicate.GetDefaultConfirm(s.Options(), HotReload)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+		s.Settings.PublicEndpoint, err = communicate.GetDefaultConfirm(s.Options(), PublicEndpoint)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
 	}
 
 	create := CreateConfiguration{
 		Information: s.Information,
 		Envs:        []string{},
 	}
-	withPublicEndpoint, err := session.Confirm(PublicEndpoint)
+
+	err := s.Templates(ctx, create, services.WithFactory(factoryFS))
 	if err != nil {
 		return s.Builder.CreateError(err)
 	}
-	err = s.Templates(ctx, create, services.WithFactory(factoryFS))
-	if err != nil {
-		return s.Base.Builder.CreateError(err)
-	}
 
-	err = s.CreateEndpoints(ctx, withPublicEndpoint)
+	err = s.CreateEndpoints(ctx)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
-	return s.Base.Builder.CreateResponse(ctx, s.Settings)
+	return s.Builder.CreateResponse(ctx, s.Settings)
 }
 
-func (s *Builder) CreateEndpoints(ctx context.Context, withPublicEndpoint bool) error {
+func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.json")
 	var err error
 	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
-	if withPublicEndpoint {
-		endpoint.Visibility = configurations.VisibilityPublic
+	if s.Settings.PublicEndpoint {
+		endpoint.Visibility = resources.VisibilityPublic
 	}
-	rest, err := configurations.LoadRestAPI(ctx, shared.Pointer(openapiFile))
-	s.restEndpoint, err = configurations.NewAPI(ctx, endpoint, configurations.ToRestAPI(rest))
+	rest, err := resources.LoadRestAPI(ctx, shared.Pointer(openapiFile))
+	s.RestEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToRestAPI(rest))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
-	s.Endpoints = []*basev0.Endpoint{s.restEndpoint}
+	s.Endpoints = []*basev0.Endpoint{s.RestEndpoint}
 	return nil
 }
 

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import codefly.codefly as codefly
+import codefly_sdk.codefly as codefly
 
 codefly.init()
 
@@ -21,4 +21,4 @@ if codefly.is_local():
 
 @app.get("/version")
 async def version():
-    return {"version": codefly.get_service().version}
+    return {"version": codefly.get_version()}
