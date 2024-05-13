@@ -38,36 +38,6 @@ type Runtime struct {
 	cacheLocation string // Local
 }
 
-func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
-	defer s.Wool.Catch()
-
-	ctx = s.Wool.Inject(ctx)
-
-	s.Wool.Debug("Destroyting service")
-
-	// Remove cache
-	s.Wool.Debug("removing cache")
-	err := shared.EmptyDir(ctx, s.cacheLocation)
-	if err != nil {
-		return s.Runtime.DestroyError(err)
-	}
-
-	// Get the runner environment
-	if s.Runtime.IsContainerRuntime() {
-		s.Wool.Debug("running in container")
-
-		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.sourceLocation, s.Runtime.UniqueWithWorkspace())
-		if err != nil {
-			return s.Runtime.DestroyError(err)
-		}
-		err = dockerEnv.Shutdown(ctx)
-		if err != nil {
-			return s.Runtime.DestroyError(err)
-		}
-	}
-	return s.Runtime.DestroyResponse()
-}
-
 func NewRuntime() *Runtime {
 	return &Runtime{
 		Service: NewService(),
@@ -119,8 +89,6 @@ func (s *Runtime) DockerEnvPath() string {
 func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 	s.Wool.Debug("creating runner environment in", wool.DirField(s.sourceLocation))
 	if s.Runtime.IsContainerRuntime() {
-		s.Wool.Debug("running in container")
-
 		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.sourceLocation, s.UniqueWithWorkspace())
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create docker runner")
@@ -148,7 +116,6 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		}
 		s.runnerEnvironment = dockerEnv
 	} else {
-		s.Wool.Debug("running natively")
 		localEnv, err := runners.NewNativeEnvironment(ctx, s.sourceLocation)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create local runner")
@@ -187,11 +154,16 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	s.Wool.Forwardf("running in %s mode", s.Runtime.RuntimeContext.Kind)
+	s.Wool.Forwardf("starting execution environment in %s mode", s.Runtime.RuntimeContext.Kind)
 
 	s.EnvironmentVariables.SetRuntimeContext(s.Runtime.RuntimeContext)
 
 	s.NetworkMappings = req.ProposedNetworkMappings
+
+	err = s.EnvironmentVariables.AddEndpoints(ctx, s.NetworkMappings, resources.NetworkAccessFromRuntimeContext(s.Runtime.RuntimeContext))
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
 
 	err = s.CreateRunnerEnvironment(ctx)
 	if err != nil {
@@ -318,8 +290,26 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	return s.Runtime.StartResponse()
 }
 
-func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationRequest) (*runtimev0.InformationResponse, error) {
-	return s.Runtime.InformationResponse(ctx, req)
+func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	err := s.runnerEnvironment.WithBinary("codefly")
+	if err != nil {
+		return s.Runtime.TestError(err)
+	}
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "pytest", "tests", "-v", "-s")
+	if err != nil {
+		return s.Runtime.TestError(err)
+	}
+	proc.WithOutput(s.Logger)
+
+	err = proc.Run(ctx)
+	if err != nil {
+		return s.Runtime.TestError(err)
+	}
+	return s.Runtime.TestResponse()
+
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
@@ -354,38 +344,38 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	return s.Runtime.StopResponse()
 }
 
-func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
+func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
 	defer s.Wool.Catch()
+
 	ctx = s.Wool.Inject(ctx)
 
-	err := s.SetRuntimeContext(ctx, req.RuntimeContext)
+	s.Wool.Debug("Destroyting service")
+
+	// Remove cache
+	s.Wool.Debug("removing cache")
+	err := shared.EmptyDir(ctx, s.cacheLocation)
 	if err != nil {
-		return s.Runtime.TestError(err)
+		return s.Runtime.DestroyError(err)
 	}
 
-	s.Wool.Forwardf("running in %s mode", s.Runtime.RuntimeContext.Kind)
+	// Get the runner environment
+	if s.Runtime.IsContainerRuntime() {
+		s.Wool.Debug("running in container")
 
-	s.EnvironmentVariables.SetRuntimeContext(s.Runtime.RuntimeContext)
+		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.sourceLocation, s.Runtime.UniqueWithWorkspace())
+		if err != nil {
+			return s.Runtime.DestroyError(err)
+		}
+		err = dockerEnv.Shutdown(ctx)
+		if err != nil {
+			return s.Runtime.DestroyError(err)
+		}
+	}
+	return s.Runtime.DestroyResponse()
+}
 
-	err = s.CreateRunnerEnvironment(ctx)
-	if err != nil {
-		return s.Runtime.TestError(err)
-	}
-
-	err = s.runnerEnvironment.Init(ctx)
-	if err != nil {
-		return s.Runtime.TestError(err)
-	}
-	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "pytest", "test", "-v", "-s")
-	if err != nil {
-		return s.Runtime.TestError(err)
-	}
-	err = proc.Run(ctx)
-	if err != nil {
-		return s.Runtime.TestError(err)
-	}
-	return s.Runtime.TestResponse()
-
+func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationRequest) (*runtimev0.InformationResponse, error) {
+	return s.Runtime.InformationResponse(ctx, req)
 }
 
 func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {

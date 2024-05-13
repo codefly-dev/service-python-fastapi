@@ -40,19 +40,22 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	workspace := &resources.Workspace{Name: "test"}
 	ctx := context.Background()
-	tmpDir := t.TempDir()
+	tmpDir, err := os.MkdirTemp("testdata", runtimeContext.Kind)
+	tmpDir = shared.MustSolvePath(tmpDir)
+	require.NoError(t, err)
 	defer func(path string) {
-		err := os.RemoveAll(path)
+		err = os.RemoveAll(tmpDir)
 		require.NoError(t, err)
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
-	service := resources.Service{Name: serviceName, Module: "mod", Version: "test-me"}
-	err := service.SaveAtDir(ctx, tmpDir)
+	service := resources.Service{Name: serviceName, Module: "mod", Version: "0.0.0"}
+	err = service.SaveAtDir(ctx, tmpDir)
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
 		Name:      service.Name,
+		Version:   service.Version,
 		Module:    service.Module,
 		Workspace: workspace.Name,
 		Location:  tmpDir,
@@ -98,6 +101,11 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	// Running again should work
 	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings)
 
+	// Test
+	test, err := runtime.Test(ctx, &runtimev0.TestRequest{RuntimeContext: runtimeContext})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.TestStatus_SUCCESS, test.Status.State)
+
 	_, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
 	require.NoError(t, err)
 
@@ -128,7 +136,6 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 
 		// HTTP
 		response, err := client.Get(fmt.Sprintf("%s/version", instance.Address))
-		// Check that we should have JSON Version: 0.0.0
 		if err != nil {
 			tries++
 			continue
@@ -145,7 +152,7 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 
 		version, ok := data["version"].(string)
 		require.True(t, ok)
-		require.Equal(t, "test-me", version)
+		require.Equal(t, identity.Version, version)
 		break
 	}
 }
