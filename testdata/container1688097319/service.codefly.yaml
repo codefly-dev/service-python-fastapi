@@ -1,0 +1,10 @@
+name: svc-1715793834048
+version: 0.0.0
+module: mod
+agent: null
+endpoints:
+    - name: rest
+      visibility: public
+spec:
+    hot-reload: true
+    public-endpoint: true
