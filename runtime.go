@@ -165,11 +165,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	err = s.CreateRunnerEnvironment(ctx)
-	if err != nil {
-		return s.Runtime.InitError(err)
+	if s.runnerEnvironment == nil {
+		err = s.CreateRunnerEnvironment(ctx)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
 	}
-
 	err = s.runnerEnvironment.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)

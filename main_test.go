@@ -79,6 +79,8 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	runtime := NewRuntime()
 
+	defer runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+
 	env := resources.LocalEnvironment()
 
 	_, err = runtime.Load(ctx, &runtimev0.LoadRequest{
@@ -93,6 +95,10 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(networkMappings))
 
+	restRoutes, err := resources.ExtractRestRoutes(ctx, networkMappings, resources.NewPublicNetworkAccess())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(restRoutes))
+
 	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings)
 
 	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
@@ -105,9 +111,6 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	test, err := runtime.Test(ctx, &runtimev0.TestRequest{RuntimeContext: runtimeContext})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.TestStatus_SUCCESS, test.Status.State)
-
-	_, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
-	require.NoError(t, err)
 
 }
 

@@ -11,5 +11,5 @@ if __name__ == "__main__":
     )
     app.openapi_schema = openapi_schema
     openapi = app.openapi()
-    with open("../openapi/api.json", "w") as f:
+    with open("../openapi/api.swagger.json", "w") as f:
         f.write(json.dumps(openapi))
