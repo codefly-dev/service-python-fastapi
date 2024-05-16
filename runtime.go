@@ -305,7 +305,10 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 	}
 	proc.WithOutput(s.Logger)
 
-	err = proc.Run(ctx)
+	s.Infof("testing poetry app")
+	testingContext := s.Wool.Inject(context.Background())
+
+	err = proc.Run(testingContext)
 	if err != nil {
 		return s.Runtime.TestError(err)
 	}

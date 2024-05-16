@@ -78,7 +78,9 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	runtime := NewRuntime()
 
-	defer runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	defer func() {
+		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	}()
 
 	env := resources.LocalEnvironment()
 
