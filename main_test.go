@@ -44,7 +44,8 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	tmpDir = shared.MustSolvePath(tmpDir)
 	require.NoError(t, err)
 	defer func(path string) {
-		_ = os.RemoveAll(tmpDir)
+		err = os.RemoveAll(tmpDir)
+		require.NoError(t, err)
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
@@ -79,7 +80,8 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	runtime := NewRuntime()
 
 	defer func() {
-		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		_, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		require.NoError(t, err)
 	}()
 
 	env := resources.LocalEnvironment()
