@@ -20,6 +20,9 @@ jobs:
       - name: test
         run: go test -v ./...
 
+      - name: cleanup
+        run: rm -r testdata/*
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v3
         with:

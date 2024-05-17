@@ -16,9 +16,3 @@ builds:
       - linux
     goarch:
       - amd64
-
-
-# Optional: Clean up test-specific directories before running GoReleaser
-before:
-  hooks:
-    - rm -rf testdata/**/.pytest_cache
