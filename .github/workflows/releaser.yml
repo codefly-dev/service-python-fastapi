@@ -21,7 +21,7 @@ jobs:
         run: go test -v ./...
 
       - name: cleanup
-        run: rm -r testdata/*
+        run: sudo rm -rf testdata/container*
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v3
