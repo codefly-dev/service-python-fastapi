@@ -16,3 +16,13 @@ builds:
       - linux
     goarch:
       - amd64
+
+
+archives:
+  - format: tar.gz
+    files:
+      - dist/**
+    wrap_in_directory: true
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    excludes:
+      - "**/.pytest_cache/**"
