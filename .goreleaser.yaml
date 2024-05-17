@@ -18,11 +18,7 @@ builds:
       - amd64
 
 
-archives:
-  - format: tar.gz
-    files:
-      - dist/**
-    wrap_in_directory: true
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    excludes:
-      - "**/.pytest_cache/**"
+# Optional: Clean up test-specific directories before running GoReleaser
+before:
+  hooks:
+    - rm -rf testdata/**/.pytest_cache
