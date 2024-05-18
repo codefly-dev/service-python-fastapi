@@ -35,7 +35,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	s.sourceLocation = s.Local("src")
+	s.sourceLocation = s.Local("code")
 
 	if req.CreationMode != nil {
 		s.Builder.CreationMode = req.CreationMode
@@ -168,7 +168,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.Builder.LogDeployRequest(req, s.Wool.Debug)
 
-	s.EnvironmentVariables.SetRunning(true)
+	s.EnvironmentVariables.SetRunning()
 
 	var k *builderv0.KubernetesDeployment
 	var err error
@@ -272,6 +272,15 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return s.Builder.CreateError(err)
 	}
 
+	// Create __init__.py
+	err = shared.CreateFile(ctx, s.Local("code/src/__init__.py"))
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
+	err = shared.CreateFile(ctx, s.Local("code/tests/__init__.py"))
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
 	err = s.CreateEndpoints(ctx)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")

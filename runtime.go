@@ -45,7 +45,7 @@ func NewRuntime() *Runtime {
 }
 
 func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
-	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "python", "openapi.py")
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "python", "src/openapi.py")
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}
@@ -67,7 +67,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 
 	s.Runtime.SetEnvironment(req.Environment)
 
-	s.sourceLocation = s.Local("src")
+	s.sourceLocation = s.Local("code")
 
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
@@ -231,7 +231,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Wool.Debug("successful init of runner")
 
-	openAPI := builders.NewDependencies("api", builders.NewDependency(path.Join(s.sourceLocation, "main.py"))).WithCache(s.cacheLocation)
+	openAPI := builders.NewDependencies("api", builders.NewDependency(path.Join(s.sourceLocation, "src/main.py"))).WithCache(s.cacheLocation)
 	openApiUpdate, err := openAPI.Updated(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -266,8 +266,9 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
+	proc.WithDir(s.Local("code/src"))
 	proc.WithOutput(s.Logger)
-	proc.WithEnvironmentVariables(resources.Env(resources.RunningPrefix, "true"))
+	s.EnvironmentVariables.SetRunning()
 	proc.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
 
 	s.runner = proc

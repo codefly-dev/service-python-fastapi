@@ -3,6 +3,7 @@ name = "base"
 version = "0.0.0"
 description = ""
 authors = ["Your Name <you@example.com>"]
+packages = [{include = "*", from="src"}]
 
 [tool.poetry.dependencies]
 python = "^3.10"
