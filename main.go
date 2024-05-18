@@ -23,7 +23,7 @@ import (
 var agent = shared.Must(resources.LoadFromFs[resources.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
-	builders.NewDependency("src").WithPathSelect(shared.NewSelect("*.py")))
+	builders.NewDependency("code/src").WithPathSelect(shared.NewSelect("*.py")))
 
 const HotReload = "hot-reload"
 const PublicEndpoint = "public-endpoint"
@@ -33,7 +33,7 @@ type Settings struct {
 	PublicEndpoint bool `yaml:"public-endpoint"`
 }
 
-var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.6"}
+var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.8"}
 
 type Service struct {
 	*services.Base

@@ -262,13 +262,15 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	proc, err := s.runnerEnvironment.NewProcess(
-		"poetry", "run", "uvicorn", "main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
+		"poetry", "run", "uvicorn", "src.main:app", "--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
-	proc.WithDir(s.Local("code/src"))
+
 	proc.WithOutput(s.Logger)
+
 	s.EnvironmentVariables.SetRunning()
+
 	proc.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
 
 	s.runner = proc

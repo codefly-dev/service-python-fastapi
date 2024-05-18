@@ -60,17 +60,17 @@ colorama = {version = "*", markers = "platform_system == \"Windows\""}
 
 [[package]]
 name = "codefly-cli"
-version = "0.0.4"
+version = "0.0.7"
 description = ""
 optional = false
 python-versions = "<4.0,>=3.10"
 files = [
-    {file = "codefly_cli-0.0.4-py3-none-any.whl", hash = "sha256:ad0178a472f89425d629701fd890f20628da0a2dc1958651ef4e8cd3e82f3435"},
-    {file = "codefly_cli-0.0.4.tar.gz", hash = "sha256:05dac55c7913b05ba3106af3d390ceeb5b0c526b2f308b452454d646c77b1668"},
+    {file = "codefly_cli-0.0.7-py3-none-any.whl", hash = "sha256:6e644408d7e6687cfd15e501c36bde9f746a10b1c432c2212e6c4b02322bc5b2"},
+    {file = "codefly_cli-0.0.7.tar.gz", hash = "sha256:63088d48a22e22675aaa86748fe657d81481ceb28b5a02ae164eacc2c0a9e2ef"},
 ]
 
 [package.dependencies]
-codefly-sdk = ">=0.0.12,<0.0.13"
+codefly-sdk = ">=0.0.14,<0.0.15"
 grpcio = ">=1.63.0,<2.0.0"
 grpclib = ">=0.4.7,<0.5.0"
 protobuf = ">=5.26.1,<6.0.0"
@@ -79,13 +79,13 @@ PyYAML = ">=6.0.1,<7.0.0"
 
 [[package]]
 name = "codefly-sdk"
-version = "0.0.12"
+version = "0.0.14"
 description = ""
 optional = false
 python-versions = "<4.0,>=3.10"
 files = [
-    {file = "codefly_sdk-0.0.12-py3-none-any.whl", hash = "sha256:3f5f578d0dd838d8a8ab2bf25ee9b48990fccb583059a5cb2bf86487d5935460"},
-    {file = "codefly_sdk-0.0.12.tar.gz", hash = "sha256:2ffcff6e6c586cf7c3660cd8428c0cb5d7055e2a9b059186af12aad1b51f01e8"},
+    {file = "codefly_sdk-0.0.14-py3-none-any.whl", hash = "sha256:4a8e7a6177a76ab27f675f8c57cca558b33cef96c8fcefa8348c1746e65e2406"},
+    {file = "codefly_sdk-0.0.14.tar.gz", hash = "sha256:320674972fa46c757d141d40af13970a2e6e49bb56340d2129454723d0fed2d8"},
 ]
 
 [package.dependencies]
@@ -753,4 +753,4 @@ standard = ["colorama (>=0.4)", "httptools (>=0.5.0)", "python-dotenv (>=0.13)",
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "8ac4bd95a7521c552579fde7b2b298ac80c0684cfb417a3f8107c32a464301c3"
+content-hash = "e4be9ed6426e7a0525f8f7364fc7e35f841d3a0c4aedff81513a0cdc5bcbca5f"
