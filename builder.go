@@ -273,6 +273,14 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	}
 
 	// Create __init__.py
+	_, err = shared.CheckDirectoryOrCreate(ctx, s.Local("code/src"))
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
+	_, err = shared.CheckDirectoryOrCreate(ctx, s.Local("code/tests"))
+	if err != nil {
+		return s.Builder.CreateError(err)
+	}
 	err = shared.CreateFile(ctx, s.Local("code/src/__init__.py"))
 	if err != nil {
 		return s.Builder.CreateError(err)
