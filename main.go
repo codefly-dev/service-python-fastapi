@@ -33,7 +33,7 @@ type Settings struct {
 	PublicEndpoint bool `yaml:"public-endpoint"`
 }
 
-var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.9"}
+var runtimeImage = &resources.DockerImage{Name: "codeflydev/python-poetry", Tag: "0.0.10"}
 
 type Service struct {
 	*services.Base

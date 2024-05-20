@@ -302,6 +302,7 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 	if err != nil {
 		return s.Runtime.TestError(err)
 	}
+
 	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "pytest", "tests", "-v", "-s")
 	if err != nil {
 		return s.Runtime.TestError(err)
@@ -310,6 +311,9 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 
 	s.Infof("testing poetry app")
 	testingContext := s.Wool.Inject(context.Background())
+
+	// poetry runs pytest
+	proc.WaitOn("pytest")
 
 	err = proc.Run(testingContext)
 	if err != nil {
