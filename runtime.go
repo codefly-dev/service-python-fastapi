@@ -68,6 +68,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	s.Runtime.SetEnvironment(req.Environment)
 
 	s.sourceLocation = s.Local("code")
+	s.Wool.Focus("code location", wool.DirField(s.sourceLocation))
 
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
@@ -101,13 +102,17 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 			return s.Wool.Wrapf(err, "cannot find network instance")
 		}
 		dockerEnv.WithPort(ctx, uint16(instance.Port))
+
 		dockerEnv.WithMount(s.Local("openapi"), "/openapi")
 		dockerEnv.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
 		envPath := s.DockerEnvPath()
+
 		_, err = shared.CheckDirectoryOrCreate(ctx, envPath)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create docker venv environment")
 		}
+
+		s.Wool.Focus("docker environment", wool.DirField(envPath))
 		dockerEnv.WithMount(s.DockerEnvPath(), "/venv")
 
 		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/container")
@@ -168,9 +173,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if s.runnerEnvironment == nil {
 		err = s.CreateRunnerEnvironment(ctx)
 		if err != nil {
-			return s.Runtime.InitError(err)
+			return s.Runtime.InitErrorf(err, "cannot create runner environment")
 		}
 	}
+
+	s.Wool.Focus("init for runner environment")
 	err = s.runnerEnvironment.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -192,11 +199,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	// poetry install
 	s.Wool.Debug("computing dependency")
 	deps := builders.NewDependencies("poetry", builders.NewDependency(path.Join(s.sourceLocation, "pyproject.toml"))).WithCache(s.cacheLocation)
+
 	depUpdate, err := deps.Updated(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+
 	s.Wool.Debug("computing dependency: done")
+
 	if depUpdate {
 		// if there is a .lock. update
 		hasLock, err := shared.FileExists(ctx, path.Join(s.sourceLocation, "poetry.lock"))
@@ -208,22 +218,23 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			s.Infof("installing poetry dependencies")
 			proc, err = s.runnerEnvironment.NewProcess("poetry", "install", "--no-root")
 			if err != nil {
-				return s.Runtime.InitError(err)
+				return s.Runtime.InitErrorf(err, "cannot create poetry install process")
 			}
 		} else {
 			s.Infof("updating poetry dependencies")
 			proc, err = s.runnerEnvironment.NewProcess("poetry", "update")
 			if err != nil {
-				return s.Runtime.InitError(err)
+				return s.Runtime.InitErrorf(err, "cannot create poetry update process")
 			}
 		}
 		err = proc.Run(ctx)
 		if err != nil {
-			return s.Runtime.InitError(err)
+			return s.Runtime.InitErrorf(err, "cannot run poetry install")
 		}
+
 		err = deps.UpdateCache(ctx)
 		if err != nil {
-			return s.Runtime.InitError(err)
+			return s.Runtime.InitErrorf(err, "cannot update cache")
 		}
 
 	}
@@ -241,7 +252,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.Infof("generating Open API document")
 		err = s.GenerateOpenAPI(ctx)
 		if err != nil {
-			return s.Runtime.InitError(err)
+			return s.Runtime.InitErrorf(err, "cannot generate Open API document")
 		}
 		err = openAPI.UpdateCache(ctx)
 		s.Wool.Debug("generate Open API done")
