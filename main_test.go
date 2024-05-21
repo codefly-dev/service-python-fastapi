@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"testing"
 	"time"
 
@@ -49,15 +50,16 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
 	service := resources.Service{Name: serviceName, Module: "mod", Version: "0.0.0"}
-	err = service.SaveAtDir(ctx, tmpDir)
+	err = service.SaveAtDir(ctx, path.Join(tmpDir, service.Unique()))
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
-		Name:      service.Name,
-		Version:   service.Version,
-		Module:    service.Module,
-		Workspace: workspace.Name,
-		Location:  tmpDir,
+		Name:                service.Name,
+		Version:             service.Version,
+		Module:              service.Module,
+		Workspace:           workspace.Name,
+		WorkspacePath:       tmpDir,
+		RelativeToWorkspace: service.Unique(),
 	}
 
 	builder := NewBuilder()

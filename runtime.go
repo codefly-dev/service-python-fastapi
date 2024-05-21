@@ -49,6 +49,8 @@ func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}
+	proc.WithDir(s.sourceLocation)
+
 	err = proc.Run(ctx)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot run openapi")
@@ -88,9 +90,9 @@ func (s *Runtime) DockerEnvPath() string {
 }
 
 func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
-	s.Wool.Debug("creating runner environment in", wool.DirField(s.sourceLocation))
+	s.Wool.Debug("creating runner environment in", wool.DirField(s.Identity.WorkspacePath))
 	if s.Runtime.IsContainerRuntime() {
-		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.sourceLocation, s.UniqueWithWorkspace())
+		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.Identity.WorkspacePath, s.UniqueWithWorkspace())
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create docker runner")
 		}
@@ -103,8 +105,6 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		}
 		dockerEnv.WithPort(ctx, uint16(instance.Port))
 
-		dockerEnv.WithMount(s.Local("openapi"), "/openapi")
-		dockerEnv.WithMount(s.Local("service.codefly.yaml"), "/service.codefly.yaml")
 		envPath := s.DockerEnvPath()
 
 		_, err = shared.CheckDirectoryOrCreate(ctx, envPath)
@@ -196,6 +196,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Infof("will run on %s", net.Address)
 	s.port = uint16(net.Port)
 
+	hasPyProject, err := shared.FileExists(ctx, path.Join(s.sourceLocation, "pyproject.toml"))
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	if !hasPyProject {
+		return s.Runtime.InitErrorf(nil, "no pyproject.toml found")
+	}
 	// poetry install
 	s.Wool.Debug("computing dependency")
 	deps := builders.NewDependencies("poetry", builders.NewDependency(path.Join(s.sourceLocation, "pyproject.toml"))).WithCache(s.cacheLocation)
@@ -227,6 +234,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 				return s.Runtime.InitErrorf(err, "cannot create poetry update process")
 			}
 		}
+		proc.WithDir(s.sourceLocation)
 		err = proc.Run(ctx)
 		if err != nil {
 			return s.Runtime.InitErrorf(err, "cannot run poetry install")
@@ -279,6 +287,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	proc.WithOutput(s.Logger)
+	proc.WithDir(s.sourceLocation)
 
 	s.EnvironmentVariables.SetRunning()
 
@@ -318,7 +327,9 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 	if err != nil {
 		return s.Runtime.TestError(err)
 	}
+
 	proc.WithOutput(s.Logger)
+	proc.WithDir(s.sourceLocation)
 
 	s.Infof("testing poetry app")
 	testingContext := s.Wool.Inject(context.Background())
@@ -371,7 +382,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Debug("Destroyting service")
+	s.Wool.Debug("Destroying service")
 
 	// Remove cache
 	s.Wool.Debug("removing cache")
