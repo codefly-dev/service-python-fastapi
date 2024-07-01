@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/codefly-dev/core/builders"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/languages"
 	"github.com/codefly-dev/core/shared"
 	"github.com/hashicorp/go-multierror"
@@ -18,10 +18,10 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/services"
-	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
-	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
+	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 )
 
 type Runtime struct {
@@ -132,8 +132,8 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		s.runnerEnvironment = localEnv
 	}
 
-	s.runnerEnvironment.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
-	s.runnerEnvironment.WithEnvironmentVariables(resources.Env("PYTHONUNBUFFERED", 1))
+	s.runnerEnvironment.WithEnvironmentVariables(ctx, s.EnvironmentVariables.All()...)
+	s.runnerEnvironment.WithEnvironmentVariables(ctx, resources.Env("PYTHONUNBUFFERED", 1))
 	return nil
 }
 
@@ -179,6 +179,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Wool.Focus("init for runner environment")
 	err = s.runnerEnvironment.Init(ctx)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+
+	err = s.EnvironmentVariables.AddConfigurations(req.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -291,7 +296,8 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.EnvironmentVariables.SetRunning()
 
-	proc.WithEnvironmentVariables(s.EnvironmentVariables.All()...)
+	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.All()...)
+	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.Secrets()...)
 
 	s.runner = proc
 

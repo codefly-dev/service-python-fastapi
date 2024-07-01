@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/codefly-dev/core/agents"
-	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
+	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/languages"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/shared"
@@ -18,11 +18,11 @@ import (
 	"testing"
 	"time"
 
-	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 
 	"github.com/codefly-dev/core/resources"
 
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 )
 
 func TestCreateToRunNative(t *testing.T) {

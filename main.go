@@ -4,7 +4,7 @@ import (
 	"context"
 	"embed"
 	"github.com/codefly-dev/core/builders"
-	v0 "github.com/codefly-dev/core/generated/go/base/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 
 	"google.golang.org/grpc/codes"
 
@@ -14,7 +14,7 @@ import (
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
-	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 )
