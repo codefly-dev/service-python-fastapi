@@ -12,6 +12,7 @@ spec:
     metadata:
       labels:
         app: {{ .Service.Name.DNSCase }}
+        sha: {{ .Sha }}
     spec:
       containers:
         - name: {{ .Service.Name.DNSCase }}
