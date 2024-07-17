@@ -2,9 +2,6 @@ resources:
   - ../../base
   - configmap.yaml
   - secret.yaml
-  {{ if .Deployment.Parameters.LoadBalancer.Enabled }}
-  - virtualservice.yaml
-  {{ end }}
 
 images:
   - name: image:tag

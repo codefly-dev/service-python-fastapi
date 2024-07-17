@@ -49,17 +49,19 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
-	service := resources.Service{Name: serviceName, Module: "mod", Version: "0.0.0"}
-	err = service.SaveAtDir(ctx, path.Join(tmpDir, service.Unique()))
+	service := resources.Service{Name: serviceName, Version: "0.0.0"}
+	err = service.SaveAtDir(ctx, path.Join(tmpDir, fmt.Sprintf("mod/%s", service.Name)))
+	service.WithModule("mod")
+
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
-		Module:              service.Module,
+		Module:              "mod",
 		Workspace:           workspace.Name,
 		WorkspacePath:       tmpDir,
-		RelativeToWorkspace: service.Unique(),
+		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
 	}
 
 	builder := NewBuilder()
@@ -94,7 +96,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	require.Equal(t, 1, len(runtime.Endpoints))
 
-	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Base.Service, runtime.Endpoints)
+	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Identity, runtime.Endpoints)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(networkMappings))
 
