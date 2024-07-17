@@ -70,7 +70,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	s.Runtime.SetEnvironment(req.Environment)
 
 	s.sourceLocation = s.Local("code")
-	s.Wool.Focus("code location", wool.DirField(s.sourceLocation))
+	s.Wool.Debug("code location", wool.DirField(s.sourceLocation))
 
 	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
@@ -112,7 +112,7 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 			return s.Wool.Wrapf(err, "cannot create docker venv environment")
 		}
 
-		s.Wool.Focus("docker environment", wool.DirField(envPath))
+		s.Wool.Debug("docker environment", wool.DirField(envPath))
 		dockerEnv.WithMount(s.DockerEnvPath(), "/venv")
 
 		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/container")
@@ -177,7 +177,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		}
 	}
 
-	s.Wool.Focus("init for runner environment")
+	s.Wool.Debug("init for runner environment")
 	err = s.runnerEnvironment.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)

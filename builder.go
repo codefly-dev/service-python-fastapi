@@ -300,7 +300,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.json")
 	var err error
-	endpoint := s.Base.Service.BaseEndpoint(standards.REST)
+	endpoint := s.Base.BaseEndpoint(standards.REST)
 	if s.Settings.PublicEndpoint {
 		endpoint.Visibility = resources.VisibilityPublic
 	}
