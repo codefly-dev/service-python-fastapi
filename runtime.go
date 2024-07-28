@@ -183,14 +183,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	err = s.EnvironmentVariables.AddConfigurations(req.Configuration)
+	err = s.EnvironmentVariables.AddConfigurations(ctx, req.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
 	// Filter resources for the scope
 	confs := resources.FilterConfigurations(req.DependenciesConfigurations, s.Runtime.RuntimeContext)
-	err = s.EnvironmentVariables.AddConfigurations(confs...)
+	err = s.EnvironmentVariables.AddConfigurations(ctx, confs...)
 
 	// Networking
 	net, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.RestEndpoint, resources.NewNativeNetworkAccess())
