@@ -6,9 +6,11 @@ import (
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/companions/proto"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	"github.com/codefly-dev/core/languages"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
@@ -72,6 +74,8 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 
 	s.Builder.LogInitRequest(req)
 
+	s.DependencyEndpoints = req.DependenciesEndpoints
+
 	//hash, err := requirements.Hash(ctx)
 	//if err != nil {
 	//	return s.Builder.InitError(err)
@@ -93,6 +97,28 @@ func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*bu
 
 func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
 	defer s.Wool.Catch()
+
+	ctx = s.Wool.Inject(ctx)
+
+	w := s.Wool.In("sync")
+
+	w.Debug("dependencies", wool.Field("dependencies", s.Service.Service.ServiceDependencies), wool.Field("endpoints", resources.MakeManyEndpointSummary(s.DependencyEndpoints)))
+	for _, dep := range s.Service.Service.ServiceDependencies {
+		w.Debug("dependency", wool.Field("dependency", dep))
+		ep, err := resources.FindGRPCEndpointFromService(ctx, dep, s.DependencyEndpoints)
+		if err != nil {
+			return s.Builder.SyncError(err)
+		}
+		if ep == nil {
+			w.Debug("no grpc endpoint found for dependency", wool.Field("dependency", dep))
+			continue
+		}
+		w.Info("generating grpc code", wool.Field("dependency", dep))
+		err = proto.GenerateGRPC(ctx, languages.PYTHON, s.Local("code/src/external/%s", dep.Unique()), dep.Unique(), ep)
+		if err != nil {
+			return s.Builder.SyncError(err)
+		}
+	}
 
 	return s.Builder.SyncResponse()
 }

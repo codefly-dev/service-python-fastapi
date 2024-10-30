@@ -6,6 +6,7 @@ codefly.init()
 
 app = FastAPI()
 
+# CORS will be done properly in next release
 if codefly.is_local():
     origins = [
         "*",
@@ -18,7 +19,11 @@ if codefly.is_local():
         allow_headers=["*"],
     )
 
+# Routes
+from src.admin.router import router as admin
+app.include_router(admin)
 
-@app.get("/version")
-async def version():
-    return {"version": codefly.get_version()}
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app)

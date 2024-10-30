@@ -1,4 +1,6 @@
-## Package management with `poetry`
+## Welcome to your `fastapi` project!
+
+This agent tries to follows best practices for a `fastapi` project. It is based on these [best practices](https://github.com/zhanymkanov/fastapi-best-practices)
 
 This project uses [poetry](https://python-poetry.org/) for package management.
 

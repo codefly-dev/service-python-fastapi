@@ -50,6 +50,7 @@ func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}
 	proc.WithDir(s.sourceLocation)
+	proc.WithEnvironmentVariables(ctx, resources.Env("PYTHONPATH", s.sourceLocation))
 
 	err = proc.Run(ctx)
 	if err != nil {
@@ -336,6 +337,7 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 
 	proc.WithOutput(s.Logger)
 	proc.WithDir(s.sourceLocation)
+	proc.WithEnvironmentVariables(ctx, resources.Env("PYTHONPATH", s.sourceLocation))
 
 	s.Infof("testing poetry app")
 	testingContext := s.Wool.Inject(context.Background())
