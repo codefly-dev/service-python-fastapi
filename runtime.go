@@ -44,21 +44,6 @@ func NewRuntime() *Runtime {
 	}
 }
 
-func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
-	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "python", "src/openapi.py")
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create openapi runner")
-	}
-	proc.WithDir(s.sourceLocation)
-	proc.WithEnvironmentVariables(ctx, resources.Env("PYTHONPATH", s.sourceLocation))
-
-	err = proc.Run(ctx)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot run openapi")
-	}
-	return nil
-}
-
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
@@ -439,5 +424,20 @@ func (s *Runtime) EventHandler(event code.Change) error {
 	// Now, only start
 	// TODO: handle change of swagger
 	s.Runtime.DesiredStart()
+	return nil
+}
+
+func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
+	proc, err := s.runnerEnvironment.NewProcess("poetry", "run", "python", "src/openapi.py")
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create openapi runner")
+	}
+	proc.WithDir(s.sourceLocation)
+	proc.WithEnvironmentVariables(ctx, resources.Env("PYTHONPATH", s.sourceLocation))
+
+	err = proc.Run(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot run openapi")
+	}
 	return nil
 }

@@ -7,17 +7,16 @@ codefly.init()
 app = FastAPI()
 
 # CORS will be done properly in next release
-if codefly.is_local():
-    origins = [
-        "*",
-    ]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+origins = [
+    "*",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Routes
 from src.admin.router import router as admin
