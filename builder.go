@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
@@ -19,7 +20,9 @@ import (
 )
 
 type Builder struct {
+	services.BuilderServer
 	*Service
+	answers map[string]*agentv0.Answer
 }
 
 func NewBuilder() *Builder {
@@ -44,14 +47,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 		if err != nil {
 			return s.Builder.LoadError(err)
-		}
-
-		if req.CreationMode.Communicate {
-			// communication on CreateResponse
-			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
-			if err != nil {
-				return s.Builder.LoadError(err)
-			}
 		}
 		return s.Builder.LoadResponse()
 	}
@@ -206,7 +201,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployError(err)
 	}
 
-	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
+	confs, err := s.EnvironmentVariables.Configurations()
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	cm, err := services.EnvsAsConfigMapData(confs...)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -233,10 +232,6 @@ func (s *Builder) Options() []*agentv0.Question {
 	}
 }
 
-func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(s.Options()...)
-}
-
 type CreateConfiguration struct {
 	*services.Information
 	Image *resources.DockerImage
@@ -248,27 +243,24 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 	ctx = s.Wool.Inject(ctx)
 
-	if s.Builder.CreationMode.Communicate {
-		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
+	if s.Builder.CreationMode != nil && s.Builder.CreationMode.Communicate && s.answers != nil {
+		var err error
+		s.Settings.HotReload, err = communicate.Confirm(s.answers, HotReload)
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
-
-		s.Settings.HotReload, err = session.Confirm(HotReload)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-		s.Settings.PublicEndpoint, err = session.Confirm(PublicEndpoint)
+		s.Settings.PublicEndpoint, err = communicate.Confirm(s.answers, PublicEndpoint)
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
 	} else {
 		var err error
-		s.Settings.HotReload, err = communicate.GetDefaultConfirm(s.Options(), HotReload)
+		options := s.Options()
+		s.Settings.HotReload, err = communicate.GetDefaultConfirm(options, HotReload)
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
-		s.Settings.PublicEndpoint, err = communicate.GetDefaultConfirm(s.Options(), PublicEndpoint)
+		s.Settings.PublicEndpoint, err = communicate.GetDefaultConfirm(options, PublicEndpoint)
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
@@ -322,6 +314,16 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
 	}
 	s.Endpoints = []*basev0.Endpoint{s.RestEndpoint}
+	return nil
+}
+
+func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
+	asker := communicate.NewQuestionAsker(stream)
+	answers, err := asker.RunSequence(s.Options())
+	if err != nil {
+		return err
+	}
+	s.answers = answers
 	return nil
 }
 

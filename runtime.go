@@ -3,39 +3,32 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/codefly-dev/core/builders"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	"github.com/codefly-dev/core/languages"
-	"github.com/codefly-dev/core/shared"
-	"github.com/hashicorp/go-multierror"
 	"path"
 	"strings"
 
-	runners "github.com/codefly-dev/core/runners/base"
-
-	"github.com/codefly-dev/core/resources"
-
-	"github.com/codefly-dev/core/wool"
-
-	"github.com/codefly-dev/core/agents/services"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-
 	"github.com/codefly-dev/core/agents/helpers/code"
+	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/builders"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	"github.com/codefly-dev/core/resources"
+	runners "github.com/codefly-dev/core/runners/base"
+	pythonhelpers "github.com/codefly-dev/core/runners/python"
+	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/wool"
 )
 
 type Runtime struct {
+	services.RuntimeServer
 	*Service
-	Environment *basev0.Environment
 
 	// internal
 	runnerEnvironment runners.RunnerEnvironment
 	runner            runners.Proc
 
-	address string
-	port    uint16
+	port uint16
 
-	cacheLocation string // Local
+	cacheLocation string
 }
 
 func NewRuntime() *Runtime {
@@ -118,19 +111,17 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		s.runnerEnvironment = localEnv
 	}
 
-	s.runnerEnvironment.WithEnvironmentVariables(ctx, s.EnvironmentVariables.All()...)
+	allEnvs, err := s.EnvironmentVariables.All()
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get environment variables")
+	}
+	s.runnerEnvironment.WithEnvironmentVariables(ctx, allEnvs...)
 	s.runnerEnvironment.WithEnvironmentVariables(ctx, resources.Env("PYTHONUNBUFFERED", 1))
 	return nil
 }
 
-func (s *Runtime) SetRuntimeContext(ctx context.Context, runtimeContext *basev0.RuntimeContext) error {
-	if runtimeContext.Kind == resources.RuntimeContextFree || runtimeContext.Kind == resources.RuntimeContextNative {
-		if languages.HasPythonPoetryRuntime(nil) {
-			s.Runtime.RuntimeContext = resources.NewRuntimeContextNative()
-			return nil
-		}
-	}
-	s.Runtime.RuntimeContext = resources.NewRuntimeContextContainer()
+func (s *Runtime) SetRuntimeContext(_ context.Context, runtimeContext *basev0.RuntimeContext) error {
+	s.Runtime.RuntimeContext = pythonhelpers.SetPythonRuntimeContext(runtimeContext)
 	return nil
 }
 
@@ -237,8 +228,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		}
 
 	}
-	s.Ready()
-
 	s.Wool.Debug("successful init of runner")
 
 	openAPI := builders.NewDependencies("api", builders.NewDependency(path.Join(s.sourceLocation, "src/main.py"))).WithCache(s.cacheLocation)
@@ -282,7 +271,11 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.EnvironmentVariables.SetRunning()
 
-	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.All()...)
+	startEnvs, err := s.EnvironmentVariables.All()
+	if err != nil {
+		return s.Runtime.StartErrorf(err, "getting environment variables")
+	}
+	proc.WithEnvironmentVariables(ctx, startEnvs...)
 	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.Secrets()...)
 
 	s.runner = proc
@@ -340,32 +333,27 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
-
 	ctx = s.Wool.Inject(ctx)
 
-	var agg error
 	s.Wool.Debug("stopping service")
 	if s.runner != nil {
-		err := s.runner.Stop(ctx)
-		if err != nil {
-			agg = multierror.Append(agg, err)
+		if err := s.runner.Stop(ctx); err != nil {
+			return s.Runtime.StopError(err)
 		}
 		s.runner = nil
 	}
 	if s.runnerEnvironment != nil {
-		err := s.runnerEnvironment.Shutdown(ctx)
-		if err != nil {
-			agg = multierror.Append(agg, err)
+		if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
+			s.Wool.Warn("error shutting down runner environment", wool.ErrField(err))
 		}
 	}
-	s.Wool.Debug("runner stopped")
-	err := s.Base.Stop()
-	if err != nil {
-		agg = multierror.Append(agg, err)
-		s.Wool.Warn("error stopping runner", wool.ErrField(err))
+	// Stop the file watcher to prevent CPU spin on orphaned processes
+	if s.Watcher != nil {
+		s.Watcher.Pause()
 	}
-	if agg != nil {
-		return s.Runtime.StopError(agg)
+	if s.Events != nil {
+		close(s.Events)
+		s.Events = nil
 	}
 	return s.Runtime.StopResponse()
 }
@@ -404,9 +392,6 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 	return s.Runtime.InformationResponse(ctx, req)
 }
 
-func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
-	return s.Base.Communicate(ctx, req)
-}
 
 /* Details
 
