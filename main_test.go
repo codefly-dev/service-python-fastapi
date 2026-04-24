@@ -61,7 +61,8 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
 	}
 
-	builder := NewBuilder()
+	svc := NewService()
+	builder := NewBuilder(svc)
 
 	resp, err := builder.Load(ctx, &builderv0.LoadRequest{Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: false}})
 	require.NoError(t, err)
@@ -77,7 +78,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.NoError(t, err)
 	networkManager.WithTemporaryPorts()
 
-	runtime := NewRuntime()
+	runtime := NewRuntime(svc)
 
 	defer func() {
 		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
@@ -124,7 +125,7 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 	require.NoError(t, err)
 	require.NotNil(t, init)
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.RestEndpoint, resources.NewNativeNetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})

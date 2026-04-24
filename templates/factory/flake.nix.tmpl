@@ -1,0 +1,37 @@
+{
+  description = "{{ .Service.Name.DNSCase }} development environment";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  };
+
+  outputs = { self, nixpkgs }:
+    let
+      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
+    in
+    {
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              # uv owns dep management; python is only here so the venv
+              # works on hosts without a system python. uv will pin the
+              # exact interpreter via pyproject.toml > [tool.uv].
+              pkgs.uv
+              pkgs.python312
+              pkgs.ruff
+            ];
+
+            shellHook = ''
+              # Point uv at a project-local .venv regardless of where the
+              # user invokes uv from; matches the Dockerfile's layout.
+              export UV_PROJECT_ENVIRONMENT="''${UV_PROJECT_ENVIRONMENT:-$PWD/code/.venv}"
+            '';
+          };
+        });
+    };
+}

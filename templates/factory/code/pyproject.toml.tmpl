@@ -1,23 +1,33 @@
-[tool.poetry]
+[project]
 name = "base"
 version = "0.0.0"
 description = ""
-authors = ["Your Name <you@example.com>"]
-packages = [{include = "*", from="src"}]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.25.0",
+    "codefly-sdk>=0.0.14",
+    "pydantic>=2.9.2",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-fastapi = "^0.109.0"
-uvicorn = "^0.25.0"
-codefly-sdk = "^0.0.14"
-pydantic = "^2.9.2"
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "httpx>=0.27.0",
+    "pytest-asyncio>=0.23.6",
+    "codefly-cli>=0.0.19",
+    "ruff>=0.6.0",
+]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.2.0"
-httpx = "^0.27.0"
-pytest-asyncio = "^0.23.6"
-codefly-cli = "^0.0.19"
+[tool.uv]
+package = false
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.pytest.ini_options]
+# "." — not "src" — so the `from src.X` imports in the scaffolded tests
+# resolve. src/ ships with an __init__.py making it a proper package.
+pythonpath = ["."]
+testpaths = ["tests"]
+# pytest-asyncio 1.x needs an explicit mode. "auto" picks up async def
+# tests without needing @pytest.mark.asyncio on every one; keeps the
+# boilerplate low for scaffolded services.
+asyncio_mode = "auto"

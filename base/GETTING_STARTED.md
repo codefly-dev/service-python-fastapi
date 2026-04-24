@@ -1,7 +1,13 @@
 ## Welcome to your `fastapi` project!
 
-This agent tries to follows best practices for a `fastapi` project. It is based on these [best practices](https://github.com/zhanymkanov/fastapi-best-practices)
+This agent follows the [fastapi best practices](https://github.com/zhanymkanov/fastapi-best-practices) layout.
 
-This project uses [poetry](https://python-poetry.org/) for package management.
+Dependency management uses [uv](https://docs.astral.sh/uv/). Common commands:
 
-To add a new package, run `poetry add <package-name>`. This will add the package to `pyproject.toml` and install it.
+- `uv sync` — install/refresh the venv from `pyproject.toml` + `uv.lock`
+- `uv add <package>` — add a runtime dependency
+- `uv add --dev <package>` — add a dev dependency
+- `uv run pytest` — run tests
+- `uv run uvicorn src.main:app --reload` — run the dev server
+
+`codefly run service <name>` does all of the above for you via the agent.

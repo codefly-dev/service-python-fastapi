@@ -1,24 +1,22 @@
-# The builder image, used to build the virtual environment
+# The builder image — installs the venv via uv, then we copy it into the runtime.
 FROM {{.Builder}} as builder
 
 WORKDIR /app
 
-COPY code/pyproject.toml code/poetry.lock ./
+COPY code/pyproject.toml code/uv.lock ./
 
-ENV POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_IN_PROJECT=1 \
-    POETRY_VIRTUALENVS_CREATE=1
-
-WORKDIR /app
-
-RUN poetry install --without dev --no-root
+# Install deps to a project-local .venv. --frozen requires uv.lock to match
+# pyproject.toml; this catches drift at build time rather than at runtime.
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_LINK_MODE=copy
+RUN uv sync --frozen --no-dev --no-install-project
 
 
-# Runner
+# Runtime
 FROM {{.Builder}} as runtime
 
 WORKDIR /app
-# Set up a non-root user
+
 RUN adduser -D appuser
 USER appuser
 
@@ -29,7 +27,6 @@ COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 COPY --chown=appuser service.codefly.yaml .
 
-# We go be smarter here
 {{ range .Components}}
 COPY --chown=appuser {{.}} {{.}}
 {{end}}
@@ -40,5 +37,5 @@ ENV {{.Key}} {{.Value}}
 
 WORKDIR /app/code
 
-# Standards port for REST is 8080
+# Default REST port (overridden by codefly at runtime).
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
