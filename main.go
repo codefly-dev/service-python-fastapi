@@ -16,6 +16,7 @@ import (
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
+	"github.com/codefly-dev/core/toolbox/lang"
 
 	pythoncode "github.com/codefly-dev/service-python/pkg/code"
 	pythonruntime "github.com/codefly-dev/service-python/pkg/runtime"
@@ -136,13 +137,20 @@ func main() {
 	// already does (uv/AST/ruff/pytest). If that changes, wrap them here.
 	code := pythoncode.New(svc.Service)
 	genericRuntime := pythonruntime.New(svc.Service)
+	tooling := pythontooling.New(code, genericRuntime)
 
 	agents.Serve(agents.PluginRegistration{
 		Agent:   svc,
 		Runtime: NewRuntime(svc),
 		Builder: NewBuilder(svc),
 		Code:    code,
-		Tooling: pythontooling.New(code, genericRuntime),
+		Tooling: tooling,
+		// Phase B migration: expose the unified Toolbox surface
+		// alongside Tooling. Mind can switch consumer-side via
+		// lang.ToolingFromToolbox(toolboxClient); other Toolbox
+		// consumers (MCP transcoder, future codefly tools) work
+		// without further changes.
+		Toolbox: lang.NewToolboxFromTooling(agent.Name, agent.Version, tooling),
 	})
 }
 
