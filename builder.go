@@ -258,7 +258,9 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		SecretMap:  secrets,
 		Parameters: Parameters{},
 	}
-	_ = s.Base.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
+	if err := s.Base.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params); err != nil {
+		return s.Base.Builder.DeployError(err)
+	}
 	return s.Base.Builder.DeployResponse()
 }
 
