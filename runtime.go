@@ -307,6 +307,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartResponse()
 	}
 
+	if s.runnerEnvironment == nil {
+		// Init must run before Start; without it NewProcess below nil-derefs
+		// and panics the agent. Fail loudly with a clear error instead.
+		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
+	}
+
 	proc, err := s.runnerEnvironment.NewProcess(
 		"uv", "run", "uvicorn", "src.main:app",
 		"--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
@@ -338,6 +344,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.Infof("starting fastapi app via uv")
 	runningContext := s.Wool.Inject(context.Background())
 	if err := s.runner.Start(runningContext); err != nil {
+		s.runner = nil // failed to start — don't leave a dead proc on the struct
 		return s.Base.Runtime.StartError(err)
 	}
 
@@ -383,7 +390,10 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 
 	s.Wool.Debug("removing cache")
 	if err := shared.EmptyDir(ctx, s.cacheLocation); err != nil {
-		return s.Base.Runtime.DestroyError(err)
+		// Best-effort: a failed cache wipe must NOT short-circuit Destroy and
+		// skip the container teardown below — that would leak the running
+		// container (the far more expensive resource).
+		s.Wool.Warn("cannot remove cache", wool.ErrField(err))
 	}
 
 	if s.Base.Runtime.IsContainerRuntime() {
