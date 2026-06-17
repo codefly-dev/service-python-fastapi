@@ -13,6 +13,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
+	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 	pythonhelpers "github.com/codefly-dev/core/runners/python"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
@@ -23,11 +24,12 @@ import (
 // Runtime is the FastAPI specialization of the generic Python Runtime.
 //
 // Embedding:
-//   *pythonruntime.Runtime — inherits Test (uv run pytest), Lint (uv run ruff),
-//                            Build (no-op), Information, and the services.Base
-//                            chain via *pythonservice.Service promotion.
-//   FastAPI               — fastapi-specific state (RestEndpoint, HotReload
-//                            setting) accessed explicitly as s.FastAPI.X.
+//
+//	*pythonruntime.Runtime — inherits Test (uv run pytest), Lint (uv run ruff),
+//	                         Build (no-op), Information, and the services.Base
+//	                         chain via *pythonservice.Service promotion.
+//	FastAPI               — fastapi-specific state (RestEndpoint, HotReload
+//	                         setting) accessed explicitly as s.FastAPI.X.
 //
 // Overridden methods: Load, Init, Start, Stop, Destroy — fastapi adds Docker
 // runner env, port binding, uvicorn, OpenAPI regeneration, watchers.
@@ -119,7 +121,7 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 
 	switch {
 	case s.Base.Runtime.IsContainerRuntime():
-		dockerEnv, err := runners.NewDockerEnvironment(ctx, image, s.Identity.WorkspacePath, s.UniqueWithWorkspace())
+		dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, image, s.Identity.WorkspacePath, s.UniqueWithWorkspace())
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create docker runner")
 		}
@@ -398,7 +400,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 
 	if s.Base.Runtime.IsContainerRuntime() {
 		s.Wool.Debug("running in container")
-		dockerEnv, err := runners.NewDockerEnvironment(ctx, runtimeImage, s.Service.SourceLocation, s.Base.Runtime.UniqueWithWorkspace())
+		dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, runtimeImage, s.Service.SourceLocation, s.Base.Runtime.UniqueWithWorkspace())
 		if err != nil {
 			return s.Base.Runtime.DestroyError(err)
 		}
