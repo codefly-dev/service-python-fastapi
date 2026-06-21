@@ -5,7 +5,7 @@ go 1.25.0
 toolchain go1.26.4
 
 require (
-	github.com/codefly-dev/core v0.2.5
+	github.com/codefly-dev/core v0.2.8
 	github.com/codefly-dev/service-python v0.0.1
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.80.0
