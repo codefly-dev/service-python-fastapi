@@ -5,7 +5,7 @@ go 1.25.0
 toolchain go1.26.4
 
 require (
-	github.com/codefly-dev/core v0.2.8
+	github.com/codefly-dev/core v0.2.9
 	github.com/codefly-dev/service-python v0.0.1
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.80.0
@@ -27,6 +27,7 @@ require (
 	github.com/cheggaaa/pb/v3 v3.1.7 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
+	github.com/codefly-dev/gortk v0.0.0-20260621170842-c2212b7ad788 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
