@@ -227,41 +227,15 @@ type Parameters struct{}
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Base.Builder.LogDeployRequest(req, s.Wool.Debug)
-	s.EnvironmentVariables.SetRunning()
-
-	k, err := s.Base.Builder.KubernetesDeploymentRequest(ctx, req)
-	if err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	if err := s.EnvironmentVariables.AddConfigurations(ctx, req.Configuration); err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	if err := s.EnvironmentVariables.AddConfigurations(ctx, req.DependenciesConfigurations...); err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-
-	confs, err := s.EnvironmentVariables.Configurations()
-	if err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	cm, err := services.EnvsAsConfigMapData(confs...)
-	if err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	secrets, err := services.EnvsAsSecretData(s.EnvironmentVariables.Secrets()...)
-	if err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	params := services.DeploymentParameters{
-		ConfigMap:  cm,
-		SecretMap:  secrets,
+	return s.Base.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
+		EnvironmentVariables: s.EnvironmentVariables,
+		Templates:            deploymentFS,
+		Inputs: services.DeploymentInputs{
+			OwnConfiguration:         true,
+			DependencyConfigurations: true,
+		},
 		Parameters: Parameters{},
-	}
-	if err := s.Base.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params); err != nil {
-		return s.Base.Builder.DeployError(err)
-	}
-	return s.Base.Builder.DeployResponse()
+	})
 }
 
 // Options returns the two-question set shown during `codefly add service`.
