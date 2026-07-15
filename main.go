@@ -10,10 +10,13 @@ import (
 	"embed"
 
 	"github.com/codefly-dev/core/agents"
+	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	"github.com/codefly-dev/core/resources"
+	runnersbase "github.com/codefly-dev/core/runners/base"
+	pythonrunner "github.com/codefly-dev/core/runners/python"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/toolbox/lang"
@@ -97,24 +100,18 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return &agentv0.AgentInformation{
-		RuntimeRequirements: []*agentv0.Runtime{
-			{Type: agentv0.Runtime_PYTHON},
-			{Type: agentv0.Runtime_NIX},
+	return services.Advertisement{
+		Backends: runnersbase.BackendSupport{
+			Local:  pythonrunner.HasUVRuntime,
+			Nix:    true,
+			Docker: true,
 		},
-		Capabilities: []*agentv0.Capability{
-			{Type: agentv0.Capability_BUILDER},
-			{Type: agentv0.Capability_RUNTIME},
-			{Type: agentv0.Capability_HOT_RELOAD},
-		},
-		Languages: []*agentv0.Language{
-			{Type: agentv0.Language_PYTHON},
-		},
-		Protocols: []*agentv0.Protocol{
-			{Type: agentv0.Protocol_HTTP},
-		},
-		ReadMe: readme,
-	}, nil
+		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_PYTHON},
+		HotReload:  true,
+		Languages:  []agentv0.Language_Type{agentv0.Language_PYTHON},
+		Protocols:  []agentv0.Protocol_Type{agentv0.Protocol_HTTP},
+		ReadMe:     readme,
+	}.Build(), nil
 }
 
 // NewService constructs a FastAPI Service. The embedded generic Service
