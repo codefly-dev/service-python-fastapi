@@ -9,7 +9,6 @@ import (
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/agents/services/audit"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	"github.com/codefly-dev/core/companions/proto"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -186,20 +185,6 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 	s.Base.Builder.WithDockerImages(image)
 	return s.Base.Builder.BuildResponse()
-}
-
-// Audit scans the Python project for vulnerabilities (pip-audit) and
-// optionally reports outdated packages (pip list --outdated). Runs at
-// the service code root (./code).
-func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*builderv0.AuditResponse, error) {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-	dir := s.Local("code")
-	res, err := audit.Python(ctx, dir, req.IncludeOutdated)
-	if err != nil {
-		return s.Base.Builder.AuditError(err)
-	}
-	return s.Base.Builder.AuditResponse(res.Findings, res.Outdated, res.Tool, res.Language)
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
