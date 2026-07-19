@@ -11,8 +11,8 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
     in
     {
-      # devShell exposes python3 + uv so the codefly NixEnvironment runs the
-      # FastAPI service (uv sync / uv run) reproducibly — no system python needed.
+      # devShell exposes the complete source-tooling/runtime suite so Code.Fix
+      # can invoke Ruff directly without materializing project dependencies.
       devShells = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -22,6 +22,7 @@
             packages = [
               pkgs.python3
               pkgs.uv
+              pkgs.ruff
             ];
           };
         });
