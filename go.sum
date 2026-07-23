@@ -37,12 +37,12 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
-github.com/codefly-dev/core v0.2.19 h1:J2nffMEzmr9FHkf1lh/2gNPbjJFYjpQHro3niejrv04=
-github.com/codefly-dev/core v0.2.19/go.mod h1:78gNY4qIlPnj08Fe8X5WwXWtqjTvU4MelJlOYTJq/5s=
+github.com/codefly-dev/core v0.2.24 h1:1CRaWbVIQXnkW+lX3U4kgdYUfnqdODjUzNGta/ECrCM=
+github.com/codefly-dev/core v0.2.24/go.mod h1:78gNY4qIlPnj08Fe8X5WwXWtqjTvU4MelJlOYTJq/5s=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
-github.com/codefly-dev/service-python v0.0.10 h1:mgkUrhkyBCkwAWO6BF60Y3vZH72TQ5ckVv/ZY324L1Y=
-github.com/codefly-dev/service-python v0.0.10/go.mod h1:VdvuG4+uZr/GEP4EKT5aQtiSr/x+B80776m8jW0Gz2k=
+github.com/codefly-dev/service-python v0.0.15 h1:PgfldnYLs0ELVXAH5wgY9KeUUsu6n+QWHh0Hd57X0Eo=
+github.com/codefly-dev/service-python v0.0.15/go.mod h1:UCnVXxbsTzSsmcZqEJmwdXNeIxEma47PErZ2M5f0g3E=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
 github.com/containerd/errdefs v1.0.0/go.mod h1:+YBYIdtsnF4Iw6nWZhJcqGSg/dwvV7tyJ/kCkyJ2k+M=
 github.com/containerd/errdefs/pkg v0.3.0 h1:9IKJ06FvyNlexW690DXuQNx2KA2cUJXx151Xdx3ZPPE=
