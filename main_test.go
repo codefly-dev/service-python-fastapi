@@ -124,6 +124,10 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 		ProposedNetworkMappings: networkMappings})
 	require.NoError(t, err)
 	require.NotNil(t, init)
+	// Init reports failures through the response status, not the Go error, so a
+	// bare NoError check would let a failed Init through and surface as a
+	// confusing empty-network-mappings error further down.
+	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
