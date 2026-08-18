@@ -14,11 +14,75 @@ spec:
         app: {{ .Service.Name.DNSCase }}
         sha: {{ .Sha }}
     spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ .Service.Name.DNSCase }}
-          image: image:tag
+          image: {{ .Image.FullName }}
+          ports:
+            - containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /version
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /version
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /version
+              port: 8080
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           envFrom:
             - configMapRef:
                 name: config-{{ .Service.Name.DNSCase }}
+{{- if not .Restricted }}
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}
+{{- end }}
+          env:
+            # readOnlyRootFilesystem makes $HOME unwritable; point caches at the
+            # writable scratch mount so libraries that use ~/.cache still work.
+            - name: HOME
+              value: /tmp
+{{- if .Restricted }}
+{{- range $environmentVariable, $reference := .SecretReferences }}
+            - name: {{ $environmentVariable }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $reference.Name }}
+                  key: {{ $reference.Key }}
+                  optional: {{ $reference.Optional }}
+{{- end }}
+{{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

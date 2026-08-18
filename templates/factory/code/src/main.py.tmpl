@@ -1,8 +1,28 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import codefly_sdk.codefly as codefly
 
-codefly.init()
+
+def _service_manifest_reachable() -> bool:
+    # codefly.init() walks parent directories for service.codefly.yaml but does
+    # not stop at the filesystem root, so it loops forever when the manifest is
+    # absent (e.g. tests running against an isolated source snapshot). Only init
+    # when the manifest is actually reachable; runtime config is otherwise
+    # supplied through CODEFLY__* environment variables.
+    directory = os.getcwd()
+    while True:
+        if os.path.isfile(os.path.join(directory, "service.codefly.yaml")):
+            return True
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return False
+        directory = parent
+
+
+if _service_manifest_reachable():
+    codefly.init()
 
 app = FastAPI()
 

@@ -1,9 +1,6 @@
 resources:
   - ../../base
   - configmap.yaml
+{{- if not .Restricted }}
   - secret.yaml
-
-images:
-  - name: image:tag
-    newName: {{.Image.Name}}
-    newTag: {{.Image.Tag}}
+{{- end }}

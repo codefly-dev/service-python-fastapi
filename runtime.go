@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -126,6 +127,12 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 			return s.Wool.Wrapf(err, "cannot create docker runner")
 		}
 		dockerEnv.WithPause()
+		// Run as the invoking host user. uv sync writes uv.lock into the
+		// bind-mounted source and populates the venv; as root those files
+		// become root-owned on the host, and a later Init that hashes uv.lock
+		// for its dependency cache then fails with "permission denied" on any
+		// host where the user isn't root (e.g. Linux CI).
+		dockerEnv.WithUser(fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 
 		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
 		if err != nil {
@@ -147,6 +154,14 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create cache location")
 		}
+		// uv's download cache defaults to $HOME/.cache/uv; the host user has no
+		// home inside the image, so give uv a writable, host-owned cache mount.
+		uvCache, err := s.LocalDirCreate(ctx, ".cache/container/uv")
+		if err != nil {
+			return s.Wool.Wrapf(err, "cannot create uv cache location")
+		}
+		dockerEnv.WithMount(uvCache, "/uv-cache")
+		dockerEnv.WithEnvironmentVariables(ctx, resources.Env("UV_CACHE_DIR", "/uv-cache"))
 		s.runnerEnvironment = dockerEnv
 
 	case s.Base.Runtime.IsNixRuntime():

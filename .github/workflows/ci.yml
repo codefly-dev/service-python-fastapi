@@ -13,3 +13,9 @@ concurrency:
 jobs:
   ci:
     uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
+    with:
+      # The Python runtime tests drive `uv` on the host (dependency sync,
+      # pytest); it isn't on the runner by default.
+      setup-run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
