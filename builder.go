@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"os"
+	"path/filepath"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -146,7 +147,8 @@ type DockerTemplating struct {
 }
 
 // Build produces the service Docker image. Generic is a no-op; fastapi
-// renders a Dockerfile and runs docker build.
+// renders a Dockerfile and either builds it in-process (legacy) or, when the
+// CLI owns the build, emits a reproducible recipe for the CLI to build.
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
 	dockerRequest, err := s.Base.Builder.DockerBuildRequest(ctx, req)
@@ -170,6 +172,19 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return nil, s.Wool.Wrapf(err, "cannot copy and apply template")
 	}
 
+	// When the caller owns the build (a non-empty output_directory), emit a
+	// reproducible build recipe rather than building in-process. The rendered
+	// Dockerfile already lives in that directory, so the CLI runs docker buildx
+	// against it and publishes a multi-arch manifest list.
+	if outputDir := req.GetOutputDirectory(); outputDir != "" {
+		plan, err := singleImageBuildPlan(outputDir, image.FullName())
+		if err != nil {
+			return s.Base.Builder.BuildError(err)
+		}
+		s.Base.Builder.WithBuildPlan(plan)
+		return s.Base.Builder.BuildResponse()
+	}
+
 	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
 		Root:        s.Location,
 		Dockerfile:  "builder/Dockerfile",
@@ -185,6 +200,32 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 	s.Base.Builder.WithDockerImages(image)
 	return s.Base.Builder.BuildResponse()
+}
+
+// singleImageBuildPlan inventories the recipe the CLI-owned build consumes: the
+// builder/Dockerfile rendered into outputDirectory, built with the service
+// directory as its context and targeting a linux/amd64 + linux/arm64 manifest
+// list so a consumer never needs the agent toolchain to rebuild. Paths are
+// encoded as the CLI's recipe executor resolves them — the Dockerfile relative
+// to outputDirectory (which the CLI sets to <service>/builder), the context
+// relative to the service directory.
+//
+// This stands in for services.SingleImageBuildPlan / services.RecipeBuildPlatforms,
+// which are not in a released core yet (they land with the shared recipe runners
+// in core#336); it can be replaced once that release lands and its recipe layout
+// is confirmed to match the CLI executor.
+func singleImageBuildPlan(outputDirectory, image string) (*builderv0.DockerBuildPlan, error) {
+	recipe := &builderv0.DockerBuildRecipe{
+		Name:       "app",
+		Dockerfile: "Dockerfile",
+		Context:    ".",
+		Image:      image,
+		Platforms:  []string{"linux/amd64", "linux/arm64"},
+	}
+	if info, err := os.Stat(filepath.Join(outputDirectory, "dockerignore")); err == nil && info.Mode().IsRegular() {
+		recipe.Dockerignore = "dockerignore"
+	}
+	return services.BuildDockerBuildPlan(outputDirectory, []*builderv0.DockerBuildRecipe{recipe})
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
