@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-python-fastapi
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.3.4
+	github.com/codefly-dev/core v0.3.6
 	github.com/codefly-dev/service-python v0.0.52
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0
