@@ -56,14 +56,17 @@ for plugin in plugins:
 # gRPC server — runs a grpc.aio listener in this process alongside FastAPI.
 # The port is provided by codefly at runtime; it falls back to the standard
 # gRPC port in container/Kubernetes where the mapping is fixed.
-from src.rpc.server import serve as _grpc_serve
-
 _grpc_server = None
 
 
 @app.on_event("startup")
 async def _start_grpc():
     global _grpc_server
+    # Imported inside the handler, not at module load: the generated stubs
+    # are produced by `codefly sync` and importing this module must not depend
+    # on them (openapi.py imports src.main to emit the schema before sync).
+    from src.rpc.server import serve as _grpc_serve
+
     port = int(os.environ.get("CODEFLY_GRPC_PORT", "9090"))
     _grpc_server = await _grpc_serve(port)
 

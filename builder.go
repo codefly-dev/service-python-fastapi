@@ -140,10 +140,12 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 }
 
 // syncGRPCServer regenerates the Python protobuf + grpc.aio server stubs from
-// the service-owned proto contract via Buf. Generation is cached on the proto
-// tree, so it re-runs deterministically only when the contract changes.
+// the service-owned proto contract via Buf. Buf reads proto/ under the service
+// root (matching the endpoint contract location) and writes the stubs into the
+// Python source tree. Generation is cached on the proto tree, so it re-runs
+// deterministically only when the contract changes.
 func (s *Builder) syncGRPCServer(ctx context.Context) error {
-	buf, err := proto.NewBuf(ctx, s.Local("code"))
+	buf, err := proto.NewBuf(ctx, s.Location)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create proto generator")
 	}
@@ -406,11 +408,12 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 }
 
 // grpcEndpoint builds the service-owned gRPC endpoint from the proto contract.
-// The proto path is resolved relative to the Python source dir (code/), where
-// the scaffolded proto/ tree and the generated stubs both live. It inherits the
-// same public/private visibility as the REST endpoint.
+// The proto path is resolved relative to the service root — the same location
+// core's LoadEndpoints re-reads it from — so the endpoint keeps its RPCs across
+// reloads and stays consumable by dependent services. It inherits the same
+// public/private visibility as the REST endpoint.
 func (s *Builder) grpcEndpoint(ctx context.Context) (*basev0.Endpoint, error) {
-	protoPath := s.Local("code/%s", s.FastAPI.Settings.GRPCServer.Proto)
+	protoPath := s.Local("%s", s.FastAPI.Settings.GRPCServer.Proto)
 	grpc, err := resources.LoadGrpcAPI(ctx, shared.Pointer(protoPath))
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot load grpc proto %q", protoPath)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func TestCreateRESTOnlyByDefault(t *testing.T) {
 	require.Equal(t, 1, len(builder.Endpoints))
 	require.Nil(t, builder.FastAPI.GRPCEndpoint)
 
-	_, err := os.Stat(filepath.Join(root, "code/proto/api.proto"))
+	_, err := os.Stat(filepath.Join(root, "proto/api.proto"))
 	require.True(t, os.IsNotExist(err))
 	_, err = os.Stat(filepath.Join(root, "code/src/rpc/server.py"))
 	require.True(t, os.IsNotExist(err))
@@ -123,8 +124,8 @@ func TestCreateWithGRPCServer(t *testing.T) {
 	require.Equal(t, standards.GRPC, builder.FastAPI.GRPCEndpoint.Api)
 
 	for _, rel := range []string{
-		"code/proto/api.proto",
-		"code/proto/buf.gen.yaml",
+		"proto/api.proto",
+		"proto/buf.gen.yaml",
 		"code/src/rpc/server.py",
 		"code/src/rpc/servicer.py",
 		"code/tests/rpc/test_grpc.py",
@@ -139,10 +140,54 @@ func TestCreateWithGRPCServer(t *testing.T) {
 	require.Contains(t, string(pyproject), "grpcio")
 	require.Contains(t, string(pyproject), "grpcio-tools")
 
-	main, err := os.ReadFile(filepath.Join(root, "code/src/main.py"))
+	assertMainImportsGRPCLazily(t, filepath.Join(root, "code/src/main.py"))
+}
+
+// assertMainImportsGRPCLazily guards the fix for the eager-import bug: importing
+// src.main (which openapi.py does at Init, before Sync generates the stubs) must
+// not require the generated gRPC package. The server import therefore lives
+// inside the startup handler (indented), never at module top level.
+func assertMainImportsGRPCLazily(t *testing.T, mainPath string) {
+	t.Helper()
+	content, err := os.ReadFile(mainPath)
 	require.NoError(t, err)
-	require.Contains(t, string(main), "CODEFLY_GRPC_PORT")
-	require.Contains(t, string(main), "from src.rpc.server import serve")
+	main := string(content)
+	require.Contains(t, main, "CODEFLY_GRPC_PORT")
+	require.Contains(t, main, "from src.rpc.server import serve")
+	for _, line := range strings.Split(main, "\n") {
+		if strings.HasPrefix(line, "from src.rpc.server import") || strings.HasPrefix(line, "import src.rpc") {
+			t.Fatalf("src.rpc must not be imported at module top level (breaks openapi generation before sync): %q", line)
+		}
+	}
+}
+
+// TestGRPCEndpointReloadsContract is the regression guard for the proto
+// location: core's LoadEndpoints re-derives the gRPC contract from disk at
+// standards.ProtoPath (service root). If the scaffolded proto lived anywhere
+// else, the reloaded endpoint would silently carry zero RPCs and dependent
+// services could not generate clients.
+func TestGRPCEndpointReloadsContract(t *testing.T) {
+	builder, _ := createServiceForTest(t, map[string]*agentv0.Answer{
+		HotReload:      confirmAnswer(false),
+		PublicEndpoint: confirmAnswer(false),
+		GRPCServer:     confirmAnswer(true),
+	})
+	ctx := context.Background()
+
+	endpoints, err := builder.Base.Service.LoadEndpoints(ctx)
+	require.NoError(t, err)
+
+	grpcEndpoint, err := resources.FindGRPCEndpoint(ctx, endpoints)
+	require.NoError(t, err)
+	grpc := resources.IsGRPC(ctx, grpcEndpoint)
+	require.NotNil(t, grpc)
+	require.NotEmpty(t, grpc.Rpcs, "reloaded gRPC endpoint lost its RPCs — proto not at core-standard path")
+
+	var names []string
+	for _, rpc := range grpc.Rpcs {
+		names = append(names, rpc.Name)
+	}
+	require.Contains(t, names, "Echo")
 }
 
 // TestDeploymentRendersGRPCPort proves the gRPC container/service ports appear

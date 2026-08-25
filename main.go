@@ -18,6 +18,7 @@ import (
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	pythonrunner "github.com/codefly-dev/core/runners/python"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/toolbox/lang"
 
@@ -43,9 +44,11 @@ const (
 )
 
 // defaultProtoPath is where the service-owned proto contract lives, relative
-// to the Python source dir (code/). Mirrors how openapi/api.swagger.json sits
-// beside the source. Buf generation and the gRPC endpoint both resolve it.
-const defaultProtoPath = "proto/api.proto"
+// to the service root. It is core's standards.ProtoPath: LoadEndpoints
+// (Builder + Runtime) and any dependent service re-derive the gRPC contract
+// from that exact location, so the proto has to sit there — the same way the
+// REST contract lives at openapi/api.swagger.json.
+const defaultProtoPath = standards.ProtoPath
 
 // GRPCServerSettings configures the optional service-owned grpc.aio listener.
 // Disabled by default: an unset grpc-server block leaves the service REST-only

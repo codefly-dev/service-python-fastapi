@@ -5,7 +5,7 @@ import sys
 # The gRPC stubs are produced by `codefly sync` (Buf) before a normal test run.
 # Generate them here too so the suite is self-contained when run directly.
 _CODE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-_PROTO = os.path.join(_CODE, "proto")
+_PROTO = os.path.abspath(os.path.join(_CODE, "..", "proto"))
 _GENERATED = os.path.join(_CODE, "src", "rpc", "_generated")
 
 
