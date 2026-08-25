@@ -1,0 +1,8 @@
+import os
+import sys
+
+# The gRPC Python plugin emits flat, top-level imports (``import api_pb2``), so
+# the generated directory must be importable directly rather than as a package.
+_GENERATED = os.path.join(os.path.dirname(__file__), "_generated")
+if os.path.isdir(_GENERATED) and _GENERATED not in sys.path:
+    sys.path.insert(0, _GENERATED)

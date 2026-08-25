@@ -8,6 +8,11 @@ dependencies = [
     "uvicorn>=0.25.0",
     "codefly-sdk>=0.0.14",
     "pydantic>=2.9.2",
+{{- if .GRPCEnabled }}
+    "grpcio>=1.60.0",
+    "grpcio-health-checking>=1.60.0",
+    "protobuf>=4.25.0",
+{{- end }}
 ]
 
 [dependency-groups]
@@ -17,6 +22,9 @@ dev = [
     "pytest-asyncio>=0.23.6",
     "codefly-cli>=0.0.19",
     "ruff>=0.6.0",
+{{- if .GRPCEnabled }}
+    "grpcio-tools>=1.60.0",
+{{- end }}
 ]
 
 [tool.uv]

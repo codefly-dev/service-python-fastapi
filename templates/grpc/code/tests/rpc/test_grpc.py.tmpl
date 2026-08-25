@@ -1,0 +1,38 @@
+import socket
+
+import grpc
+from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+from src.rpc import server
+
+
+def _free_port() -> int:
+    sock = socket.socket()
+    sock.bind(("", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+async def test_echo_roundtrip():
+    port = _free_port()
+    grpc_server = await server.serve(port)
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            stub = server.pb2_grpc.EchoServiceStub(channel)
+            response = await stub.Echo(server.pb2.EchoRequest(message="hello"))
+            assert response.message == "hello"
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+async def test_health_serving():
+    port = _free_port()
+    grpc_server = await server.serve(port)
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            health = health_pb2_grpc.HealthStub(channel)
+            response = await health.Check(health_pb2.HealthCheckRequest())
+            assert response.status == health_pb2.HealthCheckResponse.SERVING
+    finally:
+        await grpc_server.stop(grace=None)

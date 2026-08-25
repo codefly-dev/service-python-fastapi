@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package api;
+
+// EchoService is a starter contract. Replace it with your own RPCs — Sync
+// regenerates the Python stubs and the grpc.aio server picks them up.
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+}

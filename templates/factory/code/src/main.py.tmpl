@@ -51,6 +51,28 @@ for plugin in plugins:
         app.add_event_handler("startup", plugin.startup)
     if plugin.shutdown:
         app.add_event_handler("shutdown", plugin.shutdown)
+{{- if .GRPCEnabled }}
+
+# gRPC server — runs a grpc.aio listener in this process alongside FastAPI.
+# The port is provided by codefly at runtime; it falls back to the standard
+# gRPC port in container/Kubernetes where the mapping is fixed.
+from src.rpc.server import serve as _grpc_serve
+
+_grpc_server = None
+
+
+@app.on_event("startup")
+async def _start_grpc():
+    global _grpc_server
+    port = int(os.environ.get("CODEFLY_GRPC_PORT", "9090"))
+    _grpc_server = await _grpc_serve(port)
+
+
+@app.on_event("shutdown")
+async def _stop_grpc():
+    if _grpc_server is not None:
+        await _grpc_server.stop(grace=5)
+{{- end }}
 
 if __name__ == "__main__":
     import uvicorn

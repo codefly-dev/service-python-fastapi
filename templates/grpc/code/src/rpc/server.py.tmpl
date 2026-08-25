@@ -1,0 +1,39 @@
+import grpc
+from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+import api_pb2 as pb2
+import api_pb2_grpc as pb2_grpc
+
+from src.rpc.servicer import EchoServicer
+
+
+class _HealthServicer(health_pb2_grpc.HealthServicer):
+    async def Check(self, request, context):
+        return health_pb2.HealthCheckResponse(
+            status=health_pb2.HealthCheckResponse.SERVING
+        )
+
+    async def Watch(self, request, context):
+        await context.write(
+            health_pb2.HealthCheckResponse(
+                status=health_pb2.HealthCheckResponse.SERVING
+            )
+        )
+
+
+def register(server: grpc.aio.Server) -> None:
+    """Register the service and health servicers on a grpc.aio server.
+
+    Add your own servicers here as you grow the proto contract.
+    """
+    pb2_grpc.add_EchoServiceServicer_to_server(EchoServicer(), server)
+    health_pb2_grpc.add_HealthServicer_to_server(_HealthServicer(), server)
+
+
+async def serve(port: int) -> grpc.aio.Server:
+    """Start a grpc.aio server on ``port`` and return it (already started)."""
+    server = grpc.aio.server()
+    register(server)
+    server.add_insecure_port(f"[::]:{port}")
+    await server.start()
+    return server
