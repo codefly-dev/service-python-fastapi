@@ -1,0 +1,30 @@
+import os
+import subprocess
+import sys
+
+# The gRPC stubs are produced by `codefly sync` (Buf) before a normal test run.
+# Generate them here too so the suite is self-contained when run directly.
+_CODE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_PROTO = os.path.abspath(os.path.join(_CODE, "..", "proto"))
+_GENERATED = os.path.join(_CODE, "src", "rpc", "_generated")
+
+
+def _ensure_generated() -> None:
+    if os.path.exists(os.path.join(_GENERATED, "api_pb2_grpc.py")):
+        return
+    os.makedirs(_GENERATED, exist_ok=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "grpc_tools.protoc",
+            f"-I{_PROTO}",
+            f"--python_out={_GENERATED}",
+            f"--grpc_python_out={_GENERATED}",
+            os.path.join(_PROTO, "api.proto"),
+        ],
+        check=True,
+    )
+
+
+_ensure_generated()

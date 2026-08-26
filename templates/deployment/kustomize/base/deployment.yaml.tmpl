@@ -27,6 +27,10 @@ spec:
           image: {{ .Image.FullName }}
           ports:
             - containerPort: 8080
+{{- if .Deployment.Parameters.GRPCEnabled }}
+            - name: grpc
+              containerPort: {{ .Deployment.Parameters.GRPCPort }}
+{{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

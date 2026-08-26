@@ -18,6 +18,7 @@ import (
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	pythonrunner "github.com/codefly-dev/core/runners/python"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/templates"
 	"github.com/codefly-dev/core/toolbox/lang"
 
@@ -39,7 +40,26 @@ var requirements = builders.NewDependencies(agent.Name,
 const (
 	HotReload      = "hot-reload"
 	PublicEndpoint = "public-endpoint"
+	GRPCServer     = "grpc-server"
 )
+
+// defaultProtoPath is where the service-owned proto contract lives, relative
+// to the service root. It is core's standards.ProtoPath: LoadEndpoints
+// (Builder + Runtime) and any dependent service re-derive the gRPC contract
+// from that exact location, so the proto has to sit there — the same way the
+// REST contract lives at openapi/api.swagger.json.
+const defaultProtoPath = standards.ProtoPath
+
+// GRPCServerSettings configures the optional service-owned grpc.aio listener.
+// Disabled by default: an unset grpc-server block leaves the service REST-only
+// and its generated layout unchanged.
+type GRPCServerSettings struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Proto is the proto contract path relative to the Python source dir.
+	// Defaults to proto/api.proto when the server is enabled.
+	Proto string `yaml:"proto"`
+}
 
 // Settings inherits the generic Python Settings (PythonVersion) and adds
 // FastAPI-specific fields. `yaml:",inline"` means the YAML shape is flat:
@@ -52,6 +72,10 @@ type Settings struct {
 
 	HotReload      bool `yaml:"hot-reload"`
 	PublicEndpoint bool `yaml:"public-endpoint"`
+
+	// GRPCServer opts the service into a grpc.aio listener running in the same
+	// process as the FastAPI app (see grpc-server:). Disabled by default.
+	GRPCServer GRPCServerSettings `yaml:"grpc-server"`
 
 	// RuntimeImage overrides the default codefly-built runtime image.
 	// Format: "name:tag". Plain "name" and ":latest" are rejected —
@@ -87,6 +111,10 @@ type Service struct {
 	Settings *Settings
 
 	RestEndpoint *v0.Endpoint
+
+	// GRPCEndpoint is the service-owned gRPC endpoint, present only when
+	// Settings.GRPCServer.Enabled. Nil keeps the REST-only path untouched.
+	GRPCEndpoint *v0.Endpoint
 }
 
 // GetAgentInformation overrides the generic info to advertise HTTP protocol
@@ -109,8 +137,11 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_PYTHON},
 		HotReload:  true,
 		Languages:  []agentv0.Language_Type{agentv0.Language_PYTHON},
-		Protocols:  []agentv0.Protocol_Type{agentv0.Protocol_HTTP},
-		ReadMe:     readme,
+		// The agent can serve HTTP always and gRPC when a service opts in via
+		// grpc-server; advertising both declares the capability, not that every
+		// service exposes both.
+		Protocols: []agentv0.Protocol_Type{agentv0.Protocol_HTTP, agentv0.Protocol_GRPC},
+		ReadMe:    readme,
 	}.Build(), nil
 }
 

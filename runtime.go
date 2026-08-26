@@ -56,6 +56,10 @@ type Runtime struct {
 
 	port uint16
 
+	// grpcPort is the mapped port for the service-owned gRPC listener, passed
+	// to the Python process as CODEFLY_GRPC_PORT. Zero when gRPC is disabled.
+	grpcPort uint16
+
 	cacheLocation string
 }
 
@@ -90,6 +94,13 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	s.FastAPI.RestEndpoint, err = resources.FindRestEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
+	}
+
+	if s.FastAPI.Settings.GRPCServer.Enabled {
+		s.FastAPI.GRPCEndpoint, err = resources.FindGRPCEndpoint(ctx, s.Endpoints)
+		if err != nil {
+			return s.Base.Runtime.LoadError(err)
+		}
 	}
 
 	// Inherit the persistent Python REPL commands (exec, repl-reset)
@@ -139,6 +150,14 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 			return s.Wool.Wrapf(err, "cannot find network instance")
 		}
 		dockerEnv.WithPort(ctx, uint16(instance.Port))
+
+		if s.FastAPI.GRPCEndpoint != nil {
+			grpcInstance, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
+			if grpcErr != nil {
+				return s.Wool.Wrapf(grpcErr, "cannot find grpc network instance")
+			}
+			dockerEnv.WithPort(ctx, uint16(grpcInstance.Port))
+		}
 
 		envPath := s.DockerEnvPath()
 		if _, err = shared.CheckDirectoryOrCreate(ctx, envPath); err != nil {
@@ -260,6 +279,15 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Infof("will run on %s", net.Address)
 	s.port = uint16(net.Port)
 
+	if s.FastAPI.GRPCEndpoint != nil {
+		grpcNet, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
+		if grpcErr != nil {
+			return s.Base.Runtime.InitError(grpcErr)
+		}
+		s.grpcPort = uint16(grpcNet.Port)
+		s.Infof("grpc will run on %s", grpcNet.Address)
+	}
+
 	hasPyProject, err := shared.FileExists(ctx, path.Join(s.Service.SourceLocation, "pyproject.toml"))
 	if err != nil {
 		return s.Base.Runtime.InitError(err)
@@ -353,6 +381,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 	proc.WithEnvironmentVariables(ctx, startEnvs...)
 	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.Secrets()...)
+	if s.grpcPort != 0 {
+		// The FastAPI lifespan boots the grpc.aio listener on this port
+		// (src/rpc/server.py); in container/k8s the app falls back to the
+		// standard gRPC port when the variable is unset.
+		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
+	}
 
 	s.runner = proc
 

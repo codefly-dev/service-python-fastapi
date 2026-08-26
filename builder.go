@@ -38,7 +38,8 @@ import (
 // Inherited: Init.
 // Overridden: Load (fastapi puts source under ./code, discovers REST
 // endpoint), Update (applies builder templates), Sync (gRPC codegen for
-// declared dependencies), Build (custom DockerTemplating + docker build),
+// declared dependencies and the optional service-owned gRPC server), Build
+// (custom DockerTemplating + docker build),
 // Deploy (k8s), Create (two-question Communicate + REST endpoint).
 type Builder struct {
 	*pythonbuilder.Builder
@@ -129,7 +130,30 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 			return s.Base.Builder.SyncError(err)
 		}
 	}
+
+	if s.FastAPI.Settings.GRPCServer.Enabled {
+		if err := s.syncGRPCServer(ctx); err != nil {
+			return s.Base.Builder.SyncError(err)
+		}
+	}
 	return s.Base.Builder.SyncResponse()
+}
+
+// syncGRPCServer regenerates the Python protobuf + grpc.aio server stubs from
+// the service-owned proto contract via Buf. Buf reads proto/ under the service
+// root (matching the endpoint contract location) and writes the stubs into the
+// Python source tree. Generation is cached on the proto tree, so it re-runs
+// deterministically only when the contract changes.
+func (s *Builder) syncGRPCServer(ctx context.Context) error {
+	buf, err := proto.NewBuf(ctx, s.Location)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create proto generator")
+	}
+	buf.WithGeneratedDirs(s.Local("code/src/rpc/_generated"))
+	if err := buf.Generate(ctx); err != nil {
+		return s.Wool.Wrapf(err, "cannot generate grpc server code")
+	}
+	return nil
 }
 
 // Env + DockerTemplating structs are the template context for the
@@ -247,7 +271,13 @@ func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*
 }
 
 // Parameters is the template parameter set for the k8s deployment.
-type Parameters struct{}
+type Parameters struct {
+	// GRPCEnabled adds the gRPC containerPort and Service port to the rendered
+	// manifests. GRPCPort is the fixed in-cluster port the grpc.aio listener
+	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
+	GRPCEnabled bool
+	GRPCPort    int
+}
 
 // Deploy renders and applies k8s manifests.
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
@@ -260,7 +290,10 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			OwnConfiguration:         true,
 			DependencyConfigurations: true,
 		},
-		Parameters: Parameters{},
+		Parameters: Parameters{
+			GRPCEnabled: s.FastAPI.Settings.GRPCServer.Enabled,
+			GRPCPort:    int(standards.Port(standards.GRPC)),
+		},
 	})
 }
 
@@ -269,6 +302,7 @@ func (s *Builder) Options() []*agentv0.Question {
 	return []*agentv0.Question{
 		communicate.NewConfirm(&agentv0.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
 		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
+		communicate.NewConfirm(&agentv0.Message{Name: GRPCServer, Message: "Add a gRPC server?", Description: "runs a grpc.aio listener alongside FastAPI with a proto contract ⚙️"}, false),
 	}
 }
 
@@ -277,6 +311,10 @@ type CreateConfiguration struct {
 	*services.Information
 	Image *resources.DockerImage
 	Envs  []string
+
+	// GRPCEnabled gates the gRPC boot in src/main.py and the grpcio
+	// dependencies in pyproject.toml. False keeps the REST-only scaffold.
+	GRPCEnabled bool
 }
 
 // Create applies factory templates, scaffolds src/tests dirs, and
@@ -295,9 +333,19 @@ func (s *Builder) Create(ctx context.Context, _ *builderv0.CreateRequest) (*buil
 		}
 	}
 
-	create := CreateConfiguration{Information: s.Information, Envs: []string{}}
+	create := CreateConfiguration{Information: s.Information, Envs: []string{}, GRPCEnabled: s.FastAPI.Settings.GRPCServer.Enabled}
 	if err := s.Base.Templates(ctx, create, services.WithFactory(factoryFS)); err != nil {
 		return s.Base.Builder.CreateError(err)
+	}
+
+	// The gRPC scaffold (proto contract, buf config, grpc.aio server + user
+	// servicer seam) is applied from a separate tree only when opted in, so a
+	// REST-only service keeps its generated layout untouched.
+	if s.FastAPI.Settings.GRPCServer.Enabled {
+		grpc := services.WithTemplate(grpcFS, "grpc", "").WithOverride(shared.SkipAll())
+		if err := s.Base.Templates(ctx, create, grpc); err != nil {
+			return s.Base.Builder.CreateError(err)
+		}
 	}
 
 	// Scaffold package + tests dirs with empty __init__.py.
@@ -347,7 +395,38 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	}
 	s.FastAPI.RestEndpoint = api
 	s.Endpoints = []*basev0.Endpoint{s.FastAPI.RestEndpoint}
+
+	if s.FastAPI.Settings.GRPCServer.Enabled {
+		grpcEndpoint, grpcErr := s.grpcEndpoint(ctx)
+		if grpcErr != nil {
+			return grpcErr
+		}
+		s.FastAPI.GRPCEndpoint = grpcEndpoint
+		s.Endpoints = append(s.Endpoints, grpcEndpoint)
+	}
 	return nil
+}
+
+// grpcEndpoint builds the service-owned gRPC endpoint from the proto contract.
+// The proto path is resolved relative to the service root — the same location
+// core's LoadEndpoints re-reads it from — so the endpoint keeps its RPCs across
+// reloads and stays consumable by dependent services. It inherits the same
+// public/private visibility as the REST endpoint.
+func (s *Builder) grpcEndpoint(ctx context.Context) (*basev0.Endpoint, error) {
+	protoPath := s.Local("%s", s.FastAPI.Settings.GRPCServer.Proto)
+	grpc, err := resources.LoadGrpcAPI(ctx, shared.Pointer(protoPath))
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot load grpc proto %q", protoPath)
+	}
+	endpoint := s.Base.BaseEndpoint(standards.GRPC)
+	if s.FastAPI.Settings.PublicEndpoint {
+		endpoint.Visibility = resources.VisibilityPublic
+	}
+	api, err := resources.NewAPI(ctx, endpoint, resources.ToGrpcAPI(grpc))
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot create grpc api")
+	}
+	return api, nil
 }
 
 // isFileNotExistErr matches the bespoke "file does not exist" error string
@@ -365,7 +444,19 @@ func (s *Builder) populateSettingsFromAnswers() error {
 	if s.FastAPI.Settings.PublicEndpoint, err = communicate.Confirm(s.answers, PublicEndpoint); err != nil {
 		return err
 	}
+	if s.FastAPI.Settings.GRPCServer.Enabled, err = communicate.Confirm(s.answers, GRPCServer); err != nil {
+		return err
+	}
+	s.applyGRPCDefaults()
 	return nil
+}
+
+// applyGRPCDefaults fills the proto path when the server is enabled but the
+// path was left blank (interactive answers and defaults never set it).
+func (s *Builder) applyGRPCDefaults() {
+	if s.FastAPI.Settings.GRPCServer.Enabled && s.FastAPI.Settings.GRPCServer.Proto == "" {
+		s.FastAPI.Settings.GRPCServer.Proto = defaultProtoPath
+	}
 }
 
 func (s *Builder) populateSettingsFromDefaults() error {
@@ -377,6 +468,10 @@ func (s *Builder) populateSettingsFromDefaults() error {
 	if s.FastAPI.Settings.PublicEndpoint, err = communicate.GetDefaultConfirm(opts, PublicEndpoint); err != nil {
 		return err
 	}
+	if s.FastAPI.Settings.GRPCServer.Enabled, err = communicate.GetDefaultConfirm(opts, GRPCServer); err != nil {
+		return err
+	}
+	s.applyGRPCDefaults()
 	return nil
 }
 
@@ -399,6 +494,12 @@ func renderFromFactory(ctx context.Context, info *services.Information) (string,
 
 //go:embed templates/factory
 var factoryFS embed.FS
+
+// all: so the scaffold's dotfiles (code/.gitignore) are embedded — go:embed
+// skips names beginning with "." without it.
+//
+//go:embed all:templates/grpc
+var grpcFS embed.FS
 
 //go:embed templates/builder
 var builderFS embed.FS

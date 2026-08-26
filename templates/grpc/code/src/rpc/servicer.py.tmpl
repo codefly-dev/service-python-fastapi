@@ -1,0 +1,9 @@
+import api_pb2
+import api_pb2_grpc
+
+
+# EchoServicer is the user-owned implementation seam. Regenerating the proto
+# stubs never overwrites this file — implement your RPCs here.
+class EchoServicer(api_pb2_grpc.EchoServiceServicer):
+    async def Echo(self, request, context):
+        return api_pb2.EchoResponse(message=request.message)
