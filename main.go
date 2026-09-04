@@ -84,6 +84,15 @@ type Settings struct {
 	// release). Field named RuntimeImage (not DockerImage) to avoid
 	// colliding with services.Base.DockerImage(req).
 	RuntimeImage string `yaml:"docker-image"`
+
+	// PrebuiltImage, when set, makes Build skip the uv/pyproject build and
+	// instead emit a one-line `FROM <ref>` Dockerfile. codefly re-tags the
+	// referenced image under its own name to resolve an immutable digest,
+	// then renders the kustomize manifests around it. Used to deploy an
+	// image built elsewhere (e.g. a monorepo cloudbuild) as-is. The ref must
+	// include linux/amd64 (the deployment arch); a re-tag cannot add an arch.
+	// Format: "<registry>/<repo>@sha256:<digest>" or "<registry>/<repo>:<tag>".
+	PrebuiltImage string `yaml:"prebuilt-image"`
 }
 
 // runtimeImage is the codefly-built Python runtime companion —
