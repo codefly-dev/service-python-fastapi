@@ -8,6 +8,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
 	"github.com/codefly-dev/core/agents/services"
@@ -22,8 +23,6 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	pythonruntime "github.com/codefly-dev/service-python/pkg/runtime"
-
-	"google.golang.org/protobuf/proto"
 )
 
 // Runtime is the FastAPI specialization of the generic Python Runtime.
@@ -58,9 +57,21 @@ type Runtime struct {
 	runnerEnvironment runners.RunnerEnvironment
 	runner            runners.Proc
 
-	// startRequest is what the running process was launched with, kept so a
-	// later Start can tell whether the inputs it carries still match.
-	startRequest *runtimev0.StartRequest
+	// runnerMu serializes the runner lifecycle. Start and Stop are concurrent
+	// gRPC handlers and both replace s.runner; without it two overlapping
+	// Starts can each stop the same process and leave one of their
+	// replacements running, unreachable, on the bound port.
+	runnerMu sync.Mutex
+
+	// startInputs renders the StartRequest fields the running process was
+	// launched with, so a later Start can tell whether they still match.
+	startInputs string
+
+	// appliedOverrides counts, per key, how many override entries this agent
+	// has handed to the environment manager. The manager appends overrides and
+	// never removes them, so the counts are what lets a withdrawn key be
+	// filtered back out of the process environment.
+	appliedOverrides map[string]int
 
 	port uint16
 
@@ -359,10 +370,15 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	s.runnerMu.Lock()
+	defer s.runnerMu.Unlock()
+
 	s.Base.Runtime.LogStartRequest(req)
 
+	inputs := startInputs(req)
+
 	if s.runner != nil && s.FastAPI.Settings.HotReload {
-		if proto.Equal(req, s.startRequest) {
+		if inputs == s.startInputs {
 			return s.Base.Runtime.StartResponse()
 		}
 		// Hot reload only covers source: uvicorn --reload re-executes the app
@@ -386,11 +402,6 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
 	}
 
-	startEnvs, err := s.startEnvironment(ctx, req)
-	if err != nil {
-		return s.Base.Runtime.StartErrorf(err, "getting environment variables")
-	}
-
 	proc, err := s.runnerEnvironment.NewProcess(
 		"uv", "run", "uvicorn", "src.main:app",
 		"--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
@@ -398,20 +409,32 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(err)
 	}
 
+	if inputs != s.startInputs {
+		if err := s.applyStartInputs(ctx, req); err != nil {
+			return s.Base.Runtime.StartErrorf(err, "applying start request")
+		}
+	}
+
+	startEnvs, err := s.processEnvironment(req)
+	if err != nil {
+		return s.Base.Runtime.StartErrorf(err, "getting environment variables")
+	}
+
 	proc.WithOutput(s.Logger)
 	proc.WithDir(s.Service.SourceLocation)
 
 	proc.WithEnvironmentVariables(ctx, startEnvs...)
-	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.Secrets()...)
 	if s.grpcPort != 0 {
 		// The FastAPI lifespan boots the grpc.aio listener on this port
 		// (src/rpc/server.py); in container/k8s the app falls back to the
-		// standard gRPC port when the variable is unset.
+		// standard gRPC port when the variable is unset. The agent owns the
+		// mapped port, so it is applied after the overrides and wins over a
+		// `--set` naming the same key.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
 	}
 
 	s.runner = proc
-	s.startRequest = req
+	s.startInputs = inputs
 
 	if s.FastAPI.Settings.HotReload {
 		conf := services.NewWatchConfiguration(requirements)
@@ -431,52 +454,139 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	return s.Base.Runtime.StartResponse()
 }
 
-// startEnvironment folds the StartRequest into the environment manager and
-// returns what the uvicorn process runs with: the per-service overrides of
-// `codefly run --set`, the fixture selector, and the resolved addresses of the
-// endpoints this service depends on. req.Specs carries agent-specific runtime
-// knobs and fastapi defines none, so nothing is read from it.
-func (s *Runtime) startEnvironment(ctx context.Context, req *runtimev0.StartRequest) ([]*resources.EnvironmentVariable, error) {
+// startInputs renders the StartRequest fields this agent turns into process
+// environment: the per-service overrides of `codefly run --set`, the fixture
+// selector, and the addresses of the endpoints this service depends on.
+// req.Specs carries agent-specific runtime knobs and fastapi defines none, so
+// it is deliberately absent — a request differing only there produces an
+// identical process and must not cost a restart.
+func startInputs(req *runtimev0.StartRequest) string {
+	lines := []string{fmt.Sprintf("fixture %s", req.GetFixture())}
+	for _, key := range slices.Sorted(maps.Keys(req.GetOverrides())) {
+		lines = append(lines, fmt.Sprintf("override %s=%s", key, req.GetOverrides()[key]))
+	}
+	var dependencies []string
+	for _, mapping := range req.GetDependenciesNetworkMappings() {
+		endpoint := mapping.GetEndpoint()
+		for _, instance := range mapping.GetInstances() {
+			dependencies = append(dependencies, fmt.Sprintf("dependency %s/%s/%s/%s %s %s",
+				endpoint.GetModule(), endpoint.GetService(), endpoint.GetName(), endpoint.GetApi(),
+				instance.GetAccess().GetKind(), instance.GetAddress()))
+		}
+	}
+	slices.Sort(dependencies)
+	return strings.Join(append(lines, dependencies...), "\n")
+}
+
+// applyStartInputs folds the StartRequest into the environment manager. Callers
+// must only invoke it when the inputs actually changed: the manager appends
+// overrides and endpoints without ever removing any, so re-folding an unchanged
+// request would grow those slices on every restart.
+func (s *Runtime) applyStartInputs(ctx context.Context, req *runtimev0.StartRequest) error {
 	overrides := req.GetOverrides()
 	s.EnvironmentVariables.AddOverrides(overrides)
-
-	if fixture := req.GetFixture(); fixture != "" {
-		s.EnvironmentVariables.SetFixture(fixture)
+	if s.appliedOverrides == nil {
+		s.appliedOverrides = make(map[string]int, len(overrides))
+	}
+	for key := range overrides {
+		s.appliedOverrides[key]++
 	}
 
-	if err := s.EnvironmentVariables.AddEndpoints(ctx, req.GetDependenciesNetworkMappings(),
-		resources.NetworkAccessFromRuntimeContext(s.Base.Runtime.RuntimeContext)); err != nil {
-		return nil, err
+	// Unconditional: the manager falls back to the environment-level fixture
+	// when this one is empty, so passing "" is how a withdrawn fixture reverts.
+	s.EnvironmentVariables.SetFixture(req.GetFixture())
+
+	networkAccess := resources.NetworkAccessFromRuntimeContext(s.Base.Runtime.RuntimeContext)
+	if unresolved := unresolvedDependencies(req.GetDependenciesNetworkMappings(), networkAccess); len(unresolved) > 0 {
+		// AddEndpoints drops these silently, which surfaces much later as a
+		// missing variable inside the service rather than as a start problem.
+		s.Wool.Warn("dependency endpoints carry no address reachable from this runtime context and are not exported",
+			wool.Field("access", networkAccess.GetKind()),
+			wool.Field("endpoints", strings.Join(unresolved, ", ")))
+	}
+	if err := s.EnvironmentVariables.AddEndpoints(ctx, req.GetDependenciesNetworkMappings(), networkAccess); err != nil {
+		return s.Wool.Wrapf(err, "cannot add dependency endpoints")
 	}
 
 	s.EnvironmentVariables.SetRunning()
+	return nil
+}
 
+// unresolvedDependencies returns the dependency mappings that carry no instance
+// reachable from networkAccess, named module/service/endpoint. It mirrors the
+// filter AddEndpoints applies, which reports nothing when a mapping contributes
+// no address.
+func unresolvedDependencies(mappings []*basev0.NetworkMapping, networkAccess *basev0.NetworkAccess) []string {
+	var unresolved []string
+	for _, mapping := range mappings {
+		if mapping == nil {
+			continue
+		}
+		matched := false
+		for _, instance := range mapping.GetInstances() {
+			if instance.GetAccess().GetKind() == networkAccess.GetKind() {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			endpoint := mapping.GetEndpoint()
+			unresolved = append(unresolved, fmt.Sprintf("%s/%s/%s",
+				endpoint.GetModule(), endpoint.GetService(), endpoint.GetName()))
+		}
+	}
+	return unresolved
+}
+
+// processEnvironment returns what the service process runs with. All() already
+// carries the secret configuration values alongside the plain ones, so this is
+// the complete set and the override resolution below covers secrets too.
+func (s *Runtime) processEnvironment(req *runtimev0.StartRequest) ([]*resources.EnvironmentVariable, error) {
 	envs, err := s.EnvironmentVariables.All()
 	if err != nil {
 		return nil, err
 	}
-	return withOverridesLast(envs, overrides), nil
+	withdrawn := make(map[string]int, len(s.appliedOverrides))
+	for key, count := range s.appliedOverrides {
+		if _, current := req.GetOverrides()[key]; !current {
+			withdrawn[key] = count
+		}
+	}
+	return withOverrides(envs, req.GetOverrides(), withdrawn), nil
 }
 
-// withOverridesLast re-appends the overrides at the end of envs and collapses
-// the result to a single entry per key, keeping the last value. The
-// environment manager emits overrides ahead of the configuration-derived
-// variables, so without the reordering a configuration would shadow a `--set`
-// naming the same key.
-func withOverridesLast(envs []*resources.EnvironmentVariable, overrides map[string]string) []*resources.EnvironmentVariable {
-	for _, key := range slices.Sorted(maps.Keys(overrides)) {
-		envs = append(envs, resources.Env(key, overrides[key]))
+// withOverrides resolves the keys this agent's overrides participate in, and
+// leaves every other entry exactly as the environment manager emitted it.
+//
+// The manager emits overrides ahead of the configuration-derived variables
+// (secrets included), so a configuration would otherwise shadow a `--set`
+// naming the same key: every earlier entry a current override claims is
+// dropped, and the override value is appended at the end.
+//
+// The manager also never forgets an override. withdrawn carries, per key, how
+// many stale entries an earlier start left behind; those are the first entries
+// the manager emits for that key, so dropping exactly that many reveals the
+// configuration value underneath — the value the service would have seen had
+// the override never been set.
+func withOverrides(envs []*resources.EnvironmentVariable, overrides map[string]string, withdrawn map[string]int) []*resources.EnvironmentVariable {
+	if len(overrides) == 0 && len(withdrawn) == 0 {
+		return envs
 	}
-	seen := make(map[string]bool, len(envs))
-	resolved := make([]*resources.EnvironmentVariable, 0, len(envs))
-	for i := len(envs) - 1; i >= 0; i-- {
-		if seen[envs[i].Key] {
+	remaining := maps.Clone(withdrawn)
+	resolved := make([]*resources.EnvironmentVariable, 0, len(envs)+len(overrides))
+	for _, env := range envs {
+		if _, claimed := overrides[env.Key]; claimed {
 			continue
 		}
-		seen[envs[i].Key] = true
-		resolved = append(resolved, envs[i])
+		if remaining[env.Key] > 0 {
+			remaining[env.Key]--
+			continue
+		}
+		resolved = append(resolved, env)
 	}
-	slices.Reverse(resolved)
+	for _, key := range slices.Sorted(maps.Keys(overrides)) {
+		resolved = append(resolved, resources.Env(key, overrides[key]))
+	}
 	return resolved
 }
 
@@ -487,6 +597,9 @@ func withOverridesLast(envs []*resources.EnvironmentVariable, overrides map[stri
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	s.runnerMu.Lock()
+	defer s.runnerMu.Unlock()
 
 	s.Wool.Debug("stopping service")
 	if s.runner != nil {
