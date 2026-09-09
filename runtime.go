@@ -402,9 +402,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
 	}
 
-	proc, err := s.runnerEnvironment.NewProcess(
-		"uv", "run", "uvicorn", "src.main:app",
-		"--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
+	// Local patch (lodestar spike): honour spec.hot-reload instead of always passing --reload.
+	args := []string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port)}
+	if s.FastAPI.Settings.HotReload {
+		args = append(args, "--reload")
+	}
+	proc, err := s.runnerEnvironment.NewProcess("uv", args...)
 	if err != nil {
 		return s.Base.Runtime.StartError(err)
 	}

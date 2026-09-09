@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -183,6 +184,40 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	image := s.DockerImage(dockerRequest)
 	s.Wool.Debug("building docker image", wool.Field("image", image.FullName()))
 	ctx = s.Wool.Inject(ctx)
+
+	// Passthrough mode: deploy a prebuilt image as-is. Triggered by a
+	// `prebuilt-image` file in the service directory holding an image ref
+	// (a file, not a settings field, because the fastapi-specific settings
+	// don't populate on the build path). Emit a one-line `FROM <ref>`
+	// Dockerfile instead of the uv/pyproject build, so codefly re-tags the
+	// referenced image under `image` to resolve a digest and renders the
+	// manifests around it. Only meaningful when the CLI owns the build.
+	prebuiltRef := ""
+	if b, rerr := os.ReadFile(s.Local("prebuilt-image")); rerr == nil {
+		prebuiltRef = strings.TrimSpace(string(b))
+	}
+	if ref := prebuiltRef; ref != "" {
+		if outputDir := req.GetOutputDirectory(); outputDir != "" {
+			if err := os.WriteFile(filepath.Join(outputDir, "Dockerfile"), []byte("FROM "+ref+"\n"), 0o644); err != nil {
+				return s.Base.Builder.BuildError(err)
+			}
+			// amd64 only: a re-tag cannot add an arch the source image lacks,
+			// and amd64 is the deployment arch codefly requires.
+			recipe := &builderv0.DockerBuildRecipe{
+				Name:       "app",
+				Dockerfile: "Dockerfile",
+				Context:    ".",
+				Image:      image.FullName(),
+				Platforms:  []string{"linux/amd64"},
+			}
+			plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{recipe})
+			if err != nil {
+				return s.Base.Builder.BuildError(err)
+			}
+			s.Base.Builder.WithBuildPlan(plan)
+			return s.Base.Builder.BuildResponse()
+		}
+	}
 
 	docker := DockerTemplating{
 		Builder:    runtimeImage.FullName(),
