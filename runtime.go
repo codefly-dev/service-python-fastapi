@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
@@ -20,6 +22,8 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	pythonruntime "github.com/codefly-dev/service-python/pkg/runtime"
+
+	"google.golang.org/protobuf/proto"
 )
 
 // Runtime is the FastAPI specialization of the generic Python Runtime.
@@ -53,6 +57,10 @@ type Runtime struct {
 	// internal
 	runnerEnvironment runners.RunnerEnvironment
 	runner            runners.Proc
+
+	// startRequest is what the running process was launched with, kept so a
+	// later Start can tell whether the inputs it carries still match.
+	startRequest *runtimev0.StartRequest
 
 	port uint16
 
@@ -354,13 +362,33 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.Base.Runtime.LogStartRequest(req)
 
 	if s.runner != nil && s.FastAPI.Settings.HotReload {
-		return s.Base.Runtime.StartResponse()
+		if proto.Equal(req, s.startRequest) {
+			return s.Base.Runtime.StartResponse()
+		}
+		// Hot reload only covers source: uvicorn --reload re-executes the app
+		// inside the process it was launched in, so that process keeps the
+		// environment it was given. A request carrying different inputs
+		// therefore needs a new process, or it would be accepted and never
+		// take effect.
+		s.Infof("start inputs changed, restarting fastapi app")
+		if err := s.runner.Stop(ctx); err != nil {
+			return s.Base.Runtime.StartError(err)
+		}
+		s.runner = nil
+		// The restart registers a new watcher below, which would otherwise
+		// leave this one running with no way to reach it.
+		s.Base.StopWatcher()
 	}
 
 	if s.runnerEnvironment == nil {
 		// Init must run before Start; without it NewProcess below nil-derefs
 		// and panics the agent. Fail loudly with a clear error instead.
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
+	}
+
+	startEnvs, err := s.startEnvironment(ctx, req)
+	if err != nil {
+		return s.Base.Runtime.StartErrorf(err, "getting environment variables")
 	}
 
 	proc, err := s.runnerEnvironment.NewProcess(
@@ -373,12 +401,6 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	proc.WithOutput(s.Logger)
 	proc.WithDir(s.Service.SourceLocation)
 
-	s.EnvironmentVariables.SetRunning()
-
-	startEnvs, err := s.EnvironmentVariables.All()
-	if err != nil {
-		return s.Base.Runtime.StartErrorf(err, "getting environment variables")
-	}
 	proc.WithEnvironmentVariables(ctx, startEnvs...)
 	proc.WithEnvironmentVariables(ctx, s.EnvironmentVariables.Secrets()...)
 	if s.grpcPort != 0 {
@@ -389,6 +411,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	s.runner = proc
+	s.startRequest = req
 
 	if s.FastAPI.Settings.HotReload {
 		conf := services.NewWatchConfiguration(requirements)
@@ -406,6 +429,55 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.Wool.Debug("start done")
 	return s.Base.Runtime.StartResponse()
+}
+
+// startEnvironment folds the StartRequest into the environment manager and
+// returns what the uvicorn process runs with: the per-service overrides of
+// `codefly run --set`, the fixture selector, and the resolved addresses of the
+// endpoints this service depends on. req.Specs carries agent-specific runtime
+// knobs and fastapi defines none, so nothing is read from it.
+func (s *Runtime) startEnvironment(ctx context.Context, req *runtimev0.StartRequest) ([]*resources.EnvironmentVariable, error) {
+	overrides := req.GetOverrides()
+	s.EnvironmentVariables.AddOverrides(overrides)
+
+	if fixture := req.GetFixture(); fixture != "" {
+		s.EnvironmentVariables.SetFixture(fixture)
+	}
+
+	if err := s.EnvironmentVariables.AddEndpoints(ctx, req.GetDependenciesNetworkMappings(),
+		resources.NetworkAccessFromRuntimeContext(s.Base.Runtime.RuntimeContext)); err != nil {
+		return nil, err
+	}
+
+	s.EnvironmentVariables.SetRunning()
+
+	envs, err := s.EnvironmentVariables.All()
+	if err != nil {
+		return nil, err
+	}
+	return withOverridesLast(envs, overrides), nil
+}
+
+// withOverridesLast re-appends the overrides at the end of envs and collapses
+// the result to a single entry per key, keeping the last value. The
+// environment manager emits overrides ahead of the configuration-derived
+// variables, so without the reordering a configuration would shadow a `--set`
+// naming the same key.
+func withOverridesLast(envs []*resources.EnvironmentVariable, overrides map[string]string) []*resources.EnvironmentVariable {
+	for _, key := range slices.Sorted(maps.Keys(overrides)) {
+		envs = append(envs, resources.Env(key, overrides[key]))
+	}
+	seen := make(map[string]bool, len(envs))
+	resolved := make([]*resources.EnvironmentVariable, 0, len(envs))
+	for i := len(envs) - 1; i >= 0; i-- {
+		if seen[envs[i].Key] {
+			continue
+		}
+		seen[envs[i].Key] = true
+		resolved = append(resolved, envs[i])
+	}
+	slices.Reverse(resolved)
+	return resolved
 }
 
 // Test is INHERITED from *pythonruntime.Runtime (uv run pytest).
