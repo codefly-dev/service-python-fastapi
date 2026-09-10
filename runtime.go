@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -758,6 +759,42 @@ func withOverrides(envs []*resources.EnvironmentVariable, overrides map[string]s
 // Lint is INHERITED from *pythonruntime.Runtime (uv run ruff check).
 // Build is INHERITED (no-op for Python).
 
+// endExecution releases the execution resources the runtime holds: the file
+// watcher, the current process generation, and the runner environment. It must
+// be called with runnerMu held.
+//
+// The watcher goes first because it is the only thing that can ask for a
+// replacement process, and a teardown racing it can be handed back the very
+// thing it is tearing down. The remaining steps then all run even when an
+// earlier one fails, so one stubborn resource cannot strand the rest, and the
+// environment is forgotten only once it is actually down — a caller retrying
+// after a failure must still be able to reach it.
+func (s *Runtime) endExecution(ctx context.Context) error {
+	// Cancel the watcher and let its Start goroutine's deferred close of Events
+	// run exactly once — never close Events here, or it races that goroutine
+	// into a "close of closed channel" panic.
+	s.Base.StopWatcher()
+
+	var errs []error
+	if err := s.stopRunner(ctx); err != nil {
+		errs = append(errs, s.Wool.Wrapf(err, "cannot stop the fastapi app"))
+	}
+	if s.runnerEnvironment != nil {
+		if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down the runner environment"))
+		} else {
+			// A shut-down environment cannot serve another process — a docker
+			// one has closed its client — so drop it and let a later Init build
+			// a fresh one rather than hand Code and the REPL a dead handle.
+			s.runnerEnvironment = nil
+			s.FastAPI.Service.ActiveEnv = nil
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Stop releases the execution resources and keeps everything on disk, so a
+// later Init and Start bring the same service back.
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
@@ -766,52 +803,56 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	defer s.runnerMu.Unlock()
 
 	s.Wool.Debug("stopping service")
-	if err := s.stopRunner(ctx); err != nil {
+	if err := s.endExecution(ctx); err != nil {
 		return s.Base.Runtime.StopError(err)
 	}
-	if s.runnerEnvironment != nil {
-		if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
-			s.Wool.Warn("error shutting down runner environment", wool.ErrField(err))
-		}
-	}
-	// Cancel the watcher and let its Start goroutine's deferred close of Events
-	// run exactly once — Stop must not close Events itself, or it races that
-	// goroutine into a "close of closed channel" panic.
-	s.Base.StopWatcher()
 	return s.Base.Runtime.StopResponse()
 }
 
+// Destroy ends execution and then removes what this service owns on the host.
+// It assumes nothing about what ran before it: `codefly` shutdown calls Destroy
+// directly, with no Stop in between, so ending execution is Destroy's own job
+// rather than a precondition on its callers. Safe before Init, after a failed
+// Init, after Stop, and repeated.
 func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
 	s.Wool.Debug("Destroying service")
 
-	// A Destroy that skips this wipes the cache and tears down the container
-	// while the service process is still running against them.
+	var errs []error
+
 	s.runnerMu.Lock()
-	if err := s.stopRunner(ctx); err != nil {
-		s.Wool.Warn("cannot stop the fastapi app", wool.ErrField(err))
+	if err := s.endExecution(ctx); err != nil {
+		errs = append(errs, err)
 	}
 	s.runnerMu.Unlock()
 
-	s.Wool.Debug("removing cache")
-	if err := shared.EmptyDir(ctx, s.cacheLocation); err != nil {
-		// Best-effort: a failed cache wipe must NOT short-circuit Destroy and
-		// skip the container teardown below — that would leak the running
-		// container (the far more expensive resource).
-		s.Wool.Warn("cannot remove cache", wool.ErrField(err))
+	// Only once execution has ended: a process still running against the cache
+	// repopulates what this removes, and is reading the venv being pulled out
+	// from under it. An empty location means Init never claimed one — there is
+	// nothing owned to clear, and EmptyDir rejects the empty path as an error.
+	if s.cacheLocation != "" {
+		s.Wool.Debug("removing cache")
+		if err := shared.EmptyDir(ctx, s.cacheLocation); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot remove cache"))
+		}
 	}
 
 	if s.Base.Runtime.IsContainerRuntime() {
+		// A container outlives the agent that started it, so a Destroy whose
+		// runtime never held one still has to reach it by name.
 		s.Wool.Debug("running in container")
 		dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, runtimeImage, s.Service.SourceLocation, s.Base.Runtime.UniqueWithWorkspace())
 		if err != nil {
-			return s.Base.Runtime.DestroyError(err)
+			errs = append(errs, s.Wool.Wrapf(err, "cannot reach the container environment"))
+		} else if err := dockerEnv.Shutdown(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down the container environment"))
 		}
-		if err := dockerEnv.Shutdown(ctx); err != nil {
-			return s.Base.Runtime.DestroyError(err)
-		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return s.Base.Runtime.DestroyError(err)
 	}
 	return s.Base.Runtime.DestroyResponse()
 }
