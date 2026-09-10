@@ -64,7 +64,19 @@ type Runtime struct {
 	// goroutines are concurrent and all replace s.runner; without it two
 	// overlapping Starts can each stop the same process and leave one of their
 	// replacements running, unreachable, on the bound port.
+	//
+	// It guards the rest of the runner state too — runnerEnvironment,
+	// cacheLocation and the runtime context — which Init publishes while Stop
+	// and Destroy are reading and releasing it.
 	runnerMu sync.Mutex
+
+	// runnerCreateMu single-flights the creation of the runner environment.
+	// runnerMu cannot do that job: publishing is cheap but building is a
+	// docker pull, and holding runnerMu across it would park every Stop.
+	// Without it two concurrent Inits each build an environment, one gets
+	// published and the other is left initialized — holding a docker client
+	// and a log stream — with nothing referencing it to shut it down.
+	runnerCreateMu sync.Mutex
 
 	// startInputs renders the StartRequest fields the running process was
 	// launched with, so a later Start can tell whether they still match.
@@ -160,18 +172,24 @@ func (s *Runtime) resolveRuntimeImage() (*resources.DockerImage, error) {
 	return parsed, nil
 }
 
-func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
+// CreateRunnerEnvironment builds the execution environment and the cache
+// location that belongs to it, publishes both under runnerMu and returns them
+// so the caller can keep working against locals.
+func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEnvironment, string, error) {
 	s.Wool.Debug("creating runner environment in", wool.DirField(s.Identity.WorkspacePath))
 	image, err := s.resolveRuntimeImage()
 	if err != nil {
-		return err
+		return nil, "", err
 	}
+
+	var env runners.RunnerEnvironment
+	var cacheLocation string
 
 	switch {
 	case s.Base.Runtime.IsContainerRuntime():
 		dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, image, s.Identity.WorkspacePath, s.UniqueWithWorkspace())
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create docker runner")
+			return nil, "", s.Wool.Wrapf(err, "cannot create docker runner")
 		}
 		dockerEnv.WithPause()
 		// Run as the invoking host user. uv sync writes uv.lock into the
@@ -183,21 +201,21 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 
 		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot find network instance")
+			return nil, "", s.Wool.Wrapf(err, "cannot find network instance")
 		}
 		dockerEnv.WithPort(ctx, uint16(instance.Port))
 
 		if s.FastAPI.GRPCEndpoint != nil {
 			grpcInstance, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
 			if grpcErr != nil {
-				return s.Wool.Wrapf(grpcErr, "cannot find grpc network instance")
+				return nil, "", s.Wool.Wrapf(grpcErr, "cannot find grpc network instance")
 			}
 			dockerEnv.WithPort(ctx, uint16(grpcInstance.Port))
 		}
 
 		envPath := s.DockerEnvPath()
 		if _, err = shared.CheckDirectoryOrCreate(ctx, envPath); err != nil {
-			return s.Wool.Wrapf(err, "cannot create docker venv environment")
+			return nil, "", s.Wool.Wrapf(err, "cannot create docker venv environment")
 		}
 
 		s.Wool.Debug("docker environment", wool.DirField(envPath))
@@ -205,65 +223,103 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 		// Mount the persistent venv dir so it survives container restarts.
 		dockerEnv.WithMount(s.DockerEnvPath(), "/venv")
 
-		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/container")
+		cacheLocation, err = s.LocalDirCreate(ctx, ".cache/container")
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create cache location")
+			return nil, "", s.Wool.Wrapf(err, "cannot create cache location")
 		}
 		// uv's download cache defaults to $HOME/.cache/uv; the host user has no
 		// home inside the image, so give uv a writable, host-owned cache mount.
 		uvCache, err := s.LocalDirCreate(ctx, ".cache/container/uv")
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create uv cache location")
+			return nil, "", s.Wool.Wrapf(err, "cannot create uv cache location")
 		}
 		dockerEnv.WithMount(uvCache, "/uv-cache")
 		dockerEnv.WithEnvironmentVariables(ctx, resources.Env("UV_CACHE_DIR", "/uv-cache"))
-		s.runnerEnvironment = dockerEnv
+		env = dockerEnv
 
 	case s.Base.Runtime.IsNixRuntime():
 		// Provision the devShell (python3 + uv) when the project doesn't ship a
 		// flake.nix, so NewNixEnvironment has something to materialize.
 		if err := ensureNixFlake(s.Service.SourceLocation); err != nil {
-			return s.Wool.Wrapf(err, "cannot provision nix flake")
+			return nil, "", s.Wool.Wrapf(err, "cannot provision nix flake")
 		}
 		nixEnv, err := runners.NewNixEnvironment(ctx, s.Service.SourceLocation)
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create nix runner")
+			return nil, "", s.Wool.Wrapf(err, "cannot create nix runner")
 		}
-		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/nix")
+		cacheLocation, err = s.LocalDirCreate(ctx, ".cache/nix")
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create cache location")
+			return nil, "", s.Wool.Wrapf(err, "cannot create cache location")
 		}
 		// Enable materialized-env caching — nix print-dev-env is run once
 		// and the result is persisted under the plugin's cacheLocation.
 		// Subsequent starts skip nix evaluation entirely (see nix_runner.go).
-		nixEnv.WithCacheDir(s.cacheLocation)
-		s.runnerEnvironment = nixEnv
+		nixEnv.WithCacheDir(cacheLocation)
+		env = nixEnv
 
 	default:
 		localEnv, err := runners.NewNativeEnvironment(ctx, s.Service.SourceLocation)
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create local runner")
+			return nil, "", s.Wool.Wrapf(err, "cannot create local runner")
 		}
-		s.cacheLocation, err = s.LocalDirCreate(ctx, ".cache/local")
+		cacheLocation, err = s.LocalDirCreate(ctx, ".cache/local")
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create cache location")
+			return nil, "", s.Wool.Wrapf(err, "cannot create cache location")
 		}
-		s.runnerEnvironment = localEnv
+		env = localEnv
 	}
 
 	allEnvs, err := s.EnvironmentVariables.All()
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot get environment variables")
+		return nil, "", s.Wool.Wrapf(err, "cannot get environment variables")
 	}
-	s.runnerEnvironment.WithEnvironmentVariables(ctx, allEnvs...)
-	s.runnerEnvironment.WithEnvironmentVariables(ctx, resources.Env("PYTHONUNBUFFERED", 1))
-	// Share with Code / Tooling so AST analysis, grep, uv sync follow
-	// whatever mode the plugin is in.
-	s.FastAPI.Service.ActiveEnv = s.runnerEnvironment
-	return nil
+	env.WithEnvironmentVariables(ctx, allEnvs...)
+	env.WithEnvironmentVariables(ctx, resources.Env("PYTHONUNBUFFERED", 1))
+
+	s.runnerMu.Lock()
+	defer s.runnerMu.Unlock()
+	s.runnerEnvironment = env
+	s.cacheLocation = cacheLocation
+	// Share with Code / Tooling so AST analysis, grep, uv sync follow whatever
+	// mode the plugin is in. The lock orders this against Stop, which clears
+	// the same field — without it a publish can land after a teardown and
+	// leave Code holding a shut-down environment. It does NOT protect ActiveEnv
+	// from its readers: Code, Tooling and the REPL (service-python pkg/code,
+	// pkg/runtime/commands) cannot take runnerMu. Tracked in #27.
+	s.FastAPI.Service.ActiveEnv = env
+	return env, cacheLocation, nil
 }
 
+// runnerEnv returns the execution environment and cache location Init works
+// against, creating them when the runtime holds none.
+//
+// The pair is read once under runnerMu and then carried as locals: Stop and
+// Destroy own the same fields, and Init's runner section — a docker pull, a
+// nix evaluation, `uv sync` — is far too long to hold the lock across, so a
+// teardown can land anywhere inside it.
+//
+// runnerCreateMu spans the check and the creation so the two are atomic with
+// respect to each other; runnerMu is taken only for the read and the publish.
+func (s *Runtime) runnerEnv(ctx context.Context) (runners.RunnerEnvironment, string, error) {
+	s.runnerCreateMu.Lock()
+	defer s.runnerCreateMu.Unlock()
+
+	s.runnerMu.Lock()
+	env, cacheLocation := s.runnerEnvironment, s.cacheLocation
+	s.runnerMu.Unlock()
+
+	if env != nil {
+		return env, cacheLocation, nil
+	}
+	return s.CreateRunnerEnvironment(ctx)
+}
+
+// SetRuntimeContext publishes the runtime context under runnerMu. Init calls
+// it while Destroy reads the same field through IsContainerRuntime and Start
+// reads it through applyStartInputs, both holding the lock.
 func (s *Runtime) SetRuntimeContext(_ context.Context, runtimeContext *basev0.RuntimeContext) error {
+	s.runnerMu.Lock()
+	defer s.runnerMu.Unlock()
 	s.Base.Runtime.RuntimeContext = pythonhelpers.SetPythonRuntimeContext(runtimeContext)
 	return nil
 }
@@ -293,14 +349,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitError(err)
 	}
 
-	if s.runnerEnvironment == nil {
-		if err := s.CreateRunnerEnvironment(ctx); err != nil {
-			return s.Base.Runtime.InitErrorf(err, "cannot create runner environment")
-		}
+	env, cacheLocation, err := s.runnerEnv(ctx)
+	if err != nil {
+		return s.Base.Runtime.InitErrorf(err, "cannot create runner environment")
 	}
 
 	s.Wool.Debug("init for runner environment")
-	if err := s.runnerEnvironment.Init(ctx); err != nil {
+	if err := env.Init(ctx); err != nil {
 		return s.Base.Runtime.InitError(err)
 	}
 
@@ -345,7 +400,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	deps := builders.NewDependencies("uv",
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "pyproject.toml")),
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "uv.lock")),
-	).WithCache(s.cacheLocation)
+	).WithCache(cacheLocation)
 
 	depUpdate, err := deps.Updated(ctx)
 	if err != nil {
@@ -354,7 +409,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	if depUpdate {
 		s.Infof("syncing uv environment")
-		proc, err := s.runnerEnvironment.NewProcess("uv", "sync")
+		proc, err := env.NewProcess("uv", "sync")
 		if err != nil {
 			return s.Base.Runtime.InitErrorf(err, "cannot create uv sync process")
 		}
@@ -369,7 +424,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Wool.Debug("successful init of runner")
 
 	openAPI := builders.NewDependencies("api",
-		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(s.cacheLocation)
+		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(cacheLocation)
 	openApiUpdate, err := openAPI.Updated(ctx)
 	if err != nil {
 		return s.Base.Runtime.InitError(err)
@@ -377,7 +432,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	if openApiUpdate {
 		s.Infof("generating Open API document")
-		if err := s.GenerateOpenAPI(ctx); err != nil {
+		if err := s.GenerateOpenAPI(ctx, env); err != nil {
 			return s.Base.Runtime.InitErrorf(err, "cannot generate Open API document")
 		}
 		if err := openAPI.UpdateCache(ctx); err != nil {
@@ -858,6 +913,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 		errs = append(errs, err)
 	}
 	cacheLocation := s.cacheLocation
+	isContainer := s.Base.Runtime.IsContainerRuntime()
 	s.runnerMu.Unlock()
 
 	// A container outlives the agent that started it, so a Destroy whose
@@ -865,7 +921,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	// still has to reach it by name. Shutting the owned environment down has
 	// already removed it, and reaching for docker again there would only invent
 	// a way for a finished teardown to fail.
-	if s.Base.Runtime.IsContainerRuntime() && !released {
+	if isContainer && !released {
 		if err := s.destroyContainerByIdentity(ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -925,8 +981,8 @@ func (s *Runtime) EventHandler(event code.Change) error {
 // GenerateOpenAPI runs the project's src/openapi.py under uv to regenerate
 // the OpenAPI spec. Convention: the project ships a small openapi.py that
 // imports src.main and dumps the schema. See templates/factory.
-func (s *Runtime) GenerateOpenAPI(ctx context.Context) error {
-	proc, err := s.runnerEnvironment.NewProcess("uv", "run", "python", "src/openapi.py")
+func (s *Runtime) GenerateOpenAPI(ctx context.Context, env runners.RunnerEnvironment) error {
+	proc, err := env.NewProcess("uv", "run", "python", "src/openapi.py")
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}
