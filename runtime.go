@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
 	"github.com/codefly-dev/core/agents/services"
@@ -55,11 +57,11 @@ type Runtime struct {
 
 	// internal
 	runnerEnvironment runners.RunnerEnvironment
-	runner            runners.Proc
+	runner            *runnerHandle
 
-	// runnerMu serializes the runner lifecycle. Start and Stop are concurrent
-	// gRPC handlers and both replace s.runner; without it two overlapping
-	// Starts can each stop the same process and leave one of their
+	// runnerMu serializes the runner lifecycle. Start, Stop and the supervisor
+	// goroutines are concurrent and all replace s.runner; without it two
+	// overlapping Starts can each stop the same process and leave one of their
 	// replacements running, unreachable, on the bound port.
 	runnerMu sync.Mutex
 
@@ -377,22 +379,29 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	inputs := startInputs(req)
 
-	if s.runner != nil && s.FastAPI.Settings.HotReload {
-		if inputs == s.startInputs {
+	if s.runner != nil {
+		switch {
+		case !s.runnerAlive(ctx, s.runner):
+			// The process died between two Starts — the orchestrator asking
+			// again is the chance to bring the service back, not something to
+			// answer from a stale handle.
+			s.Infof("fastapi app is no longer running, starting it again")
+		case inputs == s.startInputs:
+			// A running process keeps the environment it was launched with and
+			// uvicorn --reload already covers source edits, so an unchanged
+			// request describes exactly what is running: nothing to do.
 			return s.Base.Runtime.StartResponse()
+		default:
+			// Different inputs only reach the service through a new process:
+			// --reload re-executes the app inside the process it was launched
+			// in, which keeps that process's environment.
+			s.Infof("start inputs changed, restarting fastapi app")
 		}
-		// Hot reload only covers source: uvicorn --reload re-executes the app
-		// inside the process it was launched in, so that process keeps the
-		// environment it was given. A request carrying different inputs
-		// therefore needs a new process, or it would be accepted and never
-		// take effect.
-		s.Infof("start inputs changed, restarting fastapi app")
-		if err := s.runner.Stop(ctx); err != nil {
+		if err := s.stopRunner(ctx); err != nil {
 			return s.Base.Runtime.StartError(err)
 		}
-		s.runner = nil
-		// The restart registers a new watcher below, which would otherwise
-		// leave this one running with no way to reach it.
+		// The start below registers a new watcher, which would otherwise leave
+		// this one running with no way to reach it.
 		s.Base.StopWatcher()
 	}
 
@@ -402,9 +411,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
 	}
 
-	proc, err := s.runnerEnvironment.NewProcess(
-		"uv", "run", "uvicorn", "src.main:app",
-		"--reload", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", s.port))
+	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(s.port, s.FastAPI.Settings.HotReload)...)
 	if err != nil {
 		return s.Base.Runtime.StartError(err)
 	}
@@ -420,7 +427,8 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartErrorf(err, "getting environment variables")
 	}
 
-	proc.WithOutput(s.Logger)
+	tail := &tailWriter{max: runnerTailLines}
+	proc.WithOutput(io.MultiWriter(s.Logger, tail))
 	proc.WithDir(s.Service.SourceLocation)
 
 	proc.WithEnvironmentVariables(ctx, startEnvs...)
@@ -433,7 +441,13 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
 	}
 
-	s.runner = proc
+	// The process must outlive this RPC, so it runs under a background context
+	// — cancellable, so Stop, Destroy and a replacement can tell the supervisor
+	// below that the exit it is about to see was asked for.
+	runningContext, cancel := context.WithCancel(s.Wool.Inject(context.Background()))
+	handle := &runnerHandle{proc: proc, cancel: cancel, tail: tail}
+
+	s.runner = handle
 	s.startInputs = inputs
 
 	if s.FastAPI.Settings.HotReload {
@@ -444,14 +458,164 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	s.Infof("starting fastapi app via uv")
-	runningContext := s.Wool.Inject(context.Background())
-	if err := s.runner.Start(runningContext); err != nil {
+	if err := proc.Start(runningContext); err != nil {
+		cancel()
 		s.runner = nil // failed to start — don't leave a dead proc on the struct
 		return s.Base.Runtime.StartError(err)
 	}
 
+	// STARTED is recorded before the supervisor is armed: revoking a status
+	// that was never committed would leave the orchestrator reading STARTED for
+	// a process that is already gone.
+	resp, err := s.Base.Runtime.StartResponse()
+	go s.superviseRunner(runningContext, handle)
+
 	s.Wool.Debug("start done")
-	return s.Base.Runtime.StartResponse()
+	return resp, err
+}
+
+// uvicornArgs renders the `uv run` invocation. --reload is conditional: it
+// makes uvicorn fork a supervisor that re-executes the app on source edits,
+// which is not what a service configured without hot reload asked for.
+func uvicornArgs(port uint16, hotReload bool) []string {
+	args := []string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", port)}
+	if hotReload {
+		args = append(args, "--reload")
+	}
+	return args
+}
+
+// runnerHandle is one launched process: the proc itself, the cancel function of
+// the context it runs under, and the tail of its output. Handles are never
+// reused — every Start that replaces a process installs a new one, and the
+// supervisor compares identity to tell whether the exit it observed still
+// describes the service.
+type runnerHandle struct {
+	proc   runners.Proc
+	cancel context.CancelFunc
+	tail   *tailWriter
+
+	// exited is set by the supervisor as soon as the process is gone, so a
+	// Start landing before the supervisor reaches the mutex still sees a dead
+	// generation rather than a live-looking handle.
+	exited atomic.Bool
+}
+
+// runnerAlive reports whether the process behind the handle is still up. The
+// runner is asked directly because Start can land in the window between the
+// process dying and its supervisor being scheduled. A probe that cannot answer
+// counts as dead: the agent must not answer STARTED for a process whose
+// liveness it could not confirm.
+func (s *Runtime) runnerAlive(ctx context.Context, handle *runnerHandle) bool {
+	if handle.exited.Load() {
+		return false
+	}
+	running, err := handle.proc.IsRunning(ctx)
+	if err != nil {
+		s.Wool.Warn("cannot tell whether the fastapi app is running", wool.ErrField(err))
+		return false
+	}
+	return running
+}
+
+// stopRunner ends the current generation. It must be called with runnerMu held.
+// Cancelling before the kill is what tells the supervisor the exit was asked
+// for; dropping the handle first means even a failed Stop cannot leave a
+// generation that still owns the service's status.
+func (s *Runtime) stopRunner(ctx context.Context) error {
+	handle := s.runner
+	if handle == nil {
+		return nil
+	}
+	s.runner = nil
+	handle.cancel()
+	return handle.proc.Stop(ctx)
+}
+
+// superviseRunner turns the death of a uvicorn process into a revoked STARTED.
+// Start commits the status and returns; without this the agent would keep
+// reporting a service that exited on an import error, and `codefly run` has no
+// other way to learn about it (it polls Information).
+//
+// This is process supervision, not application readiness: with --reload the
+// uvicorn supervisor survives an application that fails to import, so a live
+// process is a weaker claim than a serving one. Readiness stays with the
+// orchestrator's probes against the endpoints the service declares.
+func (s *Runtime) superviseRunner(ctx context.Context, handle *runnerHandle) {
+	err := handle.proc.Wait(ctx)
+	handle.exited.Store(true)
+	if ctx.Err() != nil {
+		// Stop, Destroy or a replacement cancelled this generation: the exit
+		// was asked for.
+		return
+	}
+	s.reportRunnerExit(handle, err)
+}
+
+// reportRunnerExit revokes STARTED for an unexpected exit — a non-zero one, and
+// a clean one just the same, since nothing asked this process to stop.
+func (s *Runtime) reportRunnerExit(handle *runnerHandle, err error) {
+	s.runnerMu.Lock()
+	defer s.runnerMu.Unlock()
+	if s.runner != handle {
+		// A replacement already owns the service; this generation's death says
+		// nothing about the process that is running now.
+		return
+	}
+	s.runner = nil
+
+	message := "fastapi app exited unexpectedly"
+	if err != nil {
+		message = fmt.Sprintf("%s: %v", message, err)
+	}
+	if tail := handle.tail.Tail(); tail != "" {
+		message = fmt.Sprintf("%s\n%s", message, tail)
+	}
+	s.Wool.Error(message)
+	s.Base.Runtime.MarkRunnerExited(s.Wool.NewError("%s", message))
+}
+
+// runnerTailLines is how much process output the agent keeps to explain an
+// unexpected exit. A Python traceback is the diagnostic that matters here and
+// fits well inside it.
+const runnerTailLines = 20
+
+// tailWriter mirrors process output into a bounded ring of its most recent
+// lines. An exit status alone says nothing about why uvicorn died; the
+// traceback it printed on the way out does.
+type tailWriter struct {
+	mu      sync.Mutex
+	lines   []string
+	partial string
+	max     int
+}
+
+func (w *tailWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	segments := strings.Split(w.partial+string(p), "\n")
+	w.partial = segments[len(segments)-1]
+	for _, line := range segments[:len(segments)-1] {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		w.lines = append(w.lines, line)
+	}
+	if len(w.lines) > w.max {
+		w.lines = slices.Clone(w.lines[len(w.lines)-w.max:])
+	}
+	return len(p), nil
+}
+
+func (w *tailWriter) Tail() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	lines := w.lines
+	if strings.TrimSpace(w.partial) != "" {
+		lines = append(slices.Clone(lines), w.partial)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // startInputs renders the StartRequest fields this agent turns into process
@@ -602,11 +766,8 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	defer s.runnerMu.Unlock()
 
 	s.Wool.Debug("stopping service")
-	if s.runner != nil {
-		if err := s.runner.Stop(ctx); err != nil {
-			return s.Base.Runtime.StopError(err)
-		}
-		s.runner = nil
+	if err := s.stopRunner(ctx); err != nil {
+		return s.Base.Runtime.StopError(err)
 	}
 	if s.runnerEnvironment != nil {
 		if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
@@ -625,6 +786,14 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	ctx = s.Wool.Inject(ctx)
 
 	s.Wool.Debug("Destroying service")
+
+	// A Destroy that skips this wipes the cache and tears down the container
+	// while the service process is still running against them.
+	s.runnerMu.Lock()
+	if err := s.stopRunner(ctx); err != nil {
+		s.Wool.Warn("cannot stop the fastapi app", wool.ErrField(err))
+	}
+	s.runnerMu.Unlock()
 
 	s.Wool.Debug("removing cache")
 	if err := shared.EmptyDir(ctx, s.cacheLocation); err != nil {
