@@ -283,10 +283,10 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 	// Share with Code / Tooling so AST analysis, grep, uv sync follow whatever
 	// mode the plugin is in. The lock orders this against Stop, which clears
 	// the same field — without it a publish can land after a teardown and
-	// leave Code holding a shut-down environment. It does NOT protect ActiveEnv
-	// from its readers: Code, Tooling and the REPL (service-python pkg/code,
-	// pkg/runtime/commands) cannot take runnerMu. Tracked in #27.
-	s.FastAPI.Service.ActiveEnv = env
+	// leave Code holding a shut-down environment. The setter is what orders it
+	// against the readers: Code, Tooling and the REPL (service-python pkg/code,
+	// pkg/runtime/commands) run on their own goroutines and cannot take runnerMu.
+	s.FastAPI.Service.SetActiveEnvironment(env)
 	return env, cacheLocation, nil
 }
 
@@ -871,7 +871,7 @@ func (s *Runtime) endExecution(ctx context.Context) (bool, error) {
 			// a fresh one rather than hand Code and the REPL a dead handle.
 			released = true
 			s.runnerEnvironment = nil
-			s.FastAPI.Service.ActiveEnv = nil
+			s.FastAPI.Service.SetActiveEnvironment(nil)
 		}
 	}
 	return released, errors.Join(errs...)

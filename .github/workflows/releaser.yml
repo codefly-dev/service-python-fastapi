@@ -6,6 +6,43 @@ on:
       - 'v*'
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # go.mod pins a `toolchain` newer than the `go` line, so setup-go
+          # installs the older Go and GOTOOLCHAIN downloads the toolchain
+          # module into the cache. setup-go's cache tar then collides on those
+          # read-only toolchain files, failing every release.
+          cache: false
+      - name: Setup
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Test
+        run: go test -v ./...
+
   release:
-    uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
-    secrets: inherit
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # ARCHITECTURE: the shared core release workflow runs goreleaser-action
+      # on a bare runner, which has no macOS or cross-linux compilers. The
+      # binary links Core's tree-sitter grammars (CGO), so releasing it needs
+      # the toolchain this maintained image supplies — see .goreleaser.yaml.
+      - name: Run CGO-capable GoReleaser
+        run: >-
+          docker run --rm
+          -e GITHUB_TOKEN
+          -v "$GITHUB_WORKSPACE:/workspace"
+          -w /workspace
+          ghcr.io/goreleaser/goreleaser-cross:v1.26.4
+          release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}

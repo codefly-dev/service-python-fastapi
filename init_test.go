@@ -257,7 +257,7 @@ func TestInitAfterStopBuildsAFreshEnvironment(t *testing.T) {
 	resp, err := runtime.Stop(ctx, &runtimev0.StopRequest{})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StopStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Nil(t, runtime.FastAPI.Service.ActiveEnv, "Code and the REPL must not be left holding a dead environment")
+	require.Nil(t, runtime.FastAPI.Service.ActiveEnvironment(), "Code and the REPL must not be left holding a dead environment")
 
 	second, _, err := runtime.runnerEnv(ctx)
 	require.NoError(t, err)
