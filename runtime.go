@@ -73,9 +73,15 @@ type Runtime struct {
 	// runnerCreateMu single-flights the creation of the runner environment.
 	// runnerMu cannot do that job: publishing is cheap but building is a
 	// docker pull, and holding runnerMu across it would park every Stop.
-	// Without it two concurrent Inits each build an environment, one gets
-	// published and the other is left initialized — holding a docker client
-	// and a log stream — with nothing referencing it to shut it down.
+	// Without it two callers each build an environment, one gets published and
+	// the other is left initialized — holding a docker client and a log stream
+	// — with nothing referencing it to shut it down.
+	//
+	// Init no longer reaches it concurrently: initMu below serializes Init
+	// against itself, so runnerEnv's only production caller is single-threaded.
+	// It stays because it guards runnerEnv rather than Init — the invariant
+	// belongs to the function that publishes the field, not to the one caller
+	// that happens to hold a bigger lock today.
 	runnerCreateMu sync.Mutex
 
 	// initMu serializes Init against Start. Init publishes what Start consumes
@@ -91,14 +97,30 @@ type Runtime struct {
 	// runnerMu, so a teardown is never queued behind that, and Init carries the
 	// environment it captured through it. Start has nothing to run against
 	// until Init has published its ports, so Start is the side that waits.
+	// Holding it for the whole of Init also serializes Init against itself.
 	//
-	// Lock order is initMu, then runnerCreateMu, then runnerMu; nothing takes
-	// them the other way around.
+	// LOCK ORDER for all three mutexes on this struct:
+	//
+	//	initMu -> runnerCreateMu -> runnerMu
+	//
+	// Every acquisition follows it and nothing takes them the other way around.
+	// The trap is that runnerMu is the innermost: a helper that already holds
+	// it must not call anything reaching for the other two, and in particular
+	// must not call CreateRunnerEnvironment, which takes runnerMu itself to
+	// publish. Callers reach that through runnerEnv, holding none of the three.
 	initMu sync.Mutex
 
 	// startInputs renders the StartRequest fields the running process was
 	// launched with, so a later Start can tell whether they still match.
 	startInputs string
+
+	// launchInputs renders everything that shapes the launched process: the
+	// StartRequest fields above plus the agent-owned argv state Init publishes.
+	// It answers a different question from startInputs — "is the process that
+	// is running still the one this request describes", rather than "did the
+	// request change" — and the two diverge whenever an Init republishes the
+	// ports without the StartRequest changing.
+	launchInputs string
 
 	// appliedOverrides counts, per key, how many override entries this agent
 	// has handed to the environment manager. The manager appends overrides and
@@ -193,6 +215,11 @@ func (s *Runtime) resolveRuntimeImage() (*resources.DockerImage, error) {
 // CreateRunnerEnvironment builds the execution environment and the cache
 // location that belongs to it, publishes both under runnerMu and returns them
 // so the caller can keep working against locals.
+//
+// It must be called with runnerMu NOT held — it takes that lock to publish —
+// and through runnerEnv, which single-flights it under runnerCreateMu. Calling
+// it directly from a path already holding runnerMu deadlocks; calling it
+// directly from two goroutines builds two environments and strands one.
 func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEnvironment, string, error) {
 	s.Wool.Debug("creating runner environment in", wool.DirField(s.Identity.WorkspacePath))
 	image, err := s.resolveRuntimeImage()
@@ -472,6 +499,14 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	s.initMu.Lock()
 	defer s.initMu.Unlock()
 
+	// initMu is not cancellable, and Init can hold it across a docker pull and
+	// a `uv sync`. The process launched below outlives this RPC on a context of
+	// its own, so a Start that only reaches here after its caller gave up would
+	// leave a service running for a request nobody is waiting on.
+	if err := ctx.Err(); err != nil {
+		return s.Base.Runtime.StartError(err)
+	}
+
 	s.runnerMu.Lock()
 	defer s.runnerMu.Unlock()
 
@@ -482,6 +517,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	inputs := startInputs(req)
+	launch := launchInputs(inputs, s.port, s.grpcPort, s.FastAPI.Settings.HotReload)
 
 	if s.runner != nil {
 		switch {
@@ -490,10 +526,13 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 			// again is the chance to bring the service back, not something to
 			// answer from a stale handle.
 			s.Infof("fastapi app is no longer running, starting it again")
-		case inputs == s.startInputs:
-			// A running process keeps the environment it was launched with and
-			// uvicorn --reload already covers source edits, so an unchanged
-			// request describes exactly what is running: nothing to do.
+		case launch == s.launchInputs:
+			// A running process keeps the environment AND the command line it
+			// was launched with, and uvicorn --reload already covers source
+			// edits, so nothing to do. The request alone cannot answer this:
+			// an Init between two identical Starts can republish the ports,
+			// and the process bound to the old one is not what this request
+			// describes however unchanged the request is.
 			return s.Base.Runtime.StartResponse()
 		default:
 			// Different inputs only reach the service through a new process:
@@ -553,6 +592,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.runner = handle
 	s.startInputs = inputs
+	s.launchInputs = launch
 
 	if s.FastAPI.Settings.HotReload {
 		conf := services.NewWatchConfiguration(requirements)
@@ -744,6 +784,19 @@ func startInputs(req *runtimev0.StartRequest) string {
 	}
 	slices.Sort(dependencies)
 	return strings.Join(append(lines, dependencies...), "\n")
+}
+
+// launchInputs extends the StartRequest fingerprint with the state this agent
+// owns rather than receives: the ports Init resolves from the proposed network
+// mappings, and the hot-reload setting. Both reach uvicorn's command line, so a
+// process launched under different values is not serving what the caller asked
+// for even when the StartRequest is byte-identical.
+//
+// It is deliberately separate from startInputs: that one gates applyStartInputs,
+// which must fire only when the request itself changed, because the environment
+// manager appends overrides and endpoints without ever removing any.
+func launchInputs(requestInputs string, port uint16, grpcPort uint16, hotReload bool) string {
+	return fmt.Sprintf("%s\nport %d\ngrpc-port %d\nhot-reload %t", requestInputs, port, grpcPort, hotReload)
 }
 
 // applyStartInputs folds the StartRequest into the environment manager. Callers
