@@ -286,7 +286,7 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 	// leave Code holding a shut-down environment. The setter is what orders it
 	// against the readers: Code, Tooling and the REPL (service-python pkg/code,
 	// pkg/runtime/commands) run on their own goroutines and cannot take runnerMu.
-	s.FastAPI.Service.SetActiveEnv(env)
+	s.FastAPI.Service.SetActiveEnvironment(env)
 	return env, cacheLocation, nil
 }
 
@@ -871,7 +871,7 @@ func (s *Runtime) endExecution(ctx context.Context) (bool, error) {
 			// a fresh one rather than hand Code and the REPL a dead handle.
 			released = true
 			s.runnerEnvironment = nil
-			s.FastAPI.Service.SetActiveEnv(nil)
+			s.FastAPI.Service.SetActiveEnvironment(nil)
 		}
 	}
 	return released, errors.Join(errs...)

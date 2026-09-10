@@ -1,17 +1,35 @@
 version: 1
 
 builds:
-  - id: darwin
+  # ARCHITECTURE: Core's authoritative source inspection uses real
+  # tree-sitter grammars, which are CGO. Agent releases therefore require
+  # CGO and the platform compilers supplied by goreleaser/goreleaser-cross;
+  # disabling CGO does not degrade the parser, it fails the build outright
+  # (`build constraints exclude all Go files`). The compilers differ per
+  # target, so each target is its own build id.
+  - id: darwin-amd64
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=o64-clang
+      - CXX=o64-clang++
     goos:
       - darwin
     goarch:
       - amd64
-      - arm64
-  - id: linux
+  - id: darwin-arm64
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=oa64-clang
+      - CXX=oa64-clang++
+    goos:
+      - darwin
+    goarch:
+      - arm64
+  - id: linux-amd64
+    env:
+      - CGO_ENABLED=1
+      - CC=x86_64-linux-gnu-gcc
+      - CXX=x86_64-linux-gnu-g++
     goos:
       - linux
     goarch:

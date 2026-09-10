@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/codefly-dev/core v0.3.11
-	github.com/codefly-dev/service-python v0.0.60
+	github.com/codefly-dev/service-python v0.0.61
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0
 	gopkg.in/yaml.v3 v3.0.1
