@@ -285,7 +285,7 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 	// the same field — without it a publish can land after a teardown and
 	// leave Code holding a shut-down environment. It does NOT protect ActiveEnv
 	// from its readers: Code, Tooling and the REPL (service-python pkg/code,
-	// pkg/runtime/commands) cannot take runnerMu. Tracked in #26.
+	// pkg/runtime/commands) cannot take runnerMu. Tracked in #27.
 	s.FastAPI.Service.ActiveEnv = env
 	return env, cacheLocation, nil
 }
