@@ -78,6 +78,24 @@ type Runtime struct {
 	// and a log stream — with nothing referencing it to shut it down.
 	runnerCreateMu sync.Mutex
 
+	// initMu serializes Init against Start. Init publishes what Start consumes
+	// — the network mappings, port and grpcPort, and the entries it folds into
+	// EnvironmentVariables — none of which runnerMu covers, so an overlapping
+	// Start can otherwise launch uvicorn on a half-written port, or read the
+	// environment manager while Init is appending to it. The manager is core's
+	// resources.EnvironmentVariableManager and carries no synchronization of
+	// its own, so nothing finer than serializing the two calls covers it.
+	//
+	// It is a lock of its own rather than runnerMu because Init's runner
+	// section can pull an image or run `uv sync`: Stop and Destroy take only
+	// runnerMu, so a teardown is never queued behind that, and Init carries the
+	// environment it captured through it. Start has nothing to run against
+	// until Init has published its ports, so Start is the side that waits.
+	//
+	// Lock order is initMu, then runnerCreateMu, then runnerMu; nothing takes
+	// them the other way around.
+	initMu sync.Mutex
+
 	// startInputs renders the StartRequest fields the running process was
 	// launched with, so a later Start can tell whether they still match.
 	startInputs string
@@ -330,6 +348,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Base.Runtime.LogInitRequest(req)
 
+	s.initMu.Lock()
+	defer s.initMu.Unlock()
+
 	// Init opens a new lifecycle, so a runtime torn down earlier accepts work
 	// again — otherwise Init would succeed and every later Start refuse.
 	s.runnerMu.Lock()
@@ -447,6 +468,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	s.initMu.Lock()
+	defer s.initMu.Unlock()
 
 	s.runnerMu.Lock()
 	defer s.runnerMu.Unlock()
