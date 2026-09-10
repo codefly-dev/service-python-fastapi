@@ -70,6 +70,14 @@ type Runtime struct {
 	// and Destroy are reading and releasing it.
 	runnerMu sync.Mutex
 
+	// runnerCreateMu single-flights the creation of the runner environment.
+	// runnerMu cannot do that job: publishing is cheap but building is a
+	// docker pull, and holding runnerMu across it would park every Stop.
+	// Without it two concurrent Inits each build an environment, one gets
+	// published and the other is left initialized — holding a docker client
+	// and a log stream — with nothing referencing it to shut it down.
+	runnerCreateMu sync.Mutex
+
 	// startInputs renders the StartRequest fields the running process was
 	// launched with, so a later Start can tell whether they still match.
 	startInputs string
@@ -272,8 +280,12 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 	defer s.runnerMu.Unlock()
 	s.runnerEnvironment = env
 	s.cacheLocation = cacheLocation
-	// Share with Code / Tooling so AST analysis, grep, uv sync follow
-	// whatever mode the plugin is in.
+	// Share with Code / Tooling so AST analysis, grep, uv sync follow whatever
+	// mode the plugin is in. The lock orders this against Stop, which clears
+	// the same field — without it a publish can land after a teardown and
+	// leave Code holding a shut-down environment. It does NOT protect ActiveEnv
+	// from its readers: Code, Tooling and the REPL (service-python pkg/code,
+	// pkg/runtime/commands) cannot take runnerMu. Tracked in #26.
 	s.FastAPI.Service.ActiveEnv = env
 	return env, cacheLocation, nil
 }
@@ -285,7 +297,13 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 // Destroy own the same fields, and Init's runner section — a docker pull, a
 // nix evaluation, `uv sync` — is far too long to hold the lock across, so a
 // teardown can land anywhere inside it.
+//
+// runnerCreateMu spans the check and the creation so the two are atomic with
+// respect to each other; runnerMu is taken only for the read and the publish.
 func (s *Runtime) runnerEnv(ctx context.Context) (runners.RunnerEnvironment, string, error) {
+	s.runnerCreateMu.Lock()
+	defer s.runnerCreateMu.Unlock()
+
 	s.runnerMu.Lock()
 	env, cacheLocation := s.runnerEnvironment, s.cacheLocation
 	s.runnerMu.Unlock()
@@ -296,6 +314,9 @@ func (s *Runtime) runnerEnv(ctx context.Context) (runners.RunnerEnvironment, str
 	return s.CreateRunnerEnvironment(ctx)
 }
 
+// SetRuntimeContext publishes the runtime context under runnerMu. Init calls
+// it while Destroy reads the same field through IsContainerRuntime and Start
+// reads it through applyStartInputs, both holding the lock.
 func (s *Runtime) SetRuntimeContext(_ context.Context, runtimeContext *basev0.RuntimeContext) error {
 	s.runnerMu.Lock()
 	defer s.runnerMu.Unlock()
