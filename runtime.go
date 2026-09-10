@@ -83,6 +83,12 @@ type Runtime struct {
 	grpcPort uint16
 
 	cacheLocation string
+
+	// destroyed marks the runtime as torn down, guarded by runnerMu. Destroy
+	// cannot stop a Start that is already on its way — the watcher's debounce
+	// can still fire one after StopWatcher — so Start consults this rather
+	// than launching a process against resources Destroy is removing.
+	destroyed bool
 }
 
 func NewRuntime(svc *Service) *Runtime {
@@ -138,19 +144,27 @@ func (s *Runtime) DockerEnvPath() string {
 	return path.Join(s.Location, ".cache/container/.venv")
 }
 
+// resolveRuntimeImage returns the image the service runs in: the settings
+// override when one is set, else the codefly-built default. Strict pinning —
+// :latest and untagged refs are rejected so builds stay reproducible.
+func (s *Runtime) resolveRuntimeImage() (*resources.DockerImage, error) {
+	override := s.FastAPI.Settings.RuntimeImage
+	if override == "" {
+		return runtimeImage, nil
+	}
+	parsed, err := resources.ParsePinnedImage(override)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "invalid docker-image override in service.codefly.yaml")
+	}
+	s.Wool.Info("using docker-image override (not recommended)", wool.Field("image", parsed.FullName()))
+	return parsed, nil
+}
+
 func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) error {
 	s.Wool.Debug("creating runner environment in", wool.DirField(s.Identity.WorkspacePath))
-	// Resolve the runtime image: settings override (if any) takes priority,
-	// else fall back to the codefly-built default. Strict pinning — we
-	// reject :latest and untagged refs so builds stay reproducible.
-	image := runtimeImage
-	if override := s.FastAPI.Settings.RuntimeImage; override != "" {
-		parsed, perr := resources.ParsePinnedImage(override)
-		if perr != nil {
-			return s.Wool.Wrapf(perr, "invalid docker-image override in service.codefly.yaml")
-		}
-		s.Wool.Info("using docker-image override (not recommended)", wool.Field("image", parsed.FullName()))
-		image = parsed
+	image, err := s.resolveRuntimeImage()
+	if err != nil {
+		return err
 	}
 
 	switch {
@@ -259,6 +273,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	ctx = s.Wool.Inject(ctx)
 
 	s.Base.Runtime.LogInitRequest(req)
+
+	// Init opens a new lifecycle, so a runtime torn down earlier accepts work
+	// again — otherwise Init would succeed and every later Start refuse.
+	s.runnerMu.Lock()
+	s.destroyed = false
+	s.runnerMu.Unlock()
 
 	if err := s.SetRuntimeContext(ctx, req.RuntimeContext); err != nil {
 		return s.Base.Runtime.InitError(err)
@@ -377,6 +397,10 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.runnerMu.Unlock()
 
 	s.Base.Runtime.LogStartRequest(req)
+
+	if s.destroyed {
+		return s.Base.Runtime.StartError(s.Wool.NewError("service has been destroyed (Init must run before it can start again)"))
+	}
 
 	inputs := startInputs(req)
 
@@ -769,7 +793,10 @@ func withOverrides(envs []*resources.EnvironmentVariable, overrides map[string]s
 // earlier one fails, so one stubborn resource cannot strand the rest, and the
 // environment is forgotten only once it is actually down — a caller retrying
 // after a failure must still be able to reach it.
-func (s *Runtime) endExecution(ctx context.Context) error {
+//
+// It reports whether the owned environment was actually shut down, which in
+// container mode is what tells Destroy the container is already gone.
+func (s *Runtime) endExecution(ctx context.Context) (bool, error) {
 	// Cancel the watcher and let its Start goroutine's deferred close of Events
 	// run exactly once — never close Events here, or it races that goroutine
 	// into a "close of closed channel" panic.
@@ -779,6 +806,7 @@ func (s *Runtime) endExecution(ctx context.Context) error {
 	if err := s.stopRunner(ctx); err != nil {
 		errs = append(errs, s.Wool.Wrapf(err, "cannot stop the fastapi app"))
 	}
+	released := false
 	if s.runnerEnvironment != nil {
 		if err := s.runnerEnvironment.Shutdown(ctx); err != nil {
 			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down the runner environment"))
@@ -786,11 +814,12 @@ func (s *Runtime) endExecution(ctx context.Context) error {
 			// A shut-down environment cannot serve another process — a docker
 			// one has closed its client — so drop it and let a later Init build
 			// a fresh one rather than hand Code and the REPL a dead handle.
+			released = true
 			s.runnerEnvironment = nil
 			s.FastAPI.Service.ActiveEnv = nil
 		}
 	}
-	return errors.Join(errs...)
+	return released, errors.Join(errs...)
 }
 
 // Stop releases the execution resources and keeps everything on disk, so a
@@ -803,7 +832,7 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	defer s.runnerMu.Unlock()
 
 	s.Wool.Debug("stopping service")
-	if err := s.endExecution(ctx); err != nil {
+	if _, err := s.endExecution(ctx); err != nil {
 		return s.Base.Runtime.StopError(err)
 	}
 	return s.Base.Runtime.StopResponse()
@@ -823,31 +852,34 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	var errs []error
 
 	s.runnerMu.Lock()
-	if err := s.endExecution(ctx); err != nil {
+	s.destroyed = true
+	released, err := s.endExecution(ctx)
+	if err != nil {
 		errs = append(errs, err)
 	}
+	cacheLocation := s.cacheLocation
 	s.runnerMu.Unlock()
 
-	// Only once execution has ended: a process still running against the cache
-	// repopulates what this removes, and is reading the venv being pulled out
-	// from under it. An empty location means Init never claimed one — there is
-	// nothing owned to clear, and EmptyDir rejects the empty path as an error.
-	if s.cacheLocation != "" {
-		s.Wool.Debug("removing cache")
-		if err := shared.EmptyDir(ctx, s.cacheLocation); err != nil {
-			errs = append(errs, s.Wool.Wrapf(err, "cannot remove cache"))
+	// A container outlives the agent that started it, so a Destroy whose
+	// runtime holds no environment — a fresh agent, or an Init that never ran —
+	// still has to reach it by name. Shutting the owned environment down has
+	// already removed it, and reaching for docker again there would only invent
+	// a way for a finished teardown to fail.
+	if s.Base.Runtime.IsContainerRuntime() && !released {
+		if err := s.destroyContainerByIdentity(ctx); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	if s.Base.Runtime.IsContainerRuntime() {
-		// A container outlives the agent that started it, so a Destroy whose
-		// runtime never held one still has to reach it by name.
-		s.Wool.Debug("running in container")
-		dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, runtimeImage, s.Service.SourceLocation, s.Base.Runtime.UniqueWithWorkspace())
-		if err != nil {
-			errs = append(errs, s.Wool.Wrapf(err, "cannot reach the container environment"))
-		} else if err := dockerEnv.Shutdown(ctx); err != nil {
-			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down the container environment"))
+	// Last, and only once nothing is executing any more. In container mode the
+	// venv and the uv cache are bind-mounted out of this directory, so wiping
+	// it while the container is still up pulls the interpreter out from under
+	// the running service. An empty location means Init never claimed one —
+	// nothing owned to clear, and EmptyDir rejects the empty path as an error.
+	if cacheLocation != "" {
+		s.Wool.Debug("removing cache")
+		if err := shared.EmptyDir(ctx, cacheLocation); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot remove cache"))
 		}
 	}
 
@@ -855,6 +887,27 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 		return s.Base.Runtime.DestroyError(err)
 	}
 	return s.Base.Runtime.DestroyResponse()
+}
+
+// destroyContainerByIdentity removes the service's container by the name it is
+// registered under, for a Destroy holding no environment of its own.
+func (s *Runtime) destroyContainerByIdentity(ctx context.Context) error {
+	s.Wool.Debug("running in container")
+	image, err := s.resolveRuntimeImage()
+	if err != nil {
+		// The container is found by name, never by image, so an override this
+		// agent cannot parse must not be what leaves it running.
+		s.Wool.Warn("cannot resolve the runtime image, falling back to the default", wool.ErrField(err))
+		image = runtimeImage
+	}
+	dockerEnv, err := dockerrun.NewDockerEnvironment(ctx, image, s.Service.SourceLocation, s.Base.Runtime.UniqueWithWorkspace())
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot reach the container environment")
+	}
+	if err := dockerEnv.Shutdown(ctx); err != nil {
+		return s.Wool.Wrapf(err, "cannot shut down the container environment")
+	}
+	return nil
 }
 
 func (s *Runtime) EventHandler(event code.Change) error {
