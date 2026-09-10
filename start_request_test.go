@@ -692,3 +692,71 @@ func TestTailWriterKeepsRecentLines(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "dying words", unterminated.Tail())
 }
+
+// TestStartRelaunchesWhenInitRepublishesThePort pins that the restart decision
+// covers the ports Init owns, not just the StartRequest. An Init between two
+// identical Starts can move the service's port; the process bound to the old
+// one is not what the caller is being told is running.
+func TestStartRelaunchesWhenInitRepublishesThePort(t *testing.T) {
+	ctx := context.Background()
+	runtime, env := startTestRuntime(t)
+
+	runtime.port = 9000
+	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Len(t, env.started(), 1)
+	require.Contains(t, env.started()[0].args, "9000")
+
+	// What a re-Init resolving a different network mapping publishes.
+	runtime.port = 9100
+	resp, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+
+	procs := env.started()
+	require.Len(t, procs, 2, "the process on the superseded port must be replaced")
+	require.True(t, procs[0].isStopped(), "the process on the old port must be stopped")
+	require.Contains(t, procs[1].args, "9100")
+}
+
+// TestStartDoesNotRefoldAnUnchangedRequest pins the other half: the port change
+// above must not be mistaken for a request change. The environment manager
+// appends overrides and never removes them, so re-folding an identical request
+// would duplicate every entry it carries.
+func TestStartDoesNotRefoldAnUnchangedRequest(t *testing.T) {
+	ctx := context.Background()
+	runtime, env := startTestRuntime(t)
+
+	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
+	runtime.port = 9000
+	_, err := runtime.Start(ctx, req)
+	require.NoError(t, err)
+
+	runtime.port = 9100
+	_, err = runtime.Start(ctx, req)
+	require.NoError(t, err)
+
+	procs := env.started()
+	require.Len(t, procs, 2)
+	require.Equal(t, []string{"debug"}, processEnv(procs[1], "LOG_LEVEL"),
+		"an unchanged request must be folded into the environment manager exactly once")
+	require.Equal(t, 1, runtime.appliedOverrides["LOG_LEVEL"])
+}
+
+// TestStartRefusesAnAbandonedRequest pins that Start does not launch a process
+// for a caller that has already given up. Start can wait on initMu for as long
+// as an Init takes — a docker pull, a `uv sync` — and the process it launches
+// runs on a context of its own, so it would outlive the request entirely.
+func TestStartRefusesAnAbandonedRequest(t *testing.T) {
+	runtime, env := startTestRuntime(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Empty(t, env.started(), "no process may be launched for an abandoned request")
+	require.Nil(t, currentRunner(runtime))
+}
