@@ -3,10 +3,10 @@ module github.com/codefly-dev/service-python-fastapi
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.3.11
+	github.com/codefly-dev/core v0.3.24
 	github.com/codefly-dev/service-python v0.0.61
-	github.com/stretchr/testify v1.11.1
-	google.golang.org/grpc v1.83.0
+	github.com/stretchr/testify v1.12.1
+	google.golang.org/grpc v1.83.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -95,7 +95,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/scagogogo/python-requirements-parser v0.0.0-20250717025652-6ca77234c827 // indirect
