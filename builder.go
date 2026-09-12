@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"github.com/codefly-dev/core/agents/communicate"
-	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	"github.com/codefly-dev/core/companions/proto"
@@ -39,7 +38,7 @@ import (
 // Overridden: Load (fastapi puts source under ./code, discovers REST
 // endpoint), Update (applies builder templates), Sync (gRPC codegen for
 // declared dependencies and the optional service-owned gRPC server), Build
-// (custom DockerTemplating + docker build),
+// (Dockerfile and build plan preparation),
 // Deploy (k8s), Create (two-question Communicate + REST endpoint).
 type Builder struct {
 	*pythonbuilder.Builder
@@ -170,86 +169,32 @@ type DockerTemplating struct {
 	Envs            []Env
 }
 
-// Build produces the service Docker image. Generic is a no-op; fastapi
-// renders a Dockerfile and either builds it in-process (legacy) or, when the
-// CLI owns the build, emits a reproducible recipe for the CLI to build.
+func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
+	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
+}
+
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
+	if req.GetOutputDirectory() == "" {
+		return s.Base.Builder.BuildError(errors.New("output_directory is required for CLI image builds"))
+	}
 	dockerRequest, err := s.Base.Builder.DockerBuildRequest(ctx, req)
 	if err != nil {
-		return nil, s.Wool.Wrapf(err, "can only do docker build request")
+		return s.Base.Builder.BuildError(err)
 	}
-
-	image := s.DockerImage(dockerRequest)
-	s.Wool.Debug("building docker image", wool.Field("image", image.FullName()))
 	ctx = s.Wool.Inject(ctx)
-
 	docker := DockerTemplating{
 		Builder:    runtimeImage.FullName(),
 		Components: requirements.All(),
 	}
-
-	if err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile")); err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot remove dockerfile")
+	outputDir := req.GetOutputDirectory()
+	if err := shared.DeleteFile(ctx, filepath.Join(outputDir, "Dockerfile")); err != nil {
+		return s.Base.Builder.BuildError(err)
 	}
-	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS)); err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot copy and apply template")
+	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
+		return s.Base.Builder.BuildError(err)
 	}
-
-	// When the caller owns the build (a non-empty output_directory), emit a
-	// reproducible build recipe rather than building in-process. The rendered
-	// Dockerfile already lives in that directory, so the CLI runs docker buildx
-	// against it and publishes a multi-arch manifest list.
-	if outputDir := req.GetOutputDirectory(); outputDir != "" {
-		plan, err := singleImageBuildPlan(outputDir, image.FullName())
-		if err != nil {
-			return s.Base.Builder.BuildError(err)
-		}
-		s.Base.Builder.WithBuildPlan(plan)
-		return s.Base.Builder.BuildResponse()
-	}
-
-	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
-		Root:        s.Location,
-		Dockerfile:  "builder/Dockerfile",
-		Destination: image,
-		Output:      s.Wool,
-	})
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create builder")
-	}
-	if _, err := builder.Build(ctx); err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot build image")
-	}
-
-	s.Base.Builder.WithDockerImages(image)
-	return s.Base.Builder.BuildResponse()
-}
-
-// singleImageBuildPlan inventories the recipe the CLI-owned build consumes: the
-// builder/Dockerfile rendered into outputDirectory, built with the service
-// directory as its context and targeting a linux/amd64 + linux/arm64 manifest
-// list so a consumer never needs the agent toolchain to rebuild. Paths are
-// encoded as the CLI's recipe executor resolves them — the Dockerfile relative
-// to outputDirectory (which the CLI sets to <service>/builder), the context
-// relative to the service directory.
-//
-// This stands in for services.SingleImageBuildPlan / services.RecipeBuildPlatforms,
-// which are not in a released core yet (they land with the shared recipe runners
-// in core#336); it can be replaced once that release lands and its recipe layout
-// is confirmed to match the CLI executor.
-func singleImageBuildPlan(outputDirectory, image string) (*builderv0.DockerBuildPlan, error) {
-	recipe := &builderv0.DockerBuildRecipe{
-		Name:       "app",
-		Dockerfile: "Dockerfile",
-		Context:    ".",
-		Image:      image,
-		Platforms:  []string{"linux/amd64", "linux/arm64"},
-	}
-	if info, err := os.Stat(filepath.Join(outputDirectory, "dockerignore")); err == nil && info.Mode().IsRegular() {
-		recipe.Dockerignore = "dockerignore"
-	}
-	return services.BuildDockerBuildPlan(outputDirectory, []*builderv0.DockerBuildRecipe{recipe})
+	return s.Base.Builder.SingleImageBuildResponse(req, s.DockerImage(dockerRequest).FullName())
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list

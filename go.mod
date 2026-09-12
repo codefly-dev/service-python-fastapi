@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-python-fastapi
 go 1.27.0
 
 require (
-	github.com/codefly-dev/core v0.3.11
+	github.com/codefly-dev/core v0.3.27
 	github.com/codefly-dev/service-python v0.0.61
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/grpc v1.83.0
@@ -88,6 +88,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.28 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
+	github.com/moby/patternmatcher v0.6.0 // indirect
 	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00 // indirect
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
