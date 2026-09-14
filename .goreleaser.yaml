@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 builds:
   # ARCHITECTURE: Core's authoritative source inspection uses real
