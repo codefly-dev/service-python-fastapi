@@ -58,6 +58,31 @@ func TestImageSBOMWithoutSubjectsIsPreconditionFailure(t *testing.T) {
 	require.Empty(t, resp.GetImages())
 }
 
+// TestSourceScopeIsNotRoutedToImageEvidence guards the scope condition itself.
+// Builder.SBOM now sits in front of the inherited source inventory, so an
+// inverted comparison would answer every source request with image evidence
+// and nothing else in this repository would notice.
+//
+// It asserts the response shape rather than its contents so it holds with or
+// without uv installed: a source answer never carries image scope, image
+// inventories, or a no-image reason, whether the inventory succeeded or failed.
+func TestSourceScopeIsNotRoutedToImageEvidence(t *testing.T) {
+	builder, _ := createdBuilder(t)
+
+	for _, scope := range []builderv0.SBOMScope{
+		builderv0.SBOMScope_SBOM_SCOPE_UNSPECIFIED,
+		builderv0.SBOMScope_SBOM_SCOPE_SOURCE,
+	} {
+		t.Run(scope.String(), func(t *testing.T) {
+			resp, err := builder.SBOM(t.Context(), &builderv0.SBOMRequest{Scope: scope})
+			require.NoError(t, err)
+			require.NotEqual(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
+			require.Empty(t, resp.GetImages())
+			require.Equal(t, builderv0.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED, resp.GetNoImageReason())
+		})
+	}
+}
+
 // TestImageSBOMExpectationsMatchTheEmittedRecipe verifies the specialization's
 // actual build-recipe path against the coverage helper the fleet grades every
 // agent with: one subject per shipped platform, carrying the recipe's role and
@@ -169,7 +194,9 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 	lock := exec.CommandContext(ctx, "uv", "lock")
 	lock.Dir = filepath.Join(builder.Location, "code")
 	if out, err := lock.CombinedOutput(); err != nil {
-		t.Skipf("uv lock failed, the image cannot be built: %v\n%s", err, out)
+		// The tooling guard above already passed, so uv is installed: a failure
+		// here is a broken scaffold or lockfile, not an unequipped host.
+		t.Fatalf("uv lock failed, the image cannot be built: %v\n%s", err, out)
 	}
 
 	tag := fmt.Sprintf("codefly-fastapi-sbom-test:%d", time.Now().UnixMilli())
@@ -179,19 +206,27 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 		"-f", filepath.Join(outputDir, plan.GetRecipes()[0].GetDockerfile()),
 		"-t", tag, builder.Location)
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("docker build failed, the image cannot be scanned: %v\n%s", err, out)
+		// Likewise docker is installed, so this is a broken Dockerfile template
+		// or recipe. Skipping would turn the regression this test exists to
+		// catch into a green run.
+		t.Fatalf("docker build failed, the image cannot be scanned: %v\n%s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rmi", "-f", tag).Run() })
 
 	// The image was loaded into the local daemon and never pushed, so its
 	// immutable identity is the local image ID. The platform is left unstated:
 	// the daemon holds exactly one, and it is read back rather than asserted.
+	//
+	// This drives Builder.SBOM, the method the CLI actually calls, rather than
+	// core's helper. Scope routing and scanner-source resolution are what this
+	// repository owns, and a test calling the helper directly passed with
+	// either of them broken.
 	subject := &builderv0.ImageSubject{
 		Reference: tag,
 		Role:      plan.GetRecipes()[0].GetName(),
 		Service:   builder.Identity.Name,
 	}
-	resp, err := builder.Base.Builder.SBOMImages(ctx, []*builderv0.ImageSubject{subject}, sbom.SourceDockerDaemon)
+	resp, err := builder.SBOM(ctx, imageSBOMRequest(subject))
 	require.NoError(t, err)
 	require.Equal(t, builderv0.SBOMStatus_COMPLETE, resp.GetState().GetState(), resp.GetState().GetMessage())
 	require.Equal(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())

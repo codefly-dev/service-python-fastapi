@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/codefly-dev/core/agents/communicate"
@@ -204,16 +205,48 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 //
 // Image scope goes to core's shared scanner. This agent emits a build recipe
 // and never runs buildx, so the digests only exist on the caller's side and
-// arrive as explicit subjects. SBOMImages answers empty subjects with a
-// precondition failure of its own: the service does ship an image, so
-// neither UNSUPPORTED nor a no-image reason would be true.
+// arrive as explicit subjects.
 func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
 		return s.Builder.SBOM(ctx, req)
 	}
 	ctx = s.Wool.Inject(ctx)
-	return s.Base.Builder.SBOMImages(ctx, req.GetSubjects(), sbom.SourceRegistry)
+	return s.imageSBOM(ctx, req.GetSubjects())
+}
+
+// imageSBOM inventories each subject, resolving where the image actually lives.
+//
+// Neither SBOMRequest nor ImageSubject carries a scanner source, and both
+// sources are real for this agent: release paths push, so the registry
+// resolves them, while `codefly ci build` builds with --load and leaves an
+// image whose only identity is its local image ID. Assuming either one strands
+// the other — a registry lookup of a --load image fails with "pull access
+// denied" for an image sitting in the daemon, fully scannable.
+//
+// The registry is tried first so a stale local copy can never shadow what was
+// actually published; the daemon answers only for a reference the registry
+// cannot serve. When neither resolves, both causes are reported, because the
+// registry failure on its own does not explain why the daemon had nothing
+// either. Empty subjects are the caller's precondition failure, not a
+// resolution failure, so they never reach a scanner.
+func (s *Builder) imageSBOM(ctx context.Context, subjects []*builderv0.ImageSubject) (*builderv0.SBOMResponse, error) {
+	if len(subjects) == 0 {
+		return s.Base.Builder.SBOMImageSubjectsRequired()
+	}
+	registry, err := s.Base.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
+	if err != nil || registry.GetState().GetState() != builderv0.SBOMStatus_ERROR {
+		return registry, err
+	}
+	daemon, err := s.Base.Builder.SBOMImages(ctx, subjects, sbom.SourceDockerDaemon)
+	if err != nil {
+		return nil, err
+	}
+	if daemon.GetState().GetState() == builderv0.SBOMStatus_ERROR {
+		return s.Base.Builder.SBOMImageError(fmt.Errorf("registry: %s; docker daemon: %s",
+			registry.GetState().GetMessage(), daemon.GetState().GetMessage()))
+	}
+	return daemon, nil
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
