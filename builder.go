@@ -5,7 +5,6 @@ import (
 	"embed"
 	"errors"
 	"os"
-	"path/filepath"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
@@ -188,13 +187,14 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		Components: requirements.All(),
 	}
 	outputDir := req.GetOutputDirectory()
-	if err := shared.DeleteFile(ctx, filepath.Join(outputDir, "Dockerfile")); err != nil {
+	emitted, err := services.PrepareRecipeDestination(builderFS, outputDir)
+	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
 	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
-	return s.Base.Builder.SingleImageBuildResponse(req, s.DockerImage(dockerRequest).FullName())
+	return s.Base.Builder.SingleImageBuildResponse(req, s.DockerImage(dockerRequest).FullName(), emitted)
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
