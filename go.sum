@@ -47,8 +47,6 @@ github.com/codefly-dev/core v0.3.29 h1:S4jgxOt5cnPX1zfv1xPheskOjfY2UR5gVQeb+AP1D
 github.com/codefly-dev/core v0.3.29/go.mod h1:guGVP8tyWEjpUBwdP588jXb/BwADsrzlhx7WtmZSn20=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
-github.com/codefly-dev/service-python v0.0.61 h1:kiS7nC4vqXNJ4tajpwj42uIjUxIMUDcLuJSOlt0vFuw=
-github.com/codefly-dev/service-python v0.0.61/go.mod h1:GHxhihx2UsWWOoXcFBKBfD7kz5XjyI6x0sQV5VRjQ5s=
 github.com/codefly-dev/service-python v0.0.62 h1:quru4JzJi8v5nhiYTzXjl2SswXIasyeYq/iaM6TvN4k=
 github.com/codefly-dev/service-python v0.0.62/go.mod h1:LEJP0KA7BRALgQU8YLBwwVxXls5WwQLQ8esbMDG6IOY=
 github.com/containerd/errdefs v1.0.0 h1:tg5yIfIlQIrxYtu9ajqY42W3lpS19XqdxRQeEwYG8PI=
@@ -352,7 +350,6 @@ golang.org/x/sys v0.0.0-20201204225414-ed752295db88/go.mod h1:h1NjWce9XRLGQEsW7w
 golang.org/x/sys v0.0.0-20210124154548-22da62e12c0c/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20210423082822-04245dca01da/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
-golang.org/x/sys v0.0.0-20210616094352-59db8d763f22/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
