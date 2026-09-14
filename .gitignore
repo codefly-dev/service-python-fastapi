@@ -8,6 +8,7 @@ __pycache__
 dist/
 testdata/container*
 testdata/native*
+testdata/recipe*
 service-python-fastapi
 go.work
 go.work.sum

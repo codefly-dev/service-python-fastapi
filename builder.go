@@ -8,6 +8,7 @@ import (
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/agents/services/sbom"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	"github.com/codefly-dev/core/companions/proto"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -195,6 +196,24 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Base.Builder.BuildError(err)
 	}
 	return s.Base.Builder.SingleImageBuildResponse(req, s.DockerImage(dockerRequest).FullName(), emitted)
+}
+
+// SBOM serves both evidence scopes. Source inventory stays with the generic
+// Python builder, which reads uv's lockfile; it describes the resolved
+// dependency set and says nothing about the OS packages of a shipped image.
+//
+// Image scope goes to core's shared scanner. This agent emits a build recipe
+// and never runs buildx, so the digests only exist on the caller's side and
+// arrive as explicit subjects. SBOMImages answers empty subjects with a
+// precondition failure of its own: the service does ship an image, so
+// neither UNSUPPORTED nor a no-image reason would be true.
+func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+	defer s.Wool.Catch()
+	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		return s.Builder.SBOM(ctx, req)
+	}
+	ctx = s.Wool.Inject(ctx)
+	return s.Base.Builder.SBOMImages(ctx, req.GetSubjects(), sbom.SourceRegistry)
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list

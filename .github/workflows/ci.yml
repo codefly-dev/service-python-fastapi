@@ -16,8 +16,15 @@ jobs:
     with:
       # The Python runtime tests drive `uv` on the host (dependency sync,
       # pytest); it isn't on the runner by default.
+      #
+      # syft is what makes the image SBOM test run rather than skip: scanning
+      # a --load image that was never pushed goes through the Docker daemon,
+      # and core's managed scanner container has no socket to reach it. The
+      # version matches core's own SyftVersion pin.
       setup-run: |
         curl -LsSf https://astral.sh/uv/install.sh | sh
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+          | sh -s -- -b "$HOME/.local/bin" v1.48.0
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
   # The runner lifecycle (Init / Start / Stop / Destroy) is concurrent gRPC
