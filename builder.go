@@ -9,7 +9,6 @@ import (
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/agents/services/sbom"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	"github.com/codefly-dev/core/companions/proto"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -215,38 +214,10 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 	return s.imageSBOM(ctx, req.GetSubjects())
 }
 
-// imageSBOM inventories each subject, resolving where the image actually lives.
-//
-// Neither SBOMRequest nor ImageSubject carries a scanner source, and both
-// sources are real for this agent: release paths push, so the registry
-// resolves them, while `codefly ci build` builds with --load and leaves an
-// image whose only identity is its local image ID. Assuming either one strands
-// the other — a registry lookup of a --load image fails with "pull access
-// denied" for an image sitting in the daemon, fully scannable.
-//
-// The registry is tried first so a stale local copy can never shadow what was
-// actually published; the daemon answers only for a reference the registry
-// cannot serve. When neither resolves, both causes are reported, because the
-// registry failure on its own does not explain why the daemon had nothing
-// either. Empty subjects are the caller's precondition failure, not a
-// resolution failure, so they never reach a scanner.
+// imageSBOM preserves each caller-supplied immutable image identity and source.
+// Core refuses unpinned subjects and never substitutes another scanner source.
 func (s *Builder) imageSBOM(ctx context.Context, subjects []*builderv0.ImageSubject) (*builderv0.SBOMResponse, error) {
-	if len(subjects) == 0 {
-		return s.Base.Builder.SBOMImageSubjectsRequired()
-	}
-	registry, err := s.Base.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
-	if err != nil || registry.GetState().GetState() != builderv0.SBOMStatus_ERROR {
-		return registry, err
-	}
-	daemon, err := s.Base.Builder.SBOMImages(ctx, subjects, sbom.SourceDockerDaemon)
-	if err != nil {
-		return nil, err
-	}
-	if daemon.GetState().GetState() == builderv0.SBOMStatus_ERROR {
-		return s.Base.Builder.SBOMImageError(fmt.Errorf("registry: %s; docker daemon: %s",
-			registry.GetState().GetMessage(), daemon.GetState().GetMessage()))
-	}
-	return daemon, nil
+	return s.Base.Builder.SBOMImages(ctx, subjects)
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
@@ -269,6 +240,7 @@ func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*
 
 // Parameters is the template parameter set for the k8s deployment.
 type Parameters struct {
+	Probes string
 	// GRPCEnabled adds the gRPC containerPort and Service port to the rendered
 	// manifests. GRPCPort is the fixed in-cluster port the grpc.aio listener
 	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
@@ -280,6 +252,21 @@ type Parameters struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
+	// The current Core manifest profile requires all three intents. Require
+	// an authored startup/restart policy instead of inventing one from readiness.
+	plan := resources.PlanEndpointProbes(s.FastAPI.RestEndpoint)
+	if plan.Startup == nil || plan.Liveness == nil {
+		return nil, fmt.Errorf("the Kubernetes manifest profile requires explicit endpoint health.startup and health.liveness; readiness is not a restart policy")
+	}
+	probes, err := deploymentProbes(s.FastAPI.RestEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	for _, endpoint := range s.Endpoints {
+		if endpoint.GetName() != s.FastAPI.RestEndpoint.GetName() && endpoint.GetHealth() != nil {
+			return nil, fmt.Errorf("declared health on additional endpoint %q requires a combined deployment probe; refusing to ignore it", endpoint.GetName())
+		}
+	}
 	return s.Base.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
@@ -288,6 +275,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			DependencyConfigurations: true,
 		},
 		Parameters: Parameters{
+			Probes:      probes,
 			GRPCEnabled: s.FastAPI.Settings.GRPCServer.Enabled,
 			GRPCPort:    int(standards.Port(standards.GRPC)),
 		},
@@ -373,6 +361,14 @@ func (s *Builder) Create(ctx context.Context, _ *builderv0.CreateRequest) (*buil
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.swagger.json")
 	endpoint := s.Base.BaseEndpoint(standards.REST)
+	// New scaffolds explicitly declare the policy supported by their /version
+	// route. Existing authored services are loaded, never rewritten by Deploy.
+	endpoint.Health = &resources.Health{
+		Readiness: &resources.Probe{Kind: resources.ProbeKindHTTP, Path: "/version", Statuses: []string{"200"}},
+		Startup:   &resources.Probe{Kind: resources.ProbeKindTransport, Period: "2s", FailureThreshold: 30},
+		Liveness:  &resources.Probe{Kind: resources.ProbeKindTransport},
+	}
+
 	if s.FastAPI.Settings.PublicEndpoint {
 		endpoint.Visibility = resources.VisibilityPublic
 	}
@@ -389,6 +385,10 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	api, err := resources.NewAPI(ctx, endpoint, resources.ToRestAPI(rest))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi api")
+	}
+	api.Health, err = endpoint.Health.Proto(api.GetApi())
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot declare scaffold health")
 	}
 	s.FastAPI.RestEndpoint = api
 	s.Endpoints = []*basev0.Endpoint{s.FastAPI.RestEndpoint}

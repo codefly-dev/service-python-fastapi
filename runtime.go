@@ -113,6 +113,8 @@ type Runtime struct {
 	// startInputs renders the StartRequest fields the running process was
 	// launched with, so a later Start can tell whether they still match.
 	startInputs string
+	// initFixture is the authoritative selection for the current invocation.
+	initFixture string
 
 	// launchInputs renders everything that shapes the launched process: the
 	// StartRequest fields above plus the agent-owned argv state Init publishes.
@@ -158,6 +160,9 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.runnerMu.Lock()
+	s.initFixture = ""
+	s.runnerMu.Unlock()
 	s.Base.Runtime.SetEnvironment(req.Environment)
 
 	// FastAPI layout: Python source lives under <service>/code. Push onto
@@ -382,6 +387,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	// again — otherwise Init would succeed and every later Start refuse.
 	s.runnerMu.Lock()
 	s.destroyed = false
+	s.initFixture = req.GetFixture()
+	s.EnvironmentVariables.ResetFixture(s.initFixture)
 	s.runnerMu.Unlock()
 
 	if err := s.SetRuntimeContext(ctx, req.RuntimeContext); err != nil {
@@ -517,7 +524,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	inputs := startInputs(req)
-	launch := launchInputs(inputs, s.port, s.grpcPort, s.FastAPI.Settings.HotReload)
+	launch := launchInputs(inputs, s.port, s.grpcPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
 
 	if s.runner != nil {
 		switch {
@@ -813,10 +820,6 @@ func (s *Runtime) applyStartInputs(ctx context.Context, req *runtimev0.StartRequ
 		s.appliedOverrides[key]++
 	}
 
-	// Unconditional: the manager falls back to the environment-level fixture
-	// when this one is empty, so passing "" is how a withdrawn fixture reverts.
-	s.EnvironmentVariables.SetFixture(req.GetFixture())
-
 	networkAccess := resources.NetworkAccessFromRuntimeContext(s.Base.Runtime.RuntimeContext)
 	if unresolved := unresolvedDependencies(req.GetDependenciesNetworkMappings(), networkAccess); len(unresolved) > 0 {
 		// AddEndpoints drops these silently, which surfaces much later as a
@@ -863,6 +866,14 @@ func unresolvedDependencies(mappings []*basev0.NetworkMapping, networkAccess *ba
 // carries the secret configuration values alongside the plain ones, so this is
 // the complete set and the override resolution below covers secrets too.
 func (s *Runtime) processEnvironment(req *runtimev0.StartRequest) ([]*resources.EnvironmentVariable, error) {
+	// Init remains authoritative. Without an Init selection, the legacy
+	// Start-owned selector can be withdrawn instead of latching into a new process.
+	fixture := s.initFixture
+	if fixture == "" {
+		fixture = req.GetFixture()
+	}
+	s.EnvironmentVariables.ResetFixture(fixture)
+
 	envs, err := s.EnvironmentVariables.All()
 	if err != nil {
 		return nil, err

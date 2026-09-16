@@ -91,7 +91,7 @@ func TestImageSBOMExpectationsMatchTheEmittedRecipe(t *testing.T) {
 	builder, _ := createdBuilder(t)
 	plan, _ := emitRecipePlan(t, builder)
 
-	expected := sbom.ExpectedFromBuildPlan(builder.Identity.Name, plan)
+	expected := recipeSubjectFixture(t, builder.Identity.Name, plan)
 
 	require.Len(t, expected, 2)
 	var platforms []string
@@ -110,12 +110,12 @@ func TestImageSBOMExpectationsMatchTheEmittedRecipe(t *testing.T) {
 func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 	builder, _ := createdBuilder(t)
 	plan, _ := emitRecipePlan(t, builder)
-	expected := sbom.ExpectedFromBuildPlan(builder.Identity.Name, plan)
+	expected := recipeSubjectFixture(t, builder.Identity.Name, plan)
 
 	t.Run("no-image reason contradicting the declared build", func(t *testing.T) {
 		resp, err := builder.Base.Builder.SBOMNoImage(builderv0.NoImageReason_NO_IMAGE_REASON_EXTERNALLY_MANAGED, "vendor image")
 		require.NoError(t, err)
-		require.Error(t, sbom.ValidateCoverage(expected, resp))
+		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
 
 	t.Run("source inventory is not image coverage", func(t *testing.T) {
@@ -123,13 +123,13 @@ func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 			State: &builderv0.SBOMStatus{State: builderv0.SBOMStatus_COMPLETE},
 			Scope: builderv0.SBOMScope_SBOM_SCOPE_SOURCE,
 		}
-		require.Error(t, sbom.ValidateCoverage(expected, resp))
+		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
 
 	t.Run("precondition failure never reads as coverage", func(t *testing.T) {
 		resp, err := builder.SBOM(t.Context(), imageSBOMRequest())
 		require.NoError(t, err)
-		require.Error(t, sbom.ValidateCoverage(expected, resp))
+		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
 
 	t.Run("one platform does not cover a multi-architecture image", func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 			Sha256:   strings.Repeat("b", 64),
 		}})
 		require.NoError(t, err)
-		require.Error(t, sbom.ValidateCoverage(expected, resp))
+		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
 }
 
@@ -168,7 +168,7 @@ func TestImageSBOMPropagatesScanFailures(t *testing.T) {
 	require.Equal(t, builderv0.SBOMStatus_ERROR, resp.GetState().GetState())
 	require.Equal(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
 	require.Empty(t, resp.GetImages())
-	require.Error(t, sbom.ValidateCoverage([]*builderv0.ImageSubject{subject}, resp))
+	require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv0.ImageSubject{subject}, resp))
 }
 
 // TestImageSBOMInventoriesTheBuiltImage is the end-to-end check: it builds the
@@ -221,7 +221,12 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 	// core's helper. Scope routing and scanner-source resolution are what this
 	// repository owns, and a test calling the helper directly passed with
 	// either of them broken.
+	inspect := exec.CommandContext(ctx, "docker", "image", "inspect", tag, "--format", "{{.Id}}")
+	rawID, err := inspect.Output()
+	require.NoError(t, err)
 	subject := &builderv0.ImageSubject{
+		Digest:    strings.TrimSpace(string(rawID)),
+		Source:    builderv0.ImageSourceKind_IMAGE_SOURCE_KIND_DOCKER_DAEMON,
 		Reference: tag,
 		Role:      plan.GetRecipes()[0].GetName(),
 		Service:   builder.Identity.Name,
@@ -264,5 +269,22 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 		require.True(t, names[name], "image inventory is missing application dependency %s", name)
 	}
 
-	require.NoError(t, sbom.ValidateCoverage([]*builderv0.ImageSubject{subject}, resp))
+	require.NoError(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv0.ImageSubject{subject}, resp))
+}
+
+// Synthetic resolved identities exercise the pure coverage contract. The real
+// build/scan test above independently uses the image ID observed from Docker.
+func recipeSubjectFixture(t *testing.T, service string, plan *builderv0.DockerBuildPlan) []*builderv0.ImageSubject {
+	t.Helper()
+	_, err := sbom.ExpectedFromBuildPlan(service, plan, nil)
+	require.Error(t, err, "unbuilt recipe tags must not count as image evidence")
+	var resolved []sbom.ResolvedImage
+	for _, recipe := range plan.GetRecipes() {
+		for _, platform := range recipe.GetPlatforms() {
+			resolved = append(resolved, sbom.ResolvedImage{Recipe: recipe.GetName(), Platform: platform, Digest: "sha256:" + strings.Repeat("a", 64), Source: sbom.SourceRegistry})
+		}
+	}
+	subjects, err := sbom.ExpectedFromBuildPlan(service, plan, resolved)
+	require.NoError(t, err)
+	return subjects
 }

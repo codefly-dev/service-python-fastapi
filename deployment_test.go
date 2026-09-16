@@ -10,7 +10,7 @@ import (
 )
 
 func TestDeploymentTemplates(t *testing.T) {
-	destination := agenttesting.AssertKustomizeTemplates(t, deploymentFS, Parameters{})
+	destination := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{}))
 
 	rendered, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
 	require.NoError(t, err)

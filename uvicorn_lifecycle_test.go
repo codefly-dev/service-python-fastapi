@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -202,4 +203,48 @@ func TestHotReloadParentOutlivesBrokenApp(t *testing.T) {
 	require.Eventually(t, func() bool { return serves(runtime.port) }, 30*time.Second, 200*time.Millisecond,
 		"a successful reload must restore a serving app")
 	require.Same(t, supervisor, currentRunner(runtime), "the reload happens inside the process uvicorn already owns")
+}
+
+func TestRealProcessFixtureWithdrawalAndInitAuthority(t *testing.T) {
+	source := uvProject(t, `import os
+async def app(scope, receive, send):
+    value = os.environ.get("CODEFLY__FIXTURE", "none").encode()
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": value})
+`)
+	runtime := uvicornRuntime(t, source, false)
+	ctx := context.Background()
+	assertBody := func(want string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			client := http.Client{Timeout: time.Second}
+			response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", runtime.port))
+			if err != nil {
+				return false
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(io.LimitReader(response.Body, 1024))
+			return err == nil && string(body) == want
+		}, 10*time.Second, 100*time.Millisecond)
+	}
+	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "seed"})
+	require.NoError(t, err)
+	assertBody("seed")
+	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	assertBody("none")
+	// uvicornRuntime establishes the state after Init. Preserve that invocation
+	// selection even if a later Start carries a different legacy selector.
+	runtime.runnerMu.Lock()
+	runtime.initFixture = "installed"
+	runtime.runnerMu.Unlock()
+	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "other"})
+	require.NoError(t, err)
+	assertBody("installed")
+	runtime.runnerMu.Lock()
+	runtime.initFixture = "replacement"
+	runtime.runnerMu.Unlock()
+	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "other"})
+	require.NoError(t, err)
+	assertBody("replacement")
 }

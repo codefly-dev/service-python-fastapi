@@ -193,7 +193,7 @@ func TestGRPCEndpointReloadsContract(t *testing.T) {
 // TestDeploymentRendersGRPCPort proves the gRPC container/service ports appear
 // only when the deployment parameters opt in.
 func TestDeploymentRendersGRPCPort(t *testing.T) {
-	enabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, Parameters{GRPCEnabled: true, GRPCPort: 9090})
+	enabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{GRPCEnabled: true, GRPCPort: 9090}))
 	svc, err := os.ReadFile(filepath.Join(enabled, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(svc), "grpc-port")
@@ -203,7 +203,7 @@ func TestDeploymentRendersGRPCPort(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(deployment), "containerPort: 9090")
 
-	disabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, Parameters{})
+	disabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{}))
 	svc, err = os.ReadFile(filepath.Join(disabled, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(svc), "grpc-port")
