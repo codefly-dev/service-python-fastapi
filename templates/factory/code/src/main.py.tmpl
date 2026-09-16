@@ -40,12 +40,12 @@ app.add_middleware(
 
 # Initialize configuration before importing routes or user-provided plugins.
 # Routes
-from src.admin.router import router as admin  # noqa: E402
+from src.admin.router import router as admin
 
 app.include_router(admin)
 
 # Plugins
-from src.plugins.registry import plugins  # noqa: E402
+from src.plugins.registry import plugins
 
 for plugin in plugins:
     app.include_router(plugin.router, prefix=plugin.prefix, tags=plugin.tags)
