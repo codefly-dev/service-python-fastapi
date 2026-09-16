@@ -3,10 +3,10 @@
 import json
 import os
 
-from src.main import app
-
-import codefly_sdk.codefly as codefly
+from codefly_sdk import codefly
 from fastapi.openapi.utils import get_openapi
+
+from src.main import app
 
 if __name__ == "__main__":
     current_file_path = os.path.abspath(__file__)

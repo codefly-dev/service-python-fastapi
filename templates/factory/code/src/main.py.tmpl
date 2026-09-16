@@ -1,8 +1,8 @@
 import os
 
+from codefly_sdk import codefly
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import codefly_sdk.codefly as codefly
 
 
 def _service_manifest_reachable() -> bool:
@@ -38,12 +38,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize configuration before importing routes or user-provided plugins.
 # Routes
-from src.admin.router import router as admin
+from src.admin.router import router as admin  # noqa: E402
+
 app.include_router(admin)
 
 # Plugins
-from src.plugins.registry import plugins
+from src.plugins.registry import plugins  # noqa: E402
 
 for plugin in plugins:
     app.include_router(plugin.router, prefix=plugin.prefix, tags=plugin.tags)
