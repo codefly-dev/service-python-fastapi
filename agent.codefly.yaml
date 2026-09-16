@@ -2,3 +2,6 @@ publisher: codefly.dev
 kind: codefly:service
 name: python-fastapi
 version: 0.0.100
+source:
+  directory: .
+  agent: codefly.dev/go:0.0.51
