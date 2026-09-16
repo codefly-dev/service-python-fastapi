@@ -13,3 +13,11 @@ Some of the things this agent provides for you:
 ## Production ready
 - Dockerfile and verifiable build plan generation (requires `output_directory`); the CLI owns image builds, builder selection, caching, and publishing
 - Kubernetes deployment
+
+## Declared container health
+
+Kubernetes probes follow the authored REST endpoint's health predicates and transport. HTTP checks preserve accepted statuses and bounded body containment; redirects are not followed. Secured container-local checks authenticate the listener against the exact certificate mounted at `UVICORN_SSL_CERTFILE` before sending HTTP data. The isolated Python probe imports no application code and emits no response content or certificate material.
+
+Startup, readiness and liveness are separate policies. The current Core Kubernetes manifest profile requires all three, so deployment refuses absent startup/liveness declarations instead of copying readiness into a restart policy. New scaffolds explicitly declare `/version` readiness and transport startup/liveness. Existing services must author their own policies. Whole-second timing is required by Kubernetes; predicates or additional listener health that this agent cannot preserve are refused rather than silently omitted.
+
+Image SBOM requests must provide immutable subjects and their registry/daemon source. The Core scanner preserves each requested identity; there is no registry-to-daemon fallback for a different image.
