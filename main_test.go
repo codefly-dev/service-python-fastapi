@@ -20,6 +20,7 @@ import (
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/runners/dockerrun"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 )
@@ -31,6 +32,7 @@ func TestCreateToRunNative(t *testing.T) {
 }
 
 func TestCreateToRunDocker(t *testing.T) {
+	ownTestContainers(t)
 	testCreateToRun(t, resources.NewRuntimeContextContainer())
 }
 
@@ -165,4 +167,16 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 		require.Equal(t, identity.Version, version)
 		break
 	}
+}
+
+// Source tests run below the agent process, so its recovery marker is not ours.
+// Give test-owned resources a new isolated scope; never remove the ownership check.
+func ownTestContainers(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	scope, err := dockerrun.NewContainerRecoveryScope(root, root, t.Name())
+	require.NoError(t, err)
+	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	require.NoError(t, dockerrun.SetContainerRecoveryScope(scope))
+	require.NotEmpty(t, dockerrun.InheritedContainerRecoveryScope())
 }

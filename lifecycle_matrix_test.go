@@ -10,7 +10,9 @@ import (
 
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
+	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/runners/testmatrix"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPythonFastAPILifecycle_Matrix exercises python-fastapi's parity
@@ -19,6 +21,14 @@ import (
 // (main.go `runtimeImage`). Nix + native rely on host's python3 via PATH
 // or flake.nix respectively.
 func TestPythonFastAPILifecycle_Matrix(t *testing.T) {
+	// The test binary owns its containers independently of the source-test launcher.
+	root := t.TempDir()
+	scope, err := dockerrun.NewContainerRecoveryScope(root, root, t.Name())
+	require.NoError(t, err)
+	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	require.NoError(t, dockerrun.SetContainerRecoveryScope(scope))
+	require.NotEmpty(t, dockerrun.InheritedContainerRecoveryScope())
+
 	dir, err := os.MkdirTemp("", "pyfastapi-matrix-*")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)

@@ -10,17 +10,18 @@ os.environ.setdefault("CODEFLY__SERVICE", "svc")
 os.environ.setdefault("CODEFLY__SERVICE_VERSION", "0.0.0")
 
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
-from src.main import app
-
-from src.admin.version import get_version
 from src.admin.models import Version
+from src.admin.version import get_version
+from src.main import app
 
 
 @pytest.mark.asyncio
 async def test_version():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8080") as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:8080"
+    ) as ac:
         response = await ac.get("/version")
     assert response.status_code == 200
 

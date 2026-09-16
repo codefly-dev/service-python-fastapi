@@ -297,6 +297,7 @@ func TestResolveRuntimeImageHonorsOverride(t *testing.T) {
 // that is the shape `codefly` shutdown reaches when Init never ran in this
 // process, and the only path on which Destroy reaches the container by name.
 func TestDestroyRemovesContainerBeforeClearingCache(t *testing.T) {
+	ownTestContainers(t)
 	ctx := context.Background()
 
 	// Docker on macOS only bind-mounts shared paths, and the per-user temp dir
