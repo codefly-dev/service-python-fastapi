@@ -403,6 +403,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err := s.EnvironmentVariables.AddEndpoints(ctx, s.NetworkMappings, resources.NetworkAccessFromRuntimeContext(s.Base.Runtime.RuntimeContext)); err != nil {
 		return s.Base.Runtime.InitError(err)
 	}
+	// Workspace configuration is a separate InitRequest field, not part of
+	// service/dependency configuration. Install it before creating the runner
+	// so initialization and the eventual application receive the same bindings.
+	// Workspace inputs have no RuntimeContext: the composition has already
+	// selected its environment. Filtering them as dependency outputs drops them.
+	if err := s.EnvironmentVariables.AddConfigurations(ctx, req.WorkspaceConfigurations...); err != nil {
+		return s.Base.Runtime.InitError(err)
+	}
 
 	env, cacheLocation, err := s.runnerEnv(ctx)
 	if err != nil {
