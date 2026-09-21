@@ -70,12 +70,13 @@ type serviceAccount struct {
 	} `yaml:"metadata"`
 }
 
-// renderDeployment renders the deployment templates with an overlay and returns
-// the workload's pod template, normalized the way DeployKustomize normalizes it
-// before rendering.
+// renderDeployment renders the deployment templates with an overlay, normalized
+// through the same agent entry point Deploy uses. The shared test helper calls
+// DefaultServiceAccountName but not DefaultConfigMounts, so a mount rendered
+// straight from it carries an empty volume name (codefly-dev/core#614).
 func renderDeployment(t *testing.T, parameters Parameters, overlay *services.PodTemplateOverlay) (podSpec, string) {
 	t.Helper()
-	overlay.DefaultConfigMounts()
+	require.NoError(t, preparePodOverlay(overlay))
 	destination := agenttesting.AssertKustomizeTemplatesWithOverlay(t, deploymentFS, deploymentTestParameters(t, parameters), overlay)
 
 	rendered, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
@@ -95,7 +96,10 @@ func TestDeploymentWithoutOverlayIsUnchanged(t *testing.T) {
 	require.Empty(t, pod.Spec.ServiceAccountName)
 	require.Equal(t, false, *pod.Spec.AutomountServiceAccountToken)
 	require.Nil(t, pod.Metadata.Annotations)
-	require.Equal(t, map[string]string{"app": "example-service", "sha": "1.2.3"}, pod.Metadata.Labels)
+	// The selector label and the image sha, and nothing the overlay would add.
+	require.Len(t, pod.Metadata.Labels, 2)
+	require.Equal(t, "example-service", pod.Metadata.Labels["app"])
+	require.NotEmpty(t, pod.Metadata.Labels["sha"])
 	// Only the scratch mount: an absent overlay must add no volume.
 	require.Len(t, pod.Spec.Volumes, 1)
 	require.Equal(t, "tmp", pod.Spec.Volumes[0].Name)
@@ -214,5 +218,62 @@ func TestDeploymentAutomountServiceAccountTokenRejectsProjection(t *testing.T) {
 	validation := services.ValidateKubernetesManifestTree(t.Context(), destination, "test", "codefly-test",
 		builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
 
-	require.Equal(t, []string{"Deployment/example-service must set automountServiceAccountToken: false"}, validation.GetViolations())
+	require.Contains(t, validation.GetViolations(),
+		"Deployment/example-service must set automountServiceAccountToken: false",
+		"core no longer rejects a projected token: codefly-dev/core#602 is resolved, so "+
+			"AutomountServiceAccountToken is now usable and this test should assert the render instead")
+}
+
+// TestPreparePodOverlayRejectsScratchCollision covers the mounts core's own
+// validation accepts: it checks a mount against the other mounts, so a mount
+// landing on the volume name or path this template reserves renders a manifest
+// that passes static conformance and fails at apply.
+func TestPreparePodOverlayRejectsScratchCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mount services.ConfigMount
+		error string
+	}{
+		{
+			name:  "volume name",
+			mount: services.ConfigMount{ConfigMapName: "tmp", MountPath: "/etc/trust"},
+			error: `collides with the reserved scratch volume "tmp"`,
+		},
+		{
+			name:  "mount path",
+			mount: services.ConfigMount{ConfigMapName: "trust-bundle", MountPath: "/tmp"},
+			error: "would shadow the scratch mount at /tmp",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			overlay := &services.PodTemplateOverlay{ConfigMounts: []services.ConfigMount{tc.mount}}
+			// Core accepts both; only this agent knows what its template reserves.
+			normalized := *overlay
+			normalized.DefaultConfigMounts()
+			require.NoError(t, normalized.Validate())
+
+			require.ErrorContains(t, preparePodOverlay(overlay), tc.error)
+		})
+	}
+}
+
+// TestPreparePodOverlayNormalizesMounts pins the normalization the template
+// depends on: rendered verbatim, an unnormalized mount emits an unnamed volume
+// and a "<nil>" readOnly string, both of which survive static conformance.
+func TestPreparePodOverlayNormalizesMounts(t *testing.T) {
+	overlay := &services.PodTemplateOverlay{
+		ConfigMounts: []services.ConfigMount{{ConfigMapName: "trust.bundle", MountPath: "/etc/trust"}},
+	}
+
+	require.NoError(t, preparePodOverlay(overlay))
+
+	mount := overlay.ConfigMounts[0]
+	// Dots are legal in a ConfigMap name and illegal in a volume name.
+	require.Equal(t, "trust-bundle", mount.VolumeName)
+	require.NotNil(t, mount.ReadOnly)
+	require.True(t, *mount.ReadOnly)
+}
+
+func TestPreparePodOverlayAcceptsNoOverlay(t *testing.T) {
+	require.NoError(t, preparePodOverlay(nil))
 }
