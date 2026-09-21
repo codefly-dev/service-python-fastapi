@@ -246,6 +246,11 @@ type Parameters struct {
 	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
 	GRPCEnabled bool
 	GRPCPort    int
+	// AutomountServiceAccountToken projects the ServiceAccount token into the
+	// pod. It stays false while the platform's identity path is the metadata
+	// server or a webhook-projected token and the app never calls the API
+	// server; a workload that does call it sets this.
+	AutomountServiceAccountToken bool
 }
 
 // Deploy renders and applies k8s manifests.
