@@ -11,6 +11,7 @@ import (
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/runners/recoveryscope"
 	"github.com/codefly-dev/core/runners/testmatrix"
 	"github.com/stretchr/testify/require"
 )
@@ -25,9 +26,11 @@ func TestPythonFastAPILifecycle_Matrix(t *testing.T) {
 	root := t.TempDir()
 	scope, err := dockerrun.NewContainerRecoveryScope(root, root, t.Name())
 	require.NoError(t, err)
-	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	t.Setenv(recoveryscope.EnvironmentVariable, os.Getenv(recoveryscope.EnvironmentVariable))
 	require.NoError(t, dockerrun.SetContainerRecoveryScope(scope))
-	require.NotEmpty(t, dockerrun.InheritedContainerRecoveryScope())
+	inheritedScope, _, err := recoveryscope.Inherited()
+	require.NoError(t, err)
+	require.NotEmpty(t, inheritedScope)
 
 	dir, err := os.MkdirTemp("", "pyfastapi-matrix-*")
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/runners/recoveryscope"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 )
@@ -176,7 +177,9 @@ func ownTestContainers(t *testing.T) {
 	root := t.TempDir()
 	scope, err := dockerrun.NewContainerRecoveryScope(root, root, t.Name())
 	require.NoError(t, err)
-	t.Setenv(dockerrun.ContainerRecoveryScopeEnvironment, os.Getenv(dockerrun.ContainerRecoveryScopeEnvironment))
+	t.Setenv(recoveryscope.EnvironmentVariable, os.Getenv(recoveryscope.EnvironmentVariable))
 	require.NoError(t, dockerrun.SetContainerRecoveryScope(scope))
-	require.NotEmpty(t, dockerrun.InheritedContainerRecoveryScope())
+	inheritedScope, _, err := recoveryscope.Inherited()
+	require.NoError(t, err)
+	require.NotEmpty(t, inheritedScope)
 }
