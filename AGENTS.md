@@ -81,17 +81,22 @@ matters. The lock order is documented on the struct fields — follow it.
 
 **Nothing is mocked.** The suite drives a real uvicorn through `uv`, real
 containers through the Docker daemon, and a real `syft` scan of an image built
-from the recipe this agent emits. Tests skip rather than fake when a tool is
-absent, so a green run on a bare machine has proved much less than it looks:
+from the recipe this agent emits. Where a tool is absent most of these tests
+skip rather than fake, so a green run proves less than it looks — `uv`, `syft`,
+`python3` and `nix` all degrade silently. A missing Docker daemon does not:
+`TestCreateToRunDocker` runs in a container runtime context with no tooling
+guard, so it fails loudly. Never quiet that failure with a skip guard; a loud
+red is the correct outcome and the skip would buy a false green.
 
-| Missing | Silently skips |
-| --- | --- |
-| `uv` | the real uvicorn lifecycle |
-| `docker` | destroy-under-docker |
-| `syft` (+ `docker`, `uv`) | the image SBOM inventory |
+**CI has no `nix`, so the nix backend is covered nowhere.**
+`testmatrix.ForEachEnvironment` skips any backend missing from the host, and
+this repo does not pass `Only(...)` to make absence fatal — so
+`TestPythonFastAPILifecycle_Matrix/nix` is the one skip in a green CI run.
+Changing `nixflake.go` or `nix/flake.nix` is unverified by CI: exercise it
+locally with `nix` installed, and say in the PR that you did.
 
-CI installs `uv` and pins `syft` v1.48.0 in `setup-run` for exactly that
-reason. Get them locally too, or say which halves you did not exercise.
+CI installs `uv` and pins `syft` v1.48.0 in `setup-run` so the other halves do
+run. The full skip matrix is in the `lifecycle-test-triage` skill.
 
 The suite is slow because it is real — CI finishes inside `go test`'s default
 10-minute timeout, but a contended local Docker daemon pushes the container
