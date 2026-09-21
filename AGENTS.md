@@ -93,7 +93,8 @@ red is the correct outcome and the skip would buy a false green.
 this repo does not pass `Only(...)` to make absence fatal — so
 `TestPythonFastAPILifecycle_Matrix/nix` is the one skip in a green CI run.
 Changing `nixflake.go` or `nix/flake.nix` is unverified by CI: exercise it
-locally with `nix` installed, and say in the PR that you did.
+locally with `nix` installed, and say in the PR that you did. Closing that gap
+is issue #49.
 
 CI installs `uv` and pins `syft` v1.48.0 in `setup-run` so the other halves do
 run. The full skip matrix is in the `lifecycle-test-triage` skill.
@@ -158,8 +159,10 @@ carried here:
   or `ci / build` goes red on a change that passed every other local check.
 - `agent.codefly.yaml` carries the agent version; releases are tag-driven
   (`.github/workflows/releaser.yml`), never hand-built.
-- Keep this file under ~150 lines (hard cap 200). Push depth into a nested
-  `AGENTS.md` beside what it describes, or into `.claude/skills/`.
+- Keep this file near ~150 lines, hard cap 200. Push depth into a nested
+  `AGENTS.md` beside what it describes, or into `.claude/skills/`. The cap and
+  each skill's frontmatter are asserted in `conformance_test.go`, so `go test
+  ./...` enforces them with no workflow change.
 - There is no `CLAUDE.md`. If one is added, it is a one-line `@AGENTS.md`
   pointer — one canonical source, never a second copy to drift.
 - Treat this file as code: the PR that changes a process updates it.
