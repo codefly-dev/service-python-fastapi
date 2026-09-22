@@ -36,13 +36,20 @@ jobs:
       # on a bare runner, which has no macOS or cross-linux compilers. The
       # binary links Core's tree-sitter grammars (CGO), so releasing it needs
       # the toolchain this maintained image supplies — see .goreleaser.yaml.
+      - name: Install Syft for archive SBOMs
+        id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          syft-version: v1.44.0
       - name: Run CGO-capable GoReleaser
         run: >-
           docker run --rm
           -e GITHUB_TOKEN
           -v "$GITHUB_WORKSPACE:/workspace"
+          -v "$SYFT_PATH:/usr/local/bin/syft:ro"
           -w /workspace
           ghcr.io/goreleaser/goreleaser-cross:v1.27.1-1
           release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          SYFT_PATH: ${{ steps.syft.outputs.cmd }}
