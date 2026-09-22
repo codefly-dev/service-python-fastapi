@@ -249,9 +249,7 @@ type Parameters struct {
 	// AutomountServiceAccountToken projects the ServiceAccount token into the
 	// pod. It stays false because the identity path is the metadata server or a
 	// webhook-projected token and the app does not call the API server. Setting
-	// it true currently renders a manifest core's own manifest conformance
-	// rejects (codefly-dev/core#602), so the field is the seam, not yet a
-	// working switch.
+	// it true requires the pod annotation codefly.dev/api-server-access: required.
 	AutomountServiceAccountToken bool
 }
 

@@ -1,5 +1,12 @@
 version: 2
 
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "${artifact}.sbom.json"
+    disable: false
+
 builds:
   # ARCHITECTURE: Core's authoritative source inspection uses real
   # tree-sitter grammars, which are CGO. Agent releases therefore require

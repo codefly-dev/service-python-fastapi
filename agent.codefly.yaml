@@ -2,6 +2,9 @@ publisher: codefly.dev
 kind: codefly:service
 name: python-fastapi
 version: 0.0.102
+release:
+  owner: workflow
+  workflow: releaser.yml
 source:
   directory: .
-  agent: codefly.dev/go:0.0.51
+  agent: codefly.dev/go:0.0.54

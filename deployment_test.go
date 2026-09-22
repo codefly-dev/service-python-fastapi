@@ -201,11 +201,7 @@ func TestDeploymentRendersOptionalConfigMount(t *testing.T) {
 	require.Equal(t, false, *pod.Spec.Containers[0].VolumeMounts[1].ReadOnly)
 }
 
-// TestDeploymentAutomountServiceAccountTokenRejectsProjection pins the reason
-// the parameter defaults to false and cannot yet be flipped: core's manifest
-// conformance rejects a projected token for every workload, so a service that
-// needs to call the API server is blocked in core, not here.
-func TestDeploymentAutomountServiceAccountTokenRejectsProjection(t *testing.T) {
+func TestDeploymentAutomountServiceAccountTokenRejectsUndeclaredProjection(t *testing.T) {
 	_, destination := renderDeployment(t, Parameters{}, nil)
 
 	path := filepath.Join(destination, "base", "deployment.yaml")
@@ -219,9 +215,20 @@ func TestDeploymentAutomountServiceAccountTokenRejectsProjection(t *testing.T) {
 		builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
 
 	require.Contains(t, validation.GetViolations(),
-		"Deployment/example-service must set automountServiceAccountToken: false",
-		"core no longer rejects a projected token: codefly-dev/core#602 is resolved, so "+
-			"AutomountServiceAccountToken is now usable and this test should assert the render instead")
+		"Deployment/example-service must set automountServiceAccountToken: false, or declare codefly.dev/api-server-access: required")
+}
+
+func TestDeploymentAutomountServiceAccountTokenRendersDeclaredProjection(t *testing.T) {
+	pod, destination := renderDeployment(t, Parameters{AutomountServiceAccountToken: true}, &services.PodTemplateOverlay{
+		PodAnnotations: map[string]string{services.AnnotationAPIServerAccess: services.APIServerAccessRequired},
+	})
+	require.NotNil(t, pod.Spec.AutomountServiceAccountToken)
+	require.True(t, *pod.Spec.AutomountServiceAccountToken)
+	require.Equal(t, services.APIServerAccessRequired, pod.Metadata.Annotations[services.AnnotationAPIServerAccess])
+
+	validation := services.ValidateKubernetesManifestTree(t.Context(), destination, "test", "codefly-test",
+		builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
+	require.Empty(t, validation.GetViolations())
 }
 
 // TestPreparePodOverlayRejectsScratchCollision covers the mounts core's own
