@@ -14,7 +14,7 @@ spec:
         app: {{ .Service.Name.DNSCase }}
         sha: {{ .Sha }}
     spec:
-      automountServiceAccountToken: false
+      automountServiceAccountToken: {{ .Deployment.Parameters.AutomountServiceAccountToken }}
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -51,6 +51,13 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+{{- with .PodOverlay }}
+{{- range .ConfigMounts }}
+            - name: {{ .VolumeName }}
+              mountPath: {{ .MountPath }}
+              readOnly: {{ .ReadOnly }}
+{{- end }}
+{{- end }}
           envFrom:
             - configMapRef:
                 name: config-{{ .Service.Name.DNSCase }}
@@ -77,3 +84,11 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi
+{{- with .PodOverlay }}
+{{- range .ConfigMounts }}
+        - name: {{ .VolumeName }}
+          configMap:
+            name: {{ .ConfigMapName }}
+            optional: {{ .Optional }}
+{{- end }}
+{{- end }}

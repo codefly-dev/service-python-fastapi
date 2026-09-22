@@ -246,6 +246,48 @@ type Parameters struct {
 	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
 	GRPCEnabled bool
 	GRPCPort    int
+	// AutomountServiceAccountToken projects the ServiceAccount token into the
+	// pod. It stays false because the identity path is the metadata server or a
+	// webhook-projected token and the app does not call the API server. Setting
+	// it true currently renders a manifest core's own manifest conformance
+	// rejects (codefly-dev/core#602), so the field is the seam, not yet a
+	// working switch.
+	AutomountServiceAccountToken bool
+}
+
+// The container runs with readOnlyRootFilesystem, so the template reserves one
+// scratch volume and mounts it at the path HOME also points at.
+const (
+	scratchVolumeName = "tmp"
+	scratchMountPath  = "/tmp"
+)
+
+// preparePodOverlay normalizes the overlay the way the render depends on and
+// rejects a ConfigMount that collides with the scratch mount.
+//
+// Core validates a mount against the other mounts, but only this agent knows
+// the volume name and container path its own template reserves. A colliding
+// mount renders a duplicate pod volume name (or a second volumeMount on the
+// same path) that core's static conformance accepts and the API server rejects
+// at apply — and shadowing the scratch mount would leave the app with no
+// writable storage at all.
+func preparePodOverlay(overlay *services.PodTemplateOverlay) error {
+	if overlay == nil {
+		return nil
+	}
+	// The template renders VolumeName and ReadOnly verbatim; unnormalized they
+	// are empty and nil, which render an unnamed volume and a "<nil>" string
+	// that survive YAML parsing and static conformance.
+	overlay.DefaultConfigMounts()
+	for _, mount := range overlay.ConfigMounts {
+		if mount.VolumeName == scratchVolumeName {
+			return fmt.Errorf("config mount %q collides with the reserved scratch volume %q", mount.ConfigMapName, scratchVolumeName)
+		}
+		if mount.MountPath == scratchMountPath {
+			return fmt.Errorf("config mount %q would shadow the scratch mount at %s", mount.ConfigMapName, scratchMountPath)
+		}
+	}
+	return overlay.Validate()
 }
 
 // Deploy renders and applies k8s manifests.
@@ -267,9 +309,18 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			return nil, fmt.Errorf("declared health on additional endpoint %q requires a combined deployment probe; refusing to ignore it", endpoint.GetName())
 		}
 	}
+	// No producer populates the overlay yet — the deployment request carries no
+	// identity or config-mount payload (codefly-dev/core#594, codefly-dev/cli#757).
+	// The check sits on the path the overlay will arrive on, so wiring the source
+	// cannot skip it.
+	var overlay *services.PodTemplateOverlay
+	if err = preparePodOverlay(overlay); err != nil {
+		return nil, err
+	}
 	return s.Base.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
+		PodOverlay:           overlay,
 		Inputs: services.DeploymentInputs{
 			OwnConfiguration:         true,
 			DependencyConfigurations: true,
