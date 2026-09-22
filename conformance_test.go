@@ -294,3 +294,98 @@ func TestReleaseCanCompileTheCgoTheBinaryNeeds(t *testing.T) {
 			"so CGO_ENABLED=1 has no macOS or cross-linux compiler to use")
 	}
 }
+
+// agentContextCap extracts the line budget AGENTS.md states for itself. The
+// budget is parsed rather than hardcoded so the assertion is that the file
+// obeys its own stated rule: a file that tells the next agent to stay under a
+// number it has itself exceeded is an instruction that reads as false.
+var agentContextCap = regexp.MustCompile(`hard cap (\d+)`)
+
+// skillFrontmatter is the Agent Skills contract: name and description are the
+// only required fields, and the name is what the directory must be called.
+type skillFrontmatter struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+}
+
+func TestAgentContextFilesHonourTheirOwnContract(t *testing.T) {
+	raw, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	lines := strings.Count(string(raw), "\n")
+
+	match := agentContextCap.FindSubmatch(raw)
+	if match == nil {
+		t.Fatal("AGENTS.md does not state a hard cap; the length budget is unenforceable")
+	}
+	stated, err := strconv.Atoi(string(match[1]))
+	if err != nil {
+		t.Fatalf("parse hard cap %q: %v", match[1], err)
+	}
+	if lines > stated {
+		t.Errorf("AGENTS.md is %d lines but states a hard cap of %d; push depth into a skill", lines, stated)
+	}
+
+	// A CLAUDE.md is optional, but when present it must stay a pointer rather
+	// than a second copy that drifts from this file.
+	if pointer, err := os.ReadFile("CLAUDE.md"); err == nil {
+		if strings.TrimSpace(string(pointer)) != "@AGENTS.md" {
+			t.Errorf("CLAUDE.md must be the single line @AGENTS.md, got %q", string(pointer))
+		}
+	}
+}
+
+func TestSkillsDeclareTheRequiredFrontmatter(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(".claude", "skills"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("no skills directory")
+		}
+		t.Fatalf("read skills dir: %v", err)
+	}
+
+	valid := regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(".claude", "skills", entry.Name(), "SKILL.md")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		// Frontmatter is the block between the leading --- fence and the next.
+		body := string(raw)
+		if !strings.HasPrefix(body, "---\n") {
+			t.Errorf("%s: no YAML frontmatter", path)
+			continue
+		}
+		end := strings.Index(body[4:], "\n---\n")
+		if end < 0 {
+			t.Errorf("%s: frontmatter is not terminated", path)
+			continue
+		}
+		var front skillFrontmatter
+		if err := yaml.Unmarshal([]byte(body[4:4+end]), &front); err != nil {
+			t.Errorf("%s: parse frontmatter: %v", path, err)
+			continue
+		}
+		if front.Name != entry.Name() {
+			t.Errorf("%s: frontmatter name %q does not match directory %q", path, front.Name, entry.Name())
+		}
+		if !valid.MatchString(front.Name) {
+			t.Errorf("%s: name %q must be lowercase letters, digits and hyphens, at most 64 chars", path, front.Name)
+		}
+		// The description is all an agent sees before loading the skill, so an
+		// empty one makes the skill undiscoverable and an over-long one is
+		// rejected by the standard.
+		if front.Description == "" {
+			t.Errorf("%s: description is required", path)
+		}
+		if len(front.Description) > 1024 {
+			t.Errorf("%s: description is %d chars, over the 1024 limit", path, len(front.Description))
+		}
+	}
+}
