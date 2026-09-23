@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
@@ -208,9 +212,13 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
+	components, err := imageComponents(s.SourceLocation)
+	if err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
 	docker := DockerTemplating{
 		Builder:        runtimeImage.FullName(),
-		Components:     requirements.All(),
+		Components:     components,
 		UVImage:        uvImage,
 		ProjectWorkdir: defaultProjectWorkdir,
 	}
@@ -245,6 +253,61 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	}
 	s.Base.Builder.WithBuildPlan(plan)
 	return s.Base.Builder.BuildResponse()
+}
+
+// testsPackage is the test tree Create scaffolds beside src. It is importable
+// locally but is not part of the application, so the image does not ship it.
+const testsPackage = "tests"
+
+// imageComponents is every service-relative source tree the runtime stage
+// copies: code/src, which uvicorn imports the app from, and every other
+// top-level Python package in the project directory.
+//
+// Locally the service runs as `uv run uvicorn src.main:app` from code/, so
+// every package beside src is importable twice over — from the working
+// directory uvicorn puts on sys.path, and from the project uv installs. The
+// image installs dependencies only (`uv sync --no-install-project`) and runs
+// from /app/code, so a sibling package it does not copy is a service that
+// passes every local run and dies in the container with ModuleNotFoundError.
+// Copying each package keeps the working directory the one thing that makes
+// them importable in both places.
+//
+// A package is a directory holding __init__.py. Build outputs and tool caches
+// are never packages of the application, and neither is the test tree.
+func imageComponents(sourceDir string) ([]string, error) {
+	components := requirements.All()
+	shipped := map[string]bool{}
+	for _, component := range components {
+		shipped[component] = true
+	}
+	entries, err := os.ReadDir(sourceDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the Python project at %s: %w", sourceDir, err)
+	}
+	var packages []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || name == testsPackage || ephemeralSourceDirectories[name] || strings.HasPrefix(name, ".") {
+			continue
+		}
+		component := path.Join(filepath.Base(sourceDir), name)
+		if shipped[component] {
+			continue
+		}
+		marker, err := os.Stat(filepath.Join(sourceDir, name, "__init__.py"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !marker.Mode().IsRegular() {
+			continue
+		}
+		packages = append(packages, component)
+	}
+	sort.Strings(packages)
+	return append(components, packages...), nil
 }
 
 // dockerignoreOf names the ignore file only when this build rendered one.

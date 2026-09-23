@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,4 +152,49 @@ func TestBuildRejectsInvalidOutputDirectoryBeforePreparation(t *testing.T) {
 			require.Equal(t, "untouched", string(content))
 		})
 	}
+}
+
+// A package beside code/src is importable when the service runs from source —
+// uvicorn runs from code/ and uv installs the project — so the image has to
+// ship it too, or the service passes every local run and dies in the container
+// with ModuleNotFoundError. The test tree, build outputs, tool caches and
+// directories that are not packages stay out.
+func TestBuildShipsSiblingPackages(t *testing.T) {
+	builder, _ := createdBuilder(t)
+	code := builder.Local("code")
+	for _, file := range []string{
+		"model_service/__init__.py",
+		"model_service/hosted.py",
+		"adapters/__init__.py",
+		".venv/lib/__init__.py",
+		"__pycache__/stale/__init__.py",
+		".hidden/__init__.py",
+		"fixtures/data.json",
+	} {
+		require.NoError(t, os.MkdirAll(path.Dir(path.Join(code, file)), 0o755))
+		require.NoError(t, os.WriteFile(path.Join(code, file), nil, 0o600))
+	}
+	require.FileExists(t, path.Join(code, "tests", "__init__.py"))
+
+	outputDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := recipeClient(t, builder).Build(ctx, recipeBuildRequest(outputDir))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+
+	content, err := os.ReadFile(path.Join(outputDir, "Dockerfile"))
+	require.NoError(t, err)
+	dockerfile := string(content)
+	var copies []string
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if strings.HasPrefix(line, "COPY --chown=appuser code/") {
+			copies = append(copies, line)
+		}
+	}
+	require.Equal(t, []string{
+		"COPY --chown=appuser code/src code/src",
+		"COPY --chown=appuser code/adapters code/adapters",
+		"COPY --chown=appuser code/model_service code/model_service",
+	}, copies)
 }
