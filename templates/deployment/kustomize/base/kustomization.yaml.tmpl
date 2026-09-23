@@ -1,0 +1,7 @@
+resources:
+{{- if not .Restricted }}
+  # A restricted render leaves the Namespace to the environment that owns it.
+  - namespace.yaml
+{{- end }}
+  - deployment.yaml
+  - service.yaml
