@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,7 +9,10 @@ import (
 
 	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/wool"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -283,4 +287,49 @@ func TestPreparePodOverlayNormalizesMounts(t *testing.T) {
 
 func TestPreparePodOverlayAcceptsNoOverlay(t *testing.T) {
 	require.NoError(t, preparePodOverlay(nil))
+}
+
+// renderProfile renders the deployment templates for one output profile through
+// the same core entry point Deploy uses.
+func renderProfile(t *testing.T, profile builderv0.KubernetesOutputProfile) string {
+	t.Helper()
+	ctx := context.Background()
+	identity := &resources.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "example-service", Version: "1.2.3"}
+	base := &services.Base{
+		Wool:        wool.Get(ctx),
+		Identity:    identity,
+		Information: &services.Information{Service: resources.ToServiceWithCase(identity), Module: resources.ToModuleWithCase(identity)},
+	}
+	if services.IsRestrictedOutputProfile(profile) {
+		base.SetDockerImage(&resources.DockerImage{Name: "example/service", Digest: "sha256:" + strings.Repeat("a", 64)})
+	} else {
+		base.SetDockerImage(resources.NewDockerImage("example/service:1.2.3"))
+	}
+	builder := &services.BuilderWrapper{Base: base}
+	base.Builder = builder
+	destination := t.TempDir()
+	deployment := &builderv0.KubernetesDeployment{Namespace: "codefly-test", Destination: destination, Profile: profile}
+	params := services.DeploymentParameters{
+		ConfigMap:  services.EnvironmentMap{"CODEFLY_TEST_VALUE": "value"},
+		Parameters: deploymentTestParameters(t, Parameters{}),
+	}
+	require.NoError(t, builder.KustomizeDeploy(ctx, &basev0.Environment{Name: "test"}, deployment, deploymentFS, params))
+	return destination
+}
+
+// A restricted render is what `codefly deploy gitops render` produces, and it
+// refuses a cluster-scoped object outside an AppProject contract. The Namespace
+// belongs to the environment that owns it, as in the go-grpc agent; only the
+// ephemeral local apply creates one.
+func TestRestrictedDeploymentLeavesTheNamespaceToTheEnvironment(t *testing.T) {
+	restricted := renderProfile(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
+	kustomization, err := os.ReadFile(filepath.Join(restricted, "base", "kustomization.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(kustomization), "namespace.yaml")
+	require.Contains(t, string(kustomization), "deployment.yaml")
+
+	local := renderProfile(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
+	kustomization, err = os.ReadFile(filepath.Join(local, "base", "kustomization.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(kustomization), "namespace.yaml")
 }
