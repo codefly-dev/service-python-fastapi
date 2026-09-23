@@ -94,6 +94,26 @@ type Settings struct {
 // other codefly-built image.
 var runtimeImage = &resources.DockerImage{Name: "codeflydev/python", Tag: "0.0.1"}
 
+// uvVersion is the uv the emitted build recipe resolves its lockfile with.
+//
+// The base image carries a uv of its own, installed when that image was built
+// and stated nowhere a project or this agent can read. A build recipe is meant
+// to be durable and reproducible, and a recipe whose resolver version is a
+// property of its base image is neither: a project written against a newer
+// `[tool.uv]` key resolves on the developer's machine and fails inside the
+// builder stage with a TOML parse error naming a field the older uv does not
+// know. Pinning it here is the same contract the Go recipe already keeps for
+// its own toolchain, which states its Go and Alpine versions outright.
+//
+// Bump it deliberately, together with uvImage.
+const uvVersion = "0.12.16"
+
+// uvImage is the distribution the builder stage copies that uv from. astral
+// publishes each release as a multi-architecture image holding the static
+// binary, so the copy needs no package manager and no network beyond the
+// registry the build already talks to.
+const uvImage = "ghcr.io/astral-sh/uv:" + uvVersion
+
 // Service is the FastAPI specialization. It embeds the generic Python
 // Service so methods defined on *pythonservice.Service (and transitively
 // *services.Base: Wool, Logger, Location, Identity, …) are promoted.

@@ -167,6 +167,18 @@ type DockerTemplating struct {
 	Components      []string
 	RuntimePackages []string
 	Envs            []Env
+
+	// UVImage is the pinned uv distribution the builder stage copies its uv
+	// from, so the tool that reads pyproject.toml and uv.lock is a declared
+	// input of the recipe rather than whatever the base image was built with.
+	UVImage string
+
+	// ServicePrefix, ProjectWorkdir and Carried describe the build context.
+	// They are empty / defaulted when the recipe builds the service directory
+	// itself, which renders the Dockerfile this agent has always rendered.
+	ServicePrefix  string
+	ProjectWorkdir string
+	Carried        []CarriedSource
 }
 
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
@@ -183,19 +195,69 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Base.Builder.BuildError(err)
 	}
 	ctx = s.Wool.Inject(ctx)
-	docker := DockerTemplating{
-		Builder:    runtimeImage.FullName(),
-		Components: requirements.All(),
-	}
 	outputDir := req.GetOutputDirectory()
 	emitted, err := services.PrepareRecipeDestination(builderFS, outputDir)
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
+	// A `[tool.uv.sources]` path resolves against the project directory, and the
+	// default context is the service directory and nothing beside it: carry what
+	// leaves the project into an assembled context so the builder stage resolves
+	// what the host resolves. A service with no such path assembles nothing.
+	assembled, err := assembleUVContext(s.Location, s.SourceLocation, outputDir)
+	if err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
+	docker := DockerTemplating{
+		Builder:        runtimeImage.FullName(),
+		Components:     requirements.All(),
+		UVImage:        uvImage,
+		ProjectWorkdir: defaultProjectWorkdir,
+	}
+	if assembled != nil {
+		docker.ServicePrefix = assembled.ServicePrefix
+		docker.ProjectWorkdir = assembled.ProjectWorkdir
+		docker.Carried = assembled.Carried
+	}
 	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
-	return s.Base.Builder.SingleImageBuildResponse(req, s.DockerImage(dockerRequest).FullName(), emitted)
+	image := s.DockerImage(dockerRequest).FullName()
+	if assembled == nil {
+		// Only the Dockerfile and its ignore were written, and the application's
+		// inputs are the service's own tree: the plan claims what it emitted and
+		// the caller builds the service directory.
+		return s.Base.Builder.SingleImageBuildResponse(req, image, emitted)
+	}
+	// The whole destination was assembled by this build, so the plan claims all
+	// of it and the caller builds the assembled tree rather than the service
+	// directory — which is what RECIPE_INVENTORY_SCOPE_TREE declares.
+	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{{
+		Name:         "app",
+		Dockerfile:   "Dockerfile",
+		Context:      ".",
+		Dockerignore: dockerignoreOf(emitted),
+		Image:        image,
+		Platforms:    services.RecipeBuildPlatforms(),
+	}})
+	if err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
+	s.Base.Builder.WithBuildPlan(plan)
+	return s.Base.Builder.BuildResponse()
+}
+
+// dockerignoreOf names the ignore file only when this build rendered one.
+// Probing the destination instead would adopt a stale file: the executor copies
+// the referenced ignore to the path buildx discovers, so one left behind by an
+// older template set would silently keep files out of the image.
+func dockerignoreOf(emitted []string) string {
+	for _, name := range emitted {
+		if name == "dockerignore" {
+			return name
+		}
+	}
+	return ""
 }
 
 // SBOM serves both evidence scopes. Source inventory stays with the generic

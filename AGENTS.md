@@ -112,6 +112,7 @@ anything from it.
 | `main.go` | settings, agent advertisement, composition of the generic Python layer |
 | `runtime.go` | Init/Start/Stop/Destroy, uvicorn supervision, hot reload, the lock order |
 | `builder.go` | `Create` scaffolding, OpenAPI endpoint loading, Docker + kustomize recipes |
+| `uvsources.go` | the assembled build context: `[tool.uv.sources]` paths leaving the project |
 | `probes.go`, `probe.py` | endpoint health translated to Kubernetes probes / a local probe |
 | `templates/` | **what ships** — embedded via `go:embed`, rendered on `Create` |
 | `base/` | a checked-in sample service, embedded nowhere |
@@ -135,6 +136,15 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
 - **Readiness is the endpoint's declared health check, never an open port.**
   Probe intents (readiness / startup / liveness) stay separate through
   `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.
+- **The build recipe owns its uv, and its build context.** The emitted
+  Dockerfile copies a pinned uv (`uvVersion` in `main.go`) rather than running
+  whichever one the base image was built with — a project written against a
+  newer `[tool.uv]` key otherwise resolves locally and fails in the builder
+  stage. And a `[tool.uv.sources]` path leaving the project makes the recipe
+  assemble its own context, mirroring the repository-relative layout so the
+  same relative path resolves there; that plan claims the whole tree
+  (`RECIPE_INVENTORY_SCOPE_TREE`), the Dockerfile-only one claims just what it
+  emitted. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
   `:latest`. The default `codeflydev/python` companion is built by core and
   repinned on release — prefer it.

@@ -1,12 +1,29 @@
 # The builder image — installs the venv via uv, then we copy it into the runtime.
 FROM {{.Builder}} as builder
 
-WORKDIR /app
+# uv is part of what the recipe has to state. A base image carries whichever uv
+# it happened to be built with, so a project written against a newer `[tool.uv]`
+# key resolves on the developer's machine and fails inside the builder stage
+# with a TOML parse error naming a field that uv there does not know. Copying a
+# pinned uv in makes the tool that reads pyproject.toml and uv.lock a declared
+# input of the recipe instead of a property of the base image.
+COPY --from={{.UVImage}} /uv /usr/local/bin/uv
 
-COPY code/pyproject.toml code/uv.lock ./
+WORKDIR {{.ProjectWorkdir}}
 
-# Install deps to a project-local .venv. --frozen requires uv.lock to match
-# pyproject.toml; this catches drift at build time rather than at runtime.
+COPY {{.ServicePrefix}}code/pyproject.toml {{.ServicePrefix}}code/uv.lock ./
+{{- if .Carried}}
+
+# A `[tool.uv.sources]` path leaving the project, placed at the same
+# repository-relative path the developer resolves it from, so the directive and
+# the lockfile entry that record it resolve here to what they resolve to there.
+{{- range .Carried}}
+COPY {{.Context}} {{.Image}}
+{{- end}}
+{{- end}}
+
+# Install deps to a project-local .venv. --frozen installs the locked resolution
+# as it stands instead of re-resolving it at build time.
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy
 RUN uv sync --frozen --no-dev --no-install-project
@@ -27,10 +44,10 @@ ENV VIRTUAL_ENV=/app/.venv \
 
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-COPY --chown=appuser service.codefly.yaml .
+COPY --chown=appuser {{.ServicePrefix}}service.codefly.yaml .
 
 {{ range .Components}}
-COPY --chown=appuser {{.}} {{.}}
+COPY --chown=appuser {{$.ServicePrefix}}{{.}} {{.}}
 {{end}}
 
 {{ range .Envs}}
