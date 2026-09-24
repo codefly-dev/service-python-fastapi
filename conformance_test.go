@@ -389,3 +389,34 @@ func TestSkillsDeclareTheRequiredFrontmatter(t *testing.T) {
 		}
 	}
 }
+
+// TestNixBackendIsAssertedInCI closes the one way ci.yml's `nix` job can pass
+// while asserting nothing: `go test -run` that matches no test prints a warning
+// and exits 0. A renamed or deleted test would turn the job green by absence —
+// the exact shape the job exists to close — and nothing else would say so.
+func TestNixBackendIsAssertedInCI(t *testing.T) {
+	const backendTest = "TestNixBackendToolchain"
+
+	workflow, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	if !strings.Contains(string(workflow), backendTest) {
+		t.Fatalf("ci.yml runs no %s; the nix backend is covered nowhere", backendTest)
+	}
+	if !strings.Contains(string(workflow), "requirenix") {
+		t.Error("ci.yml does not build the requirenix tag, so the nix assertion never compiles in")
+	}
+
+	source, err := os.ReadFile("nix_backend_test.go")
+	if err != nil {
+		t.Fatalf("read nix_backend_test.go: %v", err)
+	}
+	if !strings.Contains(string(source), "func "+backendTest+"(") {
+		t.Errorf("ci.yml runs %s but no such test is declared; -run would match nothing", backendTest)
+	}
+	if !strings.Contains(string(source), `testmatrix.Only("nix")`) {
+		t.Error("the nix backend test does not pass Only(\"nix\"), " +
+			"so a runner that lost nix skips instead of failing")
+	}
+}

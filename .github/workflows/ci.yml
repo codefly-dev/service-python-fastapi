@@ -48,3 +48,26 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Test (race detector)
         run: go test -race ./...
+
+  # `Nix: true` is advertised in GetAgentInformation and nixflake.go embeds the
+  # devShell that backs it, but testmatrix skips a backend the host lacks — so
+  # on a runner without nix the entire path is green by absence. This job puts
+  # nix on the runner and builds the `requirenix` tag, whose test asserts the
+  # backend with Only("nix"): a runner that lost nix fails here rather than
+  # skipping. Installed with the command core itself recommends (NixInstallCommand).
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          # Same reason as the race job above.
+          cache: false
+      - name: Setup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+            | sh -s -- install --no-confirm
+          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+      - name: Test (nix backend)
+        run: go test -tags requirenix -run '^TestNixBackendToolchain$' -v ./...
