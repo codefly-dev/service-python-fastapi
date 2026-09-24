@@ -38,6 +38,9 @@ func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
 	runtime := NewRuntime(NewService())
 	runtime.Location = t.TempDir()
 	runtime.Logger = runtime.Wool
+	// Init resolves a real endpoint address, but the processes these tests
+	// start are stand-ins that serve nothing: count them as answering.
+	runtime.answers = func(context.Context, string) error { return nil }
 	// Load is what normally supplies these; these tests call Init directly.
 	runtime.Identity = resources.ServiceIdentityFromProto(&basev0.ServiceIdentity{
 		Name:          "probe",

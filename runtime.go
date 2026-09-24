@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"path"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
 	"github.com/codefly-dev/core/agents/services"
@@ -131,6 +133,18 @@ type Runtime struct {
 	appliedOverrides map[string]int
 
 	port uint16
+
+	// serveAddress is the address Init resolved for the HTTP endpoint, as the
+	// host reaches it. Start answers STARTED only once an HTTP request to it gets
+	// a response. Empty (no Init) skips the wait.
+	serveAddress string
+
+	// serveTimeout bounds that wait; zero means defaultServeTimeout.
+	serveTimeout time.Duration
+
+	// answers performs one attempt to reach the endpoint; nil means an HTTP
+	// GET (httpAnswers). Tests whose process is a stand-in replace it.
+	answers func(ctx context.Context, target string) error
 
 	// grpcPort is the mapped port for the service-owned gRPC listener, passed
 	// to the Python process as CODEFLY_GRPC_PORT. Zero when gRPC is disabled.
@@ -438,6 +452,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Infof("will run on %s", net.Address)
 	s.port = uint16(net.Port)
+	s.serveAddress = net.Address
 
 	if s.FastAPI.GRPCEndpoint != nil {
 		grpcNet, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
@@ -623,6 +638,24 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(err)
 	}
 
+	// STARTED is what the orchestrator starts dependents on, so it must mean
+	// the endpoint answers, not that uv was launched: uvicorn binds only after
+	// the app has imported and its lifespan startup has run, which for a real
+	// service is seconds after the process exists.
+	if err := s.awaitServing(ctx, handle); err != nil {
+		s.runner = nil
+		cancel()
+		if stopErr := handle.proc.Stop(context.WithoutCancel(ctx)); stopErr != nil {
+			s.Wool.Warn("cannot stop the fastapi app that never served", wool.ErrField(stopErr))
+		}
+		s.Base.StopWatcher()
+		message := err.Error()
+		if tail := handle.tail.Tail(); tail != "" {
+			message = fmt.Sprintf("%s\n%s", message, tail)
+		}
+		return s.Base.Runtime.StartError(s.Wool.NewError("%s", message))
+	}
+
 	// STARTED is recorded before the supervisor is armed: revoking a status
 	// that was never committed would leave the orchestrator reading STARTED for
 	// a process that is already gone.
@@ -631,6 +664,82 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.Wool.Debug("start done")
 	return resp, err
+}
+
+// defaultServeTimeout bounds how long Start waits for the HTTP endpoint to
+// answer. It covers `uv run` resolving the environment, the app import and its
+// lifespan startup; a service that has not answered by then is not coming up.
+const defaultServeTimeout = 3 * time.Minute
+
+// servePollInterval is the pause between two attempts to reach the endpoint.
+const servePollInterval = 250 * time.Millisecond
+
+// awaitServing returns once an HTTP request to the service's endpoint gets a
+// response — any status: readiness here means the endpoint accepts and serves
+// connections, and what the app answers on "/" is its own business. A bare TCP
+// accept is not enough: in a container runtime the published port is accepted
+// by the engine's proxy before anything listens behind it. It fails when the
+// process exits first, when ctx ends, or after the serve timeout.
+func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error {
+	if s.serveAddress == "" {
+		return nil
+	}
+	target := s.serveAddress
+	if !strings.Contains(target, "://") {
+		target = "http://" + target
+	}
+	target = strings.TrimRight(target, "/") + "/"
+	timeout := s.serveTimeout
+	if timeout <= 0 {
+		timeout = defaultServeTimeout
+	}
+	answers := s.answers
+	if answers == nil {
+		answers = httpAnswers
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	started := time.Now()
+	var last error
+	for {
+		err := answers(ctx, target)
+		if err == nil {
+			s.Infof("fastapi app serving on %s after %s", s.serveAddress, time.Since(started).Round(100*time.Millisecond))
+			return nil
+		}
+		last = err
+		if !s.runnerAlive(ctx, handle) {
+			return fmt.Errorf("fastapi app exited before its HTTP endpoint at %s answered", s.serveAddress)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("start abandoned before the HTTP endpoint at %s answered: %w", s.serveAddress, ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("the HTTP endpoint at %s did not answer within %s: %v", s.serveAddress, timeout, last)
+		case <-time.After(servePollInterval):
+		}
+	}
+}
+
+// serveClient is what httpAnswers probes with: one bounded attempt, and a
+// redirect counts as an answer since the endpoint is serving.
+var serveClient = &http.Client{
+	Timeout:       time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+// httpAnswers reports whether one GET to target got an HTTP response.
+func httpAnswers(ctx context.Context, target string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	response, err := serveClient.Do(request)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	return response.Body.Close()
 }
 
 // uvicornArgs renders the `uv run` invocation. --reload is conditional: it
@@ -698,7 +807,8 @@ func (s *Runtime) stopRunner(ctx context.Context) error {
 //
 // This is process supervision, not application readiness: with --reload the
 // uvicorn supervisor survives an application that fails to import, so a live
-// process is a weaker claim than a serving one. Readiness stays with the
+// process is a weaker claim than a serving one. Start established once that the
+// endpoint answered (awaitServing); readiness after that stays with the
 // orchestrator's probes against the endpoints the service declares.
 func (s *Runtime) superviseRunner(ctx context.Context, handle *runnerHandle) {
 	err := handle.proc.Wait(ctx)
