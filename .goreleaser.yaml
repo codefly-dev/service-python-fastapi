@@ -7,6 +7,12 @@ sboms:
       - "${artifact}.sbom.json"
     disable: false
 
+# A prerelease tag (a `codefly publish dev` build, v<version>-dev.<sha>) is
+# published as a GitHub prerelease, never as Latest, so `version: latest` can
+# never resolve to a dev build. Release tags are unaffected.
+release:
+  prerelease: auto
+
 builds:
   # ARCHITECTURE: Core's authoritative source inspection uses real
   # tree-sitter grammars, which are CGO. Agent releases therefore require
