@@ -148,6 +148,36 @@ func TestUvicornDeathRevokesStartedAndSourceFixRecovers(t *testing.T) {
 	require.Equal(t, runtimev0.StartStatus_STARTED, runtimeStartState(t, runtime).GetState())
 }
 
+// TestStartReturnsOnceUvicornServes is the contract dependents are started on:
+// with the endpoint address Init resolves, STARTED means the app answers, not
+// that uv was launched. Asserted with no Eventually: the answer must already be
+// there when Start returns.
+func TestStartReturnsOnceUvicornServes(t *testing.T) {
+	ctx := context.Background()
+	source := uvProject(t, servingApp)
+	runtime := uvicornRuntime(t, source, false)
+	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
+
+	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.True(t, serves(runtime.port), "STARTED was returned before uvicorn answered")
+}
+
+// TestStartFailsWhenUvicornDiesBeforeServing: an import error is now a failed
+// Start carrying the traceback, rather than a STARTED revoked moments later.
+func TestStartFailsWhenUvicornDiesBeforeServing(t *testing.T) {
+	ctx := context.Background()
+	source := uvProject(t, brokenApp)
+	runtime := uvicornRuntime(t, source, false)
+	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
+
+	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Contains(t, resp.GetStatus().GetMessage(), "codefly-lifecycle-boom")
+}
+
 // TestRepeatedStartWithoutHotReloadOwnsOneProcess pins process ownership for
 // the setting that used to skip the reuse check: an unchanged request must keep
 // the process that is serving, and a changed one must reap it before binding
