@@ -183,6 +183,15 @@ type DockerTemplating struct {
 	ServicePrefix  string
 	ProjectWorkdir string
 	Carried        []CarriedSource
+
+	// UVWorkspace is set when the project is a member of a uv workspace rooted
+	// in the service: the recipe copies that workspace and syncs the project
+	// from MemberWorkdir, its directory in the builder stage.
+	UVWorkspace   *uvWorkspaceMembership
+	MemberWorkdir string
+	// IgnorePatterns are the dockerignore entries of a recipe that copies the
+	// service tree whole.
+	IgnorePatterns []string
 }
 
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
@@ -204,13 +213,28 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
-	// A `[tool.uv.sources]` path resolves against the project directory, and the
-	// default context is the service directory and nothing beside it: carry what
-	// leaves the project into an assembled context so the builder stage resolves
-	// what the host resolves. A service with no such path assembles nothing.
-	assembled, err := assembleUVContext(s.Location, s.SourceLocation, outputDir)
+	// A project that is a member of a uv workspace in the service is built from
+	// that workspace, copied whole (see enclosingUVWorkspace); its path sources
+	// must then stay inside the service the context carries.
+	membership, err := enclosingUVWorkspace(s.Location, s.SourceLocation)
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
+	}
+	var assembled *assembledContext
+	if membership != nil {
+		if err := pathSourcesStayInService(s.Location, s.SourceLocation, membership); err != nil {
+			return s.Base.Builder.BuildError(err)
+		}
+	} else {
+		// A `[tool.uv.sources]` path resolves against the project directory, and
+		// the default context is the service directory and nothing beside it:
+		// carry what leaves the project into an assembled context so the builder
+		// stage resolves what the host resolves. A service with no such path
+		// assembles nothing.
+		assembled, err = assembleUVContext(s.Location, s.SourceLocation, outputDir)
+		if err != nil {
+			return s.Base.Builder.BuildError(err)
+		}
 	}
 	components, err := imageComponents(s.SourceLocation)
 	if err != nil {
@@ -226,6 +250,11 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		docker.ServicePrefix = assembled.ServicePrefix
 		docker.ProjectWorkdir = assembled.ProjectWorkdir
 		docker.Carried = assembled.Carried
+	}
+	if membership != nil {
+		docker.UVWorkspace = membership
+		docker.MemberWorkdir = path.Join(defaultProjectWorkdir, membership.Root, membership.Member)
+		docker.IgnorePatterns = ephemeralIgnorePatterns()
 	}
 	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
 		return s.Base.Builder.BuildError(err)

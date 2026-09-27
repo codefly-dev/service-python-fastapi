@@ -10,6 +10,15 @@ FROM {{.Builder}} as builder
 COPY --from={{.UVImage}} /uv /usr/local/bin/uv
 
 WORKDIR {{.ProjectWorkdir}}
+{{- if .UVWorkspace}}
+
+# The project is a member of the uv workspace rooted at "{{.UVWorkspace.Root}}"
+# in the service. uv reads the lock and every member from that root, so the
+# workspace is copied whole and the project is synced from its own directory,
+# which is how `uv sync` resolves it on the host.
+COPY {{.UVWorkspace.Root}} {{.UVWorkspace.Root}}
+WORKDIR {{.MemberWorkdir}}
+{{- else}}
 
 COPY {{.ServicePrefix}}code/pyproject.toml {{.ServicePrefix}}code/uv.lock ./
 {{- if .Carried}}
@@ -21,12 +30,20 @@ COPY {{.ServicePrefix}}code/pyproject.toml {{.ServicePrefix}}code/uv.lock ./
 COPY {{.Context}} {{.Image}}
 {{- end}}
 {{- end}}
+{{- end}}
 
 # Install deps to a project-local .venv. --frozen installs the locked resolution
-# as it stands instead of re-resolving it at build time.
+# as it stands instead of re-resolving it at build time. --no-editable installs
+# workspace members and path sources as packages in the venv rather than links
+# to builder-stage sources, which the runtime stage does not carry.
+#
+# A project whose requires-python the base image's Python does not satisfy gets
+# the interpreter uv installs for it, as on the host. It is installed where the
+# runtime stage copies it from, so the venv's interpreter exists there too.
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
-    UV_LINK_MODE=copy
-RUN uv sync --frozen --no-dev --no-install-project
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
 
 
 # Runtime
@@ -42,6 +59,7 @@ USER appuser
 ENV VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
 
+COPY --from=builder /opt/uv/python /opt/uv/python
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 COPY --chown=appuser {{.ServicePrefix}}service.codefly.yaml .
