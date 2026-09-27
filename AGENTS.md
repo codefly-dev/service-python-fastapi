@@ -146,8 +146,9 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   (`RECIPE_INVENTORY_SCOPE_TREE`), the Dockerfile-only one claims just what it
   emitted. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
-  `:latest`. The default `codeflydev/python` companion is built by core and
-  repinned on release — prefer it.
+  `:latest`. The default `ghcr.io/codefly-dev/python` companion is built from
+  core and pinned by the digest of its multi-platform index — prefer it. Its tag
+  must equal the linked core's companion version (test-enforced).
 - **A user's `flake.nix` is never overwritten.** The embedded flake is written
   only when the source dir has none.
 - **Release needs cgo.** The binary links core's tree-sitter grammars, so

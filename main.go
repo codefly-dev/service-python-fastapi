@@ -79,20 +79,39 @@ type Settings struct {
 
 	// RuntimeImage overrides the default codefly-built runtime image.
 	// Format: "name:tag". Plain "name" and ":latest" are rejected —
-	// pinning is enforced. Leave empty to use codeflydev/python:<ver>
+	// pinning is enforced. Leave empty to use ghcr.io/codefly-dev/python:<ver>
 	// (recommended; companion is rebuilt + pinned on every codefly
 	// release). Field named RuntimeImage (not DockerImage) to avoid
 	// colliding with services.Base.DockerImage(req).
 	RuntimeImage string `yaml:"docker-image"`
 }
 
-// runtimeImage is the codefly-built Python runtime companion —
-// python:3.13.1-alpine3.21 + codefly CLI + uv 0.5.29. Built from
-// core/companions/python/. Users can override via the Python settings
-// (DockerImage field) but NOT recommended — the companion image is
-// the mode-consistent default and gets the same tool set as every
-// other codefly-built image.
-var runtimeImage = &resources.DockerImage{Name: "codeflydev/python", Tag: "0.0.1"}
+// runtimeImage is the codefly-built Python runtime companion, built from
+// core/companions/python/ and published by the CLI to ghcr.io/codefly-dev as
+// a linux/amd64 + linux/arm64 image index. Users can override it through the
+// Python settings (docker-image) but should not: the companion is the
+// mode-consistent default and carries the same tool set as every other
+// codefly-built image.
+//
+// It is pinned by the digest of the multi-platform INDEX, never of one
+// platform's manifest: the build recipe is rendered for every target platform
+// and each resolves its own entry from the index. The legacy
+// docker.io/codeflydev/python:0.0.1 this replaces was a single amd64 manifest,
+// so every linux/arm64 image build ran amd64 binaries under emulation and died
+// on its first RUN ("Invalid ELF image for this architecture").
+//
+// Tag is the companion version of the core this agent links
+// (core/companions/python/info.codefly.yaml); a test holds the two together,
+// so bumping core without re-pinning here fails the build. Re-pin the digest
+// from the registry when the tag moves:
+//
+//	docker buildx imagetools inspect ghcr.io/codefly-dev/python:<tag>
+var runtimeImage = &resources.DockerImage{
+	Repository: resources.ImageRegistry,
+	Name:       "python",
+	Tag:        "0.0.5",
+	Digest:     "sha256:67d6fe825765fc30f94131ee551e3800f5b6fa4e07094b47d036904387cb75a7",
+}
 
 // uvVersion is the uv the emitted build recipe resolves its lockfile with.
 //
