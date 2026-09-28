@@ -88,13 +88,20 @@ skip rather than fake, so a green run proves less than it looks — `uv`, `syft`
 guard, so it fails loudly. Never quiet that failure with a skip guard; a loud
 red is the correct outcome and the skip would buy a false green.
 
-**CI has no `nix`, so the nix backend is covered nowhere.**
-`testmatrix.ForEachEnvironment` skips any backend missing from the host, and
-this repo does not pass `Only(...)` to make absence fatal — so
-`TestPythonFastAPILifecycle_Matrix/nix` is the one skip in a green CI run.
-Changing `nixflake.go` or `nix/flake.nix` is unverified by CI: exercise it
-locally with `nix` installed, and say in the PR that you did. Closing that gap
-is issue #49.
+**The nix backend is asserted, not skipped — but only under a build tag.**
+`testmatrix.ForEachEnvironment` skips any backend missing from the host, so
+`TestPythonFastAPILifecycle_Matrix/nix` still skips in the default suite. The
+binding run is the `nix` job, which installs nix and builds the `requirenix`
+tag: `TestNixBackendToolchain` provisions the embedded flake through
+`ensureNixFlake` and passes `Only("nix")`, which turns a host without nix into
+a failure. Changing `nixflake.go` or `nix/flake.nix` means running
+
+```bash
+go test -tags requirenix -run TestNixBackendToolchain ./...
+```
+
+`conformance_test.go` keeps that job honest: `-run` matching nothing exits 0,
+so a renamed test would be green by absence.
 
 CI installs `uv` and pins `syft` v1.48.0 in `setup-run` so the other halves do
 run. The full skip matrix is in the `lifecycle-test-triage` skill.

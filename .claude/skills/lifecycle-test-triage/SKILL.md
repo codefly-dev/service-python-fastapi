@@ -26,10 +26,13 @@ go test -v ./... 2>&1 | grep -E '^\s*--- SKIP'
 | `nix` | the lifecycle matrix's nix backend |
 | a stopped daemon | the matrix's docker backend, and destroy-under-docker |
 
-CI installs `uv` and pins `syft` v1.48.0, but **has no `nix`** — so
-`TestPythonFastAPILifecycle_Matrix/nix` is the one skip in a green CI run and
-the nix path is covered nowhere. If a skip covers the surface you changed,
-install the tool and re-run — do not report the green.
+CI installs `uv` and pins `syft` v1.48.0 in the `ci` job, so those halves run.
+`TestPythonFastAPILifecycle_Matrix/nix` is still the one skip there — the nix
+backend is asserted by the separate `nix` job, which installs nix and runs
+`go test -tags requirenix -run TestNixBackendToolchain ./...`, where
+`Only("nix")` makes absence a failure. Reproduce that run locally rather than
+reading the default suite's skip as coverage. If a skip covers the surface you
+changed, install the tool and re-run — do not report the green.
 
 A missing Docker daemon is the exception: `TestCreateToRunDocker` has no
 tooling guard and fails rather than skips. That red is correct. Do not add a
