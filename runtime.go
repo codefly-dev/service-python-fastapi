@@ -255,6 +255,18 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 		if err != nil {
 			return nil, "", s.Wool.Wrapf(err, "cannot create docker runner")
 		}
+		// Every process this environment runs is given the project directory as
+		// its working directory, so the project has to be inside a mount. The
+		// workspace mount above carries it only for a service that lives in the
+		// workspace tree. A composed service does not: it is resolved into the
+		// module cache, or to wherever an overlay points, both outside the
+		// workspace — and the container then starts with a working directory
+		// that does not exist inside it ("chdir to cwd ... no such file or
+		// directory", reported as `uv sync` exiting 127). Mount the project at
+		// its own path when the workspace mount does not already cover it.
+		if !within(s.Identity.WorkspacePath, s.Service.SourceLocation) {
+			dockerEnv.WithMount(s.Service.SourceLocation, s.Service.SourceLocation)
+		}
 		dockerEnv.WithPause()
 		// Run as the invoking host user. uv sync writes uv.lock into the
 		// bind-mounted source and populates the venv; as root those files
