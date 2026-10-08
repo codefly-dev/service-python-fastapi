@@ -300,7 +300,13 @@ func renderProfile(t *testing.T, profile builderv0.KubernetesOutputProfile) stri
 		Identity:    identity,
 		Information: &services.Information{Service: resources.ToServiceWithCase(identity), Module: resources.ToModuleWithCase(identity)},
 	}
-	if services.IsRestrictedOutputProfile(profile) {
+	// core v0.15.0 replaced the IsRestrictedOutputProfile helper with a parsed
+	// OutputProfile whose Restricted() answers the same question. Parsed rather
+	// than compared against an enum value, so a profile this agent does not
+	// know is an error here instead of silently reading as unrestricted.
+	parsedProfile, profileErr := services.ParseOutputProfile(profile)
+	require.NoError(t, profileErr)
+	if parsedProfile.Restricted() {
 		base.SetDockerImage(&resources.DockerImage{Name: "example/service", Digest: "sha256:" + strings.Repeat("a", 64)})
 	} else {
 		base.SetDockerImage(resources.NewDockerImage("example/service:1.2.3"))

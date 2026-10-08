@@ -573,7 +573,15 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	}
 
 	if s.FastAPI.Settings.PublicEndpoint {
+		// Since core v0.14.0 an endpoint declares two independent axes, and a
+		// PUBLIC one must state both: visibility is reach, exposure is
+		// addressing. "Expose API as public" has always meant reachable from
+		// outside the workspace, which is exactly exposure public, so the old
+		// single-axis answer projects onto both rather than leaving the second
+		// unset. A manifest scaffolded without it is one core refuses to load,
+		// and the service then reports no endpoints at all.
 		endpoint.Visibility = resources.VisibilityPublic
+		endpoint.Exposure = resources.ExposurePublic
 	}
 
 	rest, loadErr := resources.LoadRestAPI(ctx, shared.Pointer(openapiFile))
@@ -620,7 +628,15 @@ func (s *Builder) grpcEndpoint(ctx context.Context) (*basev0.Endpoint, error) {
 	}
 	endpoint := s.Base.BaseEndpoint(standards.GRPC)
 	if s.FastAPI.Settings.PublicEndpoint {
+		// Since core v0.14.0 an endpoint declares two independent axes, and a
+		// PUBLIC one must state both: visibility is reach, exposure is
+		// addressing. "Expose API as public" has always meant reachable from
+		// outside the workspace, which is exactly exposure public, so the old
+		// single-axis answer projects onto both rather than leaving the second
+		// unset. A manifest scaffolded without it is one core refuses to load,
+		// and the service then reports no endpoints at all.
 		endpoint.Visibility = resources.VisibilityPublic
+		endpoint.Exposure = resources.ExposurePublic
 	}
 	api, err := resources.NewAPI(ctx, endpoint, resources.ToGrpcAPI(grpc))
 	if err != nil {
