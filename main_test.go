@@ -52,6 +52,12 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	service := resources.Service{Name: serviceName, Version: "0.0.0"}
 	err = service.SaveAtDir(ctx, path.Join(tmpDir, fmt.Sprintf("mod/%s", service.Name)))
 	service.WithModule("mod")
+	// core#721 judges every edge against the composition that carries both
+	// ends, so a fixture has to BE one. `layout: modules` rather than `flat`:
+	// postLoad replaces a flat workspace's module list with a single
+	// reference named after the workspace, which is not the module here.
+	require.NoError(t, os.WriteFile(path.Join(tmpDir, "workspace.codefly.yaml"),
+		[]byte("name: test\nlayout: modules\nmodules:\n    - name: mod\n      path: mod\n"), 0o644))
 
 	require.NoError(t, err)
 
