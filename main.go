@@ -10,6 +10,7 @@ import (
 	"embed"
 
 	"github.com/codefly-dev/core/agents"
+	"github.com/codefly-dev/core/agents/contract"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -167,7 +168,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	return services.Advertisement{
+	advertisement := services.Advertisement{
 		Backends: runnersbase.BackendSupport{
 			Local:  pythonrunner.HasUVRuntime,
 			Nix:    true,
@@ -181,7 +182,13 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		// service exposes both.
 		Protocols: []agentv0.Protocol_Type{agentv0.Protocol_HTTP, agentv0.Protocol_GRPC},
 		ReadMe:    readme,
-	}.Build(), nil
+	}.Build()
+	// The deployment path is core's DeployKustomize, which judges dependency
+	// edges with the request's composition provenance on this core; the host
+	// requires the live advertisement, not the linked core version.
+	advertisement.Contract = contract.Current()
+	advertisement.Contract.Capabilities = append(advertisement.Contract.Capabilities, contract.DeploymentCompositionProvenance)
+	return advertisement, nil
 }
 
 // NewService constructs a FastAPI Service. The embedded generic Service
