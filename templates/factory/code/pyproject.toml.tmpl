@@ -29,6 +29,14 @@ dev = [
 
 [tool.uv]
 package = false
+# A CONSTRAINT, not a dependency: it bounds a version only if something
+# else pulls the package in. multidict 7.1.0 (PyPI, 2026-10-09) shipped
+# without manylinux wheels, so `uv sync` in the Debian runtime had nothing
+# to install and no compiler to build it -- every fresh service failed at
+# Create. Lift it once a 7.1.x with manylinux wheels exists; the durable
+# fix is a uv.lock shipped with this template so a create never resolves
+# whatever PyPI published an hour ago.
+constraint-dependencies = ["multidict<7.1"]
 
 [tool.pytest.ini_options]
 # "." — not "src" — so the `from src.X` imports in the scaffolded tests
