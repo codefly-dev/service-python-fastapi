@@ -452,7 +452,9 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	if plan.Startup == nil || plan.Liveness == nil {
 		return nil, fmt.Errorf("the Kubernetes manifest profile requires explicit endpoint health.startup and health.liveness; readiness is not a restart policy")
 	}
-	probes, err := deploymentProbes(s.FastAPI.RestEndpoint)
+	// A restricted render is what a cell runs, and a cell's execution
+	// admission refuses an exec probe: probe natively there.
+	probes, err := deploymentProbesFor(s.FastAPI.RestEndpoint, req.GetDeployment().GetKubernetes().GetProfile())
 	if err != nil {
 		return nil, err
 	}
