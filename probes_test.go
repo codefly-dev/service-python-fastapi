@@ -30,7 +30,7 @@ func healthEndpoint(t *testing.T, secured bool, health *resources.Health) *basev
 
 func renderedProbe(t *testing.T, endpoint *basev0.Endpoint) map[string]any {
 	t.Helper()
-	probes, err := deploymentProbes(endpoint)
+	probes, err := deploymentProbes(endpoint, false)
 	require.NoError(t, err)
 	var result map[string]any
 	require.NoError(t, yaml.Unmarshal([]byte(probes), &result))
@@ -76,10 +76,10 @@ func TestDeploymentRefusesUnrepresentableTimingAndPredicates(t *testing.T) {
 		{Kind: "http", Path: "/readyz", Period: "1500ms"},
 		{Kind: "agent"},
 	} {
-		_, err := deploymentProbes(healthEndpoint(t, false, &resources.Health{Readiness: probe}))
+		_, err := deploymentProbes(healthEndpoint(t, false, &resources.Health{Readiness: probe}), false)
 		require.Error(t, err)
 	}
-	_, err := deploymentProbes(healthEndpoint(t, false, &resources.Health{Liveness: &resources.Probe{Kind: "transport", SuccessThreshold: 2}}))
+	_, err := deploymentProbes(healthEndpoint(t, false, &resources.Health{Liveness: &resources.Probe{Kind: "transport", SuccessThreshold: 2}}), false)
 	require.Error(t, err)
 }
 
@@ -161,7 +161,7 @@ func deploymentTestParameters(t *testing.T, parameters Parameters) Parameters {
 		Liveness:  &resources.Probe{Kind: "transport"},
 	}
 	var err error
-	parameters.Probes, err = deploymentProbes(healthEndpoint(t, false, health))
+	parameters.Probes, err = deploymentProbes(healthEndpoint(t, false, health), false)
 	require.NoError(t, err)
 	return parameters
 }
@@ -186,8 +186,66 @@ func TestBuilderLoadsAuthoredTLSAndHealthBeforeProjection(t *testing.T) {
 	endpoint := loaded.FastAPI.RestEndpoint
 	require.True(t, resources.EndpointSecured(endpoint))
 	require.Equal(t, "/readyz", endpoint.GetHealth().GetReadiness().GetHttp().GetPath())
-	probes, err := deploymentProbes(endpoint)
+	probes, err := deploymentProbes(endpoint, false)
 	require.NoError(t, err)
 	require.Contains(t, probes, "/readyz")
 	require.NotContains(t, probes, "/version")
+}
+
+// A restricted render is what a cell runs, and a cell's execution admission
+// refuses any container with an exec probe. There the intents become the
+// kubelet's own handlers, with the authored timing kept; a predicate those
+// handlers cannot express is refused at render, never weakened.
+func TestRestrictedRenderProbesNativelyAndRefusesWhatItCannotExpress(t *testing.T) {
+	native := func(t *testing.T, secured bool, health *resources.Health) map[string]any {
+		t.Helper()
+		probes, err := deploymentProbes(healthEndpoint(t, secured, health), true)
+		require.NoError(t, err)
+		var result map[string]any
+		require.NoError(t, yaml.Unmarshal([]byte(probes), &result))
+		return result
+	}
+	rendered := native(t, false, &resources.Health{
+		Startup:   &resources.Probe{Kind: "http", Path: "/healthz", Statuses: []string{"200"}, Period: "5s", Timeout: "3s", FailureThreshold: 12},
+		Readiness: &resources.Probe{Kind: "http", Path: "/readyz", Statuses: []string{"200"}, Period: "5s", Timeout: "3s", FailureThreshold: 3},
+		Liveness:  &resources.Probe{Kind: "transport", Period: "10s", Timeout: "3s", FailureThreshold: 3},
+	})
+	for intent, want := range map[string]map[string]any{
+		"startupProbe":   {"httpGet": map[string]any{"path": "/healthz", "port": 8080}},
+		"readinessProbe": {"httpGet": map[string]any{"path": "/readyz", "port": 8080}},
+		"livenessProbe":  {"tcpSocket": map[string]any{"port": 8080}},
+	} {
+		probe := rendered[intent].(map[string]any)
+		require.NotContainsf(t, probe, "exec", "%s execs", intent)
+		for handler, spec := range want {
+			require.Equalf(t, spec, probe[handler], "%s %s", intent, handler)
+		}
+		require.EqualValues(t, 3, probe["timeoutSeconds"], "%s keeps its authored timing", intent)
+	}
+
+	secured := native(t, true, &resources.Health{Readiness: &resources.Probe{Kind: "http", Path: "/readyz", Statuses: []string{"200"}}})
+	require.Equal(t, "HTTPS", secured["readinessProbe"].(map[string]any)["httpGet"].(map[string]any)["scheme"])
+
+	for name, probe := range map[string]*resources.Probe{
+		"a body predicate":             {Kind: "http", Path: "/readyz", Statuses: []string{"200"}, BodyContains: "ready"},
+		"a status the kubelet refuses": {Kind: "http", Path: "/readyz", Statuses: []string{"404"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := deploymentProbes(healthEndpoint(t, false, &resources.Health{Readiness: probe}), true)
+			require.ErrorContains(t, err, "a cell refuses an exec probe")
+		})
+	}
+}
+
+// The profile picks the probe: the restricted render a cell runs probes
+// natively; the ephemeral local apply keeps the container-local exec probe.
+func TestTheOutputProfileSelectsTheProbe(t *testing.T) {
+	endpoint := healthEndpoint(t, false, &resources.Health{Readiness: &resources.Probe{Kind: "http", Path: "/readyz", Statuses: []string{"200"}}})
+	restricted, err := deploymentProbesFor(endpoint, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
+	require.NoError(t, err)
+	require.NotContains(t, restricted, "exec:")
+	require.Contains(t, restricted, "httpGet:")
+	local, err := deploymentProbesFor(endpoint, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
+	require.NoError(t, err)
+	require.Contains(t, local, "exec:")
 }
