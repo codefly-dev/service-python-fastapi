@@ -63,7 +63,7 @@ within reach.
 
 Derived from `.github/workflows/ci.yml`, which delegates to core's shared
 `go-service-ci.yml` and adds a `race` job of its own. Go comes from `go.mod`
-(1.27.0). All of it runs locally:
+(1.27.2). All of it runs locally:
 
 ```bash
 go build ./...          # CI: build job
