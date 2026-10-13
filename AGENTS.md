@@ -28,6 +28,11 @@ a user's Python process: nearly every defect is observed as "the service does
 not come up", and the local substitute for whatever did not resolve is always
 within reach.
 
+- **Prove reuse before you build**, and **build the simplest thing that works;
+  size is the signal**: fill a gap on what the platform already has, keep a
+  coding task to about **500 hand-written lines**, and past **2,000** **stop and
+  ask the user**. Both in full, with their tells, in [the
+  handbook](https://github.com/obin-ai/handbook/blob/main/AGENTS.md).
 - **A gap in the tooling is a bug in the tooling — never a reason to reach
   around it.** When something needs a step `codefly`, `uv` or a companion image
   does not perform, the answer is a capability fixed in whichever tool owns it,
