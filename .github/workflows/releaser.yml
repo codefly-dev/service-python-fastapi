@@ -36,6 +36,13 @@ jobs:
       # on a bare runner, which has no macOS or cross-linux compilers. The
       # binary links Core's tree-sitter grammars (CGO), so releasing it needs
       # the toolchain this maintained image supplies — see .goreleaser.yaml.
+      #
+      # STOPGAP — the image tag must carry go.mod's Go, and it does not:
+      # go.mod says go 1.27.2 and goreleaser-cross publishes no 1.27.2 image
+      # (newest is v1.27.1-3, checked 2026-10-13). The image sets no
+      # GOTOOLCHAIN, so its go1.27.1 switches to go1.27.2 by downloading the
+      # toolchain module from the Go proxy at release time. Re-pin to the
+      # first goreleaser-cross tag whose Go equals go.mod's `go` line.
       - name: Install Syft for archive SBOMs
         id: syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
