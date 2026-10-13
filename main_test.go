@@ -122,7 +122,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	// Test
 	test, err := runtime.Test(ctx, &runtimev0.TestRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.TestStatus_SUCCESS, test.Status.State)
+	require.Equal(t, runtimev0.TestRunResult_PASSED, test.GetResult().GetState(), test.GetResult().GetMessage())
 
 }
 
