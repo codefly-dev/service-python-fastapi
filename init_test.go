@@ -114,9 +114,8 @@ func TestInitWorksAgainstTheEnvironmentItCaptured(t *testing.T) {
 	}
 	require.Equal(t, [][]string{
 		{"uv", "sync"},
-		append([]string{"uv"}, interpreterProbe...),
 		{"uv", "run", "python", "src/openapi.py"},
-	}, commands, "all three must run on the captured environment")
+	}, commands, "both must run on the captured environment")
 
 	entries, err := os.ReadDir(cache)
 	require.NoError(t, err)

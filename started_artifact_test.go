@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -135,8 +136,10 @@ func TestNativeStartNamesTheInterpreterAndSourcesThatActuallyRan(t *testing.T) {
 	// The lock is what pins everything the interpreter imports beyond the
 	// service's own tree, so an artifact without it describes a build that
 	// could be any set of dependencies.
-	require.Contains(t, artifact.GetSources(), filepath.Join(source, "uv.lock"))
-	require.Contains(t, artifact.GetSources(), filepath.Join(source, "pyproject.toml"))
+	requireNamesTheSameFile(t, artifact.GetSources(), filepath.Join(source, "uv.lock"),
+		"the reported sources leave out the lock that pins everything the interpreter imports")
+	requireNamesTheSameFile(t, artifact.GetSources(), filepath.Join(source, "pyproject.toml"),
+		"the reported sources leave out the project definition")
 }
 
 // TestAnUnchangedRestartNamesItsBuildAgain covers the trap in this contract:
@@ -226,6 +229,8 @@ func TestAContainerStartNamesNoArtifact(t *testing.T) {
 	runtime.interpreter = "/venv/bin/python"
 	require.Nil(t, runtime.startedArtifact(),
 		"a container start must name nothing even when an interpreter is known: the path is inside the image")
+	require.Empty(t, runtime.launchedInterpreter(context.Background(), nil),
+		"a container start must not even ask")
 }
 
 // TestAnUnknownInterpreterNamesNoArtifact: Init could not ask uv, or never
@@ -238,18 +243,43 @@ func TestAnUnknownInterpreterNamesNoArtifact(t *testing.T) {
 	require.Nil(t, runtime.startedArtifact())
 }
 
-// TestAFailedInterpreterProbeLeavesInitSuccessful: the environment is ready
-// whether or not uv could be asked what runs in it, so a probe that fails
-// leaves the interpreter unknown rather than failing the Init.
-func TestAFailedInterpreterProbeLeavesInitSuccessful(t *testing.T) {
-	runtime := NewRuntime(NewService())
-	runtime.Logger = runtime.Wool
-	runtime.Service.SourceLocation = t.TempDir()
+// TestAFailedInterpreterProbeStillStarts: the service is up whether or not uv
+// could be asked what runs in it, so a probe that fails leaves the interpreter
+// unnamed and the start successful — and the start then reports no artifact
+// rather than a guess.
+func TestAFailedInterpreterProbeStillStarts(t *testing.T) {
+	runtime, env := startTestRuntime(t)
 	// A fake environment's process produces no output, so the probe finds no
 	// answer in it — the shape of a uv that cannot be asked.
-	runtime.resolveInterpreter(context.Background(), &fakeRunnerEnvironment{})
+	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Nil(t, resp.GetStatus().GetStartedArtifact())
 	require.Empty(t, runtime.interpreter)
-	require.Nil(t, runtime.startedArtifact())
+	require.NotEmpty(t, uvicornProcs(env), "the service must still have been launched")
+}
+
+// TestTheProbeRunsWithTheEnvironmentTheAppIsLaunchedWith is the fix for the
+// hole that probing in Init left: uv resolves the project environment through
+// $UV_PROJECT_ENVIRONMENT, which reaches the app from a `--set` and from
+// service configuration — neither of which Init has. A probe that could not
+// see them would name `<project>/.venv/bin/python` while the app ran somewhere
+// else, in an artifact the consumer ACCEPTS because it is absolute and a
+// regular file.
+func TestTheProbeRunsWithTheEnvironmentTheAppIsLaunchedWith(t *testing.T) {
+	runtime, env := startTestRuntime(t)
+	const key = "UV_PROJECT_ENVIRONMENT"
+
+	_, err := runtime.Start(context.Background(), &runtimev0.StartRequest{
+		Overrides: map[string]string{key: "/tmp/codefly-probe-venv"},
+	})
+	require.NoError(t, err)
+
+	probe := probeProc(t, env)
+	require.Equal(t, []string{"/tmp/codefly-probe-venv"}, processEnv(probe, key),
+		"the probe must resolve uv's environment with the overrides the app is launched with")
+	require.Equal(t, processEnv(uvicornProcs(env)[0], key), processEnv(probe, key),
+		"the probe and the app must resolve against the same project environment")
 }
 
 // ── the closure ───────────────────────────────────────────
@@ -271,6 +301,11 @@ func uvTree(t *testing.T, files map[string]string) string {
 // tree it describes.
 func relativeTo(t *testing.T, root string, sources []string) []string {
 	t.Helper()
+	// Resolved, because the closure names canonical paths and a macOS temp dir
+	// is reached as /var and resolves to /private/var — the same tree.
+	resolved, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	root = resolved
 	named := make([]string, 0, len(sources))
 	for _, source := range sources {
 		relative, err := filepath.Rel(root, source)
@@ -291,17 +326,24 @@ func TestTheClosureIsTheCodeTheLockAndTheManifest(t *testing.T) {
 	project := filepath.Join(service, "code")
 	require.NoError(t, os.MkdirAll(project, 0o755))
 	tree := uvTree(t, map[string]string{
-		"code/pyproject.toml":                   "[project]\nname = \"svc\"\n",
-		"code/uv.lock":                          "version = 1\n",
-		"code/src/main.py":                      "app = None\n",
-		"code/src/admin/router.py":              "\n",
-		"code/src/prompts/system.txt":           "you are a service\n",
-		"code/src/schema/response.json":         "{}\n",
-		"code/src/__pycache__/main.cpython.pyc": "cache\n",
-		"code/src/.ruff_cache/0/entry":          "cache\n",
-		"code/.venv/bin/python":                 "not the interpreter here\n",
-		"code/tests/test_admin.py":              "\n",
-		"code/openapi/api.swagger.json":         "{}\n",
+		"code/pyproject.toml":           "[project]\nname = \"svc\"\n",
+		"code/uv.lock":                  "version = 1\n",
+		"code/src/main.py":              "app = None\n",
+		"code/src/admin/router.py":      "\n",
+		"code/src/prompts/system.txt":   "you are a service\n",
+		"code/src/schema/response.json": "{}\n",
+		// Every excluded fixture on these lines sits INSIDE the walked tree,
+		// so the assertion depends on the exclusion rather than on the walk's
+		// scope: dropping an entry from ephemeralSourceDirectories fails here.
+		"code/src/__pycache__/main.cpython.pyc":  "cache\n",
+		"code/src/admin/__pycache__/router.pyc":  "cache at depth\n",
+		"code/src/.ruff_cache/0/entry":           "cache\n",
+		"code/src/.pytest_cache/v/cache/nodeids": "[]\n",
+		"code/src/.venv/bin/python":              "a venv inside the tree is still a venv\n",
+		// These are outside it, which is what the walk's scope leaves out.
+		"code/.venv/bin/python":         "not the interpreter here\n",
+		"code/tests/test_admin.py":      "\n",
+		"code/openapi/api.swagger.json": "{}\n",
 	})
 
 	sources, err := startedSources(tree, filepath.Join(tree, "code"))
@@ -336,6 +378,39 @@ func TestTheClosureNamesTheWorkspaceLockWhereUVResolvesIt(t *testing.T) {
 		"pyproject.toml",
 		"uv.lock",
 	}, relativeTo(t, tree, sources))
+}
+
+// TestTheClosureNamesAWorkspaceLockAboveTheService: uv climbs out of the
+// service to find the workspace that lists the project, and resolves THAT
+// root's lock. The image recipe refuses such a layout, because it would have to
+// copy files the service does not own — but the runtime runs where the tree
+// already is, and a service that starts and serves must not have its delivery
+// refused for a layout uv handles. Reusing the recipe's helper here reported
+// nothing at all, which the consumer surfaces as "the agent must implement
+// runtime-started-artifact/v1" for an agent that does.
+func TestTheClosureNamesAWorkspaceLockAboveTheService(t *testing.T) {
+	tree := uvTree(t, map[string]string{
+		// The repository root is the workspace root, and the service is below it.
+		".git/HEAD":               "ref: refs/heads/main\n",
+		"pyproject.toml":          "[tool.uv.workspace]\nmembers = [\"svc/code\"]\n",
+		"uv.lock":                 "version = 1\n",
+		"svc/code/pyproject.toml": "[project]\nname = \"svc\"\n",
+		"svc/code/src/main.py":    "app = None\n",
+	})
+
+	sources, err := startedSources(filepath.Join(tree, "svc"), filepath.Join(tree, "svc", "code"))
+	require.NoError(t, err, "a workspace root above the service is a layout uv resolves")
+	require.Equal(t, []string{
+		"pyproject.toml",
+		"svc/code/pyproject.toml",
+		"svc/code/src/main.py",
+		"uv.lock",
+	}, relativeTo(t, tree, sources))
+
+	// The image recipe keeps its own refusal: it is the consumer that cannot
+	// reach outside its build context.
+	_, err = enclosingUVWorkspace(filepath.Join(tree, "svc"), filepath.Join(tree, "svc", "code"))
+	require.ErrorContains(t, err, "the image build context cannot include it")
 }
 
 // TestTheClosureRefusesToDescribeABuildItCannotRead: a missing lock is not an
@@ -401,13 +476,66 @@ func TestTheInterpreterIsReadOutOfUVsOwnOutput(t *testing.T) {
 	require.ErrorContains(t, err, "named no interpreter")
 }
 
-// TestTheInterpreterProbeNeverSyncs: `uv run` syncs the environment by default,
-// and the probe runs while a process is serving out of that environment —
-// rewriting it underneath a live uvicorn. The flag is the whole reason the probe
-// is safe to run at every start, so it is asserted rather than assumed.
-func TestTheInterpreterProbeNeverSyncs(t *testing.T) {
-	require.Contains(t, interpreterProbe, "--no-sync")
+// TestTheInterpreterProbeLeavesTheEnvironmentAlone observes the property the
+// probe's flags are there for, rather than asserting the flags.
+//
+// The probe runs on the developer's project tree, and `uv.lock` is a file it is
+// about to name as part of the build, so `uv run` installing a dependency or
+// rewriting that lock would have the probe change what it reports. The flags
+// are checked too, because a flag silently dropped in a refactor is how the
+// property would be lost.
+func TestTheInterpreterProbeLeavesTheEnvironmentAlone(t *testing.T) {
 	require.Equal(t, "run", interpreterProbe[0])
+	require.Contains(t, interpreterProbe, "--no-sync")
+	require.Contains(t, interpreterProbe, "--frozen")
+
+	source := uvProject(t, servingApp)
+	runtime := uvicornRuntime(t, source, false)
+	before := treeState(t, source)
+
+	interpreter, err := runtime.probeInterpreter(context.Background(), runtime.runnerEnvironment, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, interpreter)
+
+	require.Equal(t, before, treeState(t, source),
+		"the probe rewrote the environment or the lock a serving process runs off")
+}
+
+// treeState is every file under root with its size and modification time,
+// except the bytecode caches.
+//
+// Those are excluded because ANY python invocation writes them — the probe
+// imports `sys` and CPython caches the venv's own `_virtualenv` module — so
+// they are not evidence that uv installed or re-locked anything, which is what
+// the assertion above is about. It is the same reason the closure leaves
+// `__pycache__` out: derived, and written by running code rather than by a
+// developer.
+func treeState(t *testing.T, root string) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == "__pycache__" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".pyc") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			// A file uv replaced under the walk is itself a change.
+			state[path] = "vanished"
+			return nil
+		}
+		state[path] = fmt.Sprintf("%d@%d", info.Size(), info.ModTime().UnixNano())
+		return nil
+	}))
+	return state
 }
 
 // TestAdvertisementAdoptsRuntimeStartedArtifact: the capability says this agent

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/wool"
 )
@@ -28,11 +29,13 @@ import (
 // THE PROGRAM is the interpreter `uv run` will execute the app with, and it is
 // asked of uv rather than derived. `uv run uvicorn src.main:app` resolves the
 // project environment through $UV_PROJECT_ENVIRONMENT, a `.python-version`, the
-// lock's requires-python and uv's own configuration; the emitted flake.nix sets
-// that variable itself, so `<project>/.venv/bin/python` is a convention this
-// agent must not encode. Asking uv through the same runner environment the app
-// is launched in answers for every backend — a native run, and a nix run where
-// uv and python both come from the devShell — with one mechanism.
+// lock's requires-python and uv's own configuration — and that variable reaches
+// the process from the developer's own environment, from a `uv.toml`, from a
+// flake of theirs, and from this run's `--set` and service configuration. So
+// `<project>/.venv/bin/python` is a convention this agent must not encode.
+// Asking uv, in the environment the app is launched with, answers for every
+// backend with one mechanism: a native run, and a nix run where uv and python
+// both come from the devShell.
 //
 // THE SOURCES are what uv hands that interpreter:
 //
@@ -86,43 +89,77 @@ import (
 // the line is found by this prefix rather than by being the only one.
 const interpreterMarker = "codefly-started-interpreter="
 
-// interpreterProbe asks the interpreter for its own absolute path. Run with
-// `--no-sync`: the probe observes the environment a serving process is already
-// running out of and must never rewrite it.
-var interpreterProbe = []string{"run", "--no-sync", "python", "-c",
+// interpreterProbe asks the interpreter for its own absolute path.
+//
+// `--no-sync` and `--frozen` state what the probe must not do, each covering a
+// different mutation `uv run` performs by default: no dependency is installed
+// into the environment, and the lock is not rewritten. The probe runs on the
+// developer's own project tree, moments before the app does, and `uv.lock` is a
+// file it is about to NAME as part of the build — a probe that re-locked would
+// be changing the thing it reports. Observing costs nothing; it must not also
+// decide.
+//
+// What they do NOT prevent is uv CREATING the project environment when there is
+// none — observed on uv 0.12.23, which prints "Creating virtual environment at:
+// .venv" and then answers. That is harmless here and the answer is still the
+// right one: the environment it creates is at the path `uv run uvicorn` would
+// create moments later, so the interpreter named is the interpreter that runs.
+// It is called out because the flags read like read-only and are not.
+var interpreterProbe = []string{"run", "--no-sync", "--frozen", "python", "-c",
 	"import sys; print('" + interpreterMarker + "' + sys.executable)"}
 
-// interpreterProbeTimeout bounds the probe. `uv run --no-sync` on a synced
-// project returns in well under a second; a bound exists so a wedged uv
-// degrades into "the agent could not name what it ran" rather than hanging the
-// Init that is otherwise ready to serve.
+// interpreterProbeTimeout bounds the probe. On a synced project it returns in
+// well under a second; a bound exists because the probe sits on the path to
+// launching the service, so a wedged uv must degrade into "the agent could not
+// name what it ran" rather than into a service that never starts.
 const interpreterProbeTimeout = 60 * time.Second
 
-// resolveInterpreter publishes the interpreter a start will run, for Init to
-// call once it has an environment to ask.
+// launchedInterpreter is the interpreter the process being launched will run,
+// or "" when the agent cannot name it.
 //
-// It belongs to Init rather than to Start for two reasons. Resolving the
-// environment is what Init does — it is the phase that runs `uv sync`, and the
-// interpreter is the same answer one step on. And Start's process count is an
-// invariant of its own: a start launches exactly one process, which is how it
-// can tell the process it owns from one it replaced, so it is not the place to
-// spawn a second one. A probe that fails leaves the interpreter unknown and the
-// Init successful — the environment is ready either way, and a start that
-// cannot name what it runs reports no artifact rather than refusing to run.
-func (s *Runtime) resolveInterpreter(ctx context.Context, env runners.RunnerEnvironment) {
-	if env == nil || s.Base.Runtime.IsContainerRuntime() {
-		return
+// It is asked at the launch, with that launch's own environment, because the
+// answer is a property of the launch and not of the agent's install. uv
+// resolves the project environment through $UV_PROJECT_ENVIRONMENT, and that
+// variable reaches the app from the StartRequest's overrides and from the
+// service's configuration — neither of which exists when Init builds the
+// runner environment. Probing in Init would answer for the agent's own
+// environment instead, and a `--set UV_PROJECT_ENVIRONMENT=...` would then
+// have this agent name an interpreter nothing ran, in an artifact the consumer
+// accepts: absolute, a regular file, and wrong.
+//
+// A probe that fails leaves the interpreter unnamed and the start successful —
+// the service is up either way, and a start that cannot say what it runs
+// reports no artifact rather than refusing to run.
+func (s *Runtime) launchedInterpreter(ctx context.Context, startEnvs []*resources.EnvironmentVariable) string {
+	if s.runnerEnvironment == nil || s.Base.Runtime.IsContainerRuntime() {
+		return ""
 	}
-	interpreter, err := s.probeInterpreter(ctx, env)
+	interpreter, err := s.probeInterpreter(ctx, s.runnerEnvironment, startEnvs)
 	if err != nil {
-		s.Wool.Warn("cannot name the interpreter a start would run, so it will report no started artifact", wool.ErrField(err))
+		// Error, not Warn: the only thing the user is otherwise shown is the
+		// consumer refusing because "the agent must implement
+		// runtime-started-artifact/v1" — which this agent does, so the real
+		// cause has to reach the same log the refusal is read in.
+		s.Wool.Error("cannot name the interpreter this start runs, so it reports no started artifact", wool.ErrField(err))
+		return ""
 	}
-	s.runnerMu.Lock()
-	defer s.runnerMu.Unlock()
-	s.interpreter = interpreter
+	return interpreter
 }
 
-// startedArtifact is what this start ran, or nil when the agent cannot name it.
+// startedArtifact is what the running process is, or nil when the agent cannot
+// name it.
+//
+// The interpreter comes from the launch that produced the live process; the
+// sources are read now. They are gathered differently on purpose: the
+// interpreter is fixed by the launch's environment, which a Start that keeps
+// the process does not change, while the source closure is a set of NAMES the
+// consumer digests from disk at delivery — so naming the files that exist is
+// what lets a build be digested at all, and a name kept from a launch whose
+// file has since been deleted would fail the delivery of a service that is
+// running. The window this leaves is real and is documented rather than
+// papered over: between an edit and the restart that picks it up, the digest
+// the consumer takes describes the tree rather than the process's loaded
+// image. Only a restart closes it, and `--reload` is what performs one.
 //
 // Nil is a deliberate answer, not a failure to report: the contract has an
 // agent that cannot name the file it ran report no artifact, so that a consumer
@@ -150,7 +187,7 @@ func (s *Runtime) startedArtifact() *runtimev0.StartedArtifact {
 
 // probeInterpreter is the absolute path of the interpreter `uv run` executes
 // the app with, as uv resolves it in the environment the app is launched in.
-func (s *Runtime) probeInterpreter(ctx context.Context, env runners.RunnerEnvironment) (string, error) {
+func (s *Runtime) probeInterpreter(ctx context.Context, env runners.RunnerEnvironment, startEnvs []*resources.EnvironmentVariable) (string, error) {
 	proc, err := env.NewProcess("uv", interpreterProbe...)
 	if err != nil {
 		return "", fmt.Errorf("cannot create the interpreter probe: %w", err)
@@ -158,6 +195,9 @@ func (s *Runtime) probeInterpreter(ctx context.Context, env runners.RunnerEnviro
 	var out bytes.Buffer
 	proc.WithOutput(&out)
 	proc.WithDir(s.Service.SourceLocation)
+	// The same environment the app is launched with, so the probe resolves the
+	// project environment the app will run out of rather than the agent's.
+	proc.WithEnvironmentVariables(ctx, startEnvs...)
 
 	ctx, cancel := context.WithTimeout(ctx, interpreterProbeTimeout)
 	defer cancel()
@@ -193,11 +233,11 @@ func interpreterFrom(output string) (string, error) {
 //
 // serviceDir is the service root, sourceDir its python project (`<service>/code`).
 func startedSources(serviceDir, sourceDir string) ([]string, error) {
-	serviceDir, err := filepath.Abs(serviceDir)
+	serviceDir, err := canonical(serviceDir)
 	if err != nil {
 		return nil, err
 	}
-	sourceDir, err = filepath.Abs(sourceDir)
+	sourceDir, err = canonical(sourceDir)
 	if err != nil {
 		return nil, err
 	}
@@ -209,13 +249,19 @@ func startedSources(serviceDir, sourceDir string) ([]string, error) {
 	// the project is a member of one. The root's own pyproject.toml comes with
 	// it — it carries the `[tool.uv.workspace]` membership and any shared
 	// `[tool.uv.sources]`, so a change there changes what is installed.
+	//
+	// uvWorkspaceRoot, not enclosingUVWorkspace: that one is the image recipe's
+	// view and refuses a root above the service, because the recipe would have
+	// to copy it. The runtime runs where the tree already is, so a root above
+	// the service is a layout uv resolves and this agent runs — describing it
+	// is what keeps a working service deliverable.
 	lockDir := sourceDir
-	membership, err := enclosingUVWorkspace(serviceDir, sourceDir)
+	root, err := uvWorkspaceRoot(serviceDir, sourceDir)
 	if err != nil {
 		return nil, err
 	}
-	if membership != nil {
-		lockDir = filepath.Join(serviceDir, filepath.FromSlash(membership.Root))
+	if root != "" {
+		lockDir = root
 		sources = append(sources, filepath.Join(lockDir, "pyproject.toml"))
 	}
 	sources = append(sources, filepath.Join(lockDir, "uv.lock"))
@@ -237,6 +283,29 @@ func startedSources(serviceDir, sourceDir string) ([]string, error) {
 		return nil, err
 	}
 	return append(sources, tree...), nil
+}
+
+// canonical is dir as one absolute, symlink-resolved spelling.
+//
+// One spelling, because the closure mixes paths built from this root with the
+// workspace root uv resolution returns, and a report naming the same tree as
+// both /var/... and /private/var/... is confusing to read even where the
+// consumer resolves it anyway. Directories only: the file's own link is never
+// followed, so an interpreter at `.venv/bin/python` keeps the name the
+// workspace holds it under rather than the one it points at — which is the
+// name the consumer digests it by (cli#989).
+func canonical(dir string) (string, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		// Not yet on disk, or unreadable: the absolute spelling is the only
+		// one there is, and the stats below report what is actually missing.
+		return absolute, nil
+	}
+	return resolved, nil
 }
 
 // codeTree is every regular file under root that the running process can load,

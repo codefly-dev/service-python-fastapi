@@ -63,11 +63,12 @@ type Runtime struct {
 	runner            *runnerHandle
 
 	// interpreter is the absolute path of the python `uv run` executes the app
-	// with, as uv resolved it in runnerEnvironment (see startedartifact.go).
-	// Init publishes it, Start reports it, and the teardown that drops the
-	// environment drops it too — it describes that environment, and a stale one
-	// would name a build nothing is running. Guarded by runnerMu, like the
-	// environment it belongs to.
+	// with, as uv resolved it for the launch that produced s.runner (see
+	// startedartifact.go). The launch that publishes the handle publishes it,
+	// a Start that keeps that handle re-reports it unchanged, and the teardown
+	// that drops the environment drops it too — a stale one would name a
+	// program nothing is running. Guarded by runnerMu, like the handle it
+	// describes.
 	interpreter string
 
 	// runnerMu serializes the runner lifecycle. Start, Stop and the supervisor
@@ -521,10 +522,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 	s.Wool.Debug("successful init of runner")
 
-	// What a start will report it ran. Asked here, where the environment is
-	// resolved, so a Start launches exactly one process (startedartifact.go).
-	s.resolveInterpreter(ctx, env)
-
 	openAPI := builders.NewDependencies("api",
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(cacheLocation)
 	openApiUpdate, err := openAPI.Updated(ctx)
@@ -642,6 +639,13 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		// `--set` naming the same key.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
 	}
+
+	// What this launch runs, asked of uv in the environment this process is
+	// being given — the overrides above included, since one of them can move
+	// the project environment uv resolves (startedartifact.go). It is a
+	// property of the launch, so it is resolved here rather than in Init and
+	// re-reported unchanged by a later Start that keeps this process.
+	s.interpreter = s.launchedInterpreter(ctx, startEnvs)
 
 	// The process must outlive this RPC, so it runs under a background context
 	// — cancellable, so Stop, Destroy and a replacement can tell the supervisor

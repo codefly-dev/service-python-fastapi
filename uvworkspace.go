@@ -46,17 +46,61 @@ type uvWorkspaceTable struct {
 // enclosingUVWorkspace returns the uv workspace the project at sourceDir is a
 // member of, or nil when the project is its own root: it has its own uv.lock, or
 // no workspace above it inside the repository lists it.
+//
+// It is the IMAGE RECIPE's view, so it additionally refuses a root outside the
+// service: the recipe copies the service tree, and a root above it would make
+// the image depend on files the service does not own. A caller that only needs
+// to know where uv resolves the lock — the runtime, which runs where the
+// developer's tree already is — uses uvWorkspaceRoot instead, and gets an
+// answer for the layout this one refuses.
 func enclosingUVWorkspace(serviceDir, sourceDir string) (*uvWorkspaceMembership, error) {
-	project, err := filepath.EvalSymlinks(sourceDir)
-	if err != nil {
+	root, err := uvWorkspaceRoot(serviceDir, sourceDir)
+	if err != nil || root == "" {
 		return nil, err
-	}
-	if _, err := os.Stat(filepath.Join(project, "uv.lock")); err == nil {
-		return nil, nil
 	}
 	service, err := filepath.EvalSymlinks(serviceDir)
 	if err != nil {
 		return nil, err
+	}
+	project, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	if !within(service, root) {
+		return nil, fmt.Errorf("the project %s is a member of the uv workspace rooted at %s, outside the service %s: the image build context cannot include it",
+			project, root, service)
+	}
+	member, err := filepath.Rel(root, project)
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(service, root)
+	if err != nil {
+		return nil, err
+	}
+	return &uvWorkspaceMembership{Root: filepath.ToSlash(relative), Member: filepath.ToSlash(member)}, nil
+}
+
+// uvWorkspaceRoot is the directory whose uv.lock uv resolves the project at
+// sourceDir against, or "" when the project is its own root — it has a lock of
+// its own, or no workspace above it inside the repository lists it.
+//
+// The walk stops at the repository, not at the service: uv climbs from the
+// project until it finds a `[tool.uv.workspace]` that lists it, and a root
+// above the service directory is a layout uv resolves and the agent runs. Only
+// a consumer that has to COPY the tree cares where the service boundary falls,
+// and that rule lives with it (see enclosingUVWorkspace).
+func uvWorkspaceRoot(serviceDir, sourceDir string) (string, error) {
+	project, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(filepath.Join(project, "uv.lock")); err == nil {
+		return "", nil
+	}
+	service, err := filepath.EvalSymlinks(serviceDir)
+	if err != nil {
+		return "", err
 	}
 	// A project outside any repository has no workspace to discover; its own
 	// directory is the only candidate, and it has no lock.
@@ -67,35 +111,27 @@ func enclosingUVWorkspace(serviceDir, sourceDir string) (*uvWorkspaceMembership,
 	for directory := filepath.Dir(project); within(boundary, directory); directory = filepath.Dir(directory) {
 		workspace, found, err := readUVWorkspace(directory)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		if found {
 			member, err := filepath.Rel(directory, project)
 			if err != nil {
-				return nil, err
+				return "", err
 			}
 			if !workspace.lists(filepath.ToSlash(member)) {
 				// uv treats a project a workspace does not list as standalone.
-				return nil, nil
-			}
-			if !within(service, directory) {
-				return nil, fmt.Errorf("the project %s is a member of the uv workspace rooted at %s, outside the service %s: the image build context cannot include it",
-					project, directory, service)
+				return "", nil
 			}
 			if _, err := os.Stat(filepath.Join(directory, "uv.lock")); err != nil {
-				return nil, fmt.Errorf("the uv workspace rooted at %s, which the project %s is a member of, has no uv.lock: run `uv lock` there", directory, project)
+				return "", fmt.Errorf("the uv workspace rooted at %s, which the project %s is a member of, has no uv.lock: run `uv lock` there", directory, project)
 			}
-			root, err := filepath.Rel(service, directory)
-			if err != nil {
-				return nil, err
-			}
-			return &uvWorkspaceMembership{Root: filepath.ToSlash(root), Member: filepath.ToSlash(member)}, nil
+			return directory, nil
 		}
 		if directory == boundary {
 			break
 		}
 	}
-	return nil, nil
+	return "", nil
 }
 
 // readUVWorkspace reads the `[tool.uv.workspace]` table of directory's

@@ -147,11 +147,9 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   any dependent service. The swagger file does not exist at `Create` time — the
   service generates it at runtime from its own `src/openapi.py` — so absent is
   a normal state there, not an error to code around.
-- **A native start says what it ran.** Before *every* `StartResponse`, `Start`
-  reports the interpreter `uv run` resolves — asked of uv, never derived from a
-  `.venv` path — with the manifest, the lock uv resolves and the `src/` tree. A
-  restart that keeps an unchanged process must name it again (core consumes the
-  report) and a failed start names nothing: `startedartifact.go` has the rest.
+- **A native start says what it ran**, before *every* `StartResponse` — core
+  consumes the report, so the restart that keeps a process names it again, and a
+  failed start names nothing. `startedartifact.go` owns the closure and why.
 - **Readiness is the endpoint's declared health check, never an open port.**
   Probe intents (readiness / startup / liveness) stay separate through
   `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.
