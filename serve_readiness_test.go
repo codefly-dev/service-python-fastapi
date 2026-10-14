@@ -58,8 +58,8 @@ func TestStartedMeansTheEndpointAnswers(t *testing.T) {
 		t.Fatal("STARTED was returned before anything listened on the endpoint")
 	}
 	require.GreaterOrEqual(t, time.Since(began), 600*time.Millisecond)
-	require.Len(t, env.started(), 1)
-	require.False(t, env.started()[0].isStopped())
+	require.Len(t, uvicornProcs(env), 1)
+	require.False(t, uvicornProcs(env)[0].isStopped())
 }
 
 // TestStartAcceptsAnyHTTPAnswer: a redirect or an error status is still an
@@ -87,10 +87,10 @@ func TestStartFailsWhenTheAppExitsBeforeServing(t *testing.T) {
 	runtime.serveAddress = "http://" + closedAddress(t)
 
 	go func() {
-		for len(env.started()) == 0 || !env.started()[0].isStarted() {
+		for len(uvicornProcs(env)) == 0 || !uvicornProcs(env)[0].isStarted() {
 			time.Sleep(10 * time.Millisecond)
 		}
-		proc := env.started()[0]
+		proc := uvicornProcs(env)[0]
 		_, _ = proc.output.Write([]byte("ModuleNotFoundError: No module named 'src.main'\n"))
 		proc.die(errors.New("exit status 1"))
 	}()
@@ -114,8 +114,8 @@ func TestStartFailsWhenTheEndpointNeverAnswers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "did not answer within")
-	require.Len(t, env.started(), 1)
-	require.True(t, env.started()[0].isStopped(), "the process that never served must be stopped")
+	require.Len(t, uvicornProcs(env), 1)
+	require.True(t, uvicornProcs(env)[0].isStopped(), "the process that never served must be stopped")
 	require.Nil(t, currentRunner(runtime))
 
 	// The next Start is a fresh attempt, not an answer from the failed one.
@@ -123,5 +123,5 @@ func TestStartFailsWhenTheEndpointNeverAnswers(t *testing.T) {
 	resp, err = runtime.Start(context.Background(), &runtimev0.StartRequest{})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.started(), 2)
+	require.Len(t, uvicornProcs(env), 2)
 }

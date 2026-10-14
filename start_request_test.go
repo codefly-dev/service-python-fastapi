@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -200,8 +201,8 @@ func TestStartHonorsStartRequest(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.procs, 1)
-	proc := env.procs[0]
+	require.Len(t, uvicornProcs(env), 1)
+	proc := uvicornProcs(env)[0]
 	require.True(t, proc.isStarted())
 
 	require.Equal(t, []string{"debug"}, processEnv(proc, "LOG_LEVEL"))
@@ -231,9 +232,9 @@ func TestStartOverrideBeatsConfiguration(t *testing.T) {
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "from-override"}})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
 
-	require.Equal(t, []string{"from-override"}, processEnv(env.procs[0], key))
+	require.Equal(t, []string{"from-override"}, processEnv(uvicornProcs(env)[0], key))
 }
 
 // TestStartHotReloadKeepsProcessOnIdenticalRequest proves the hot-reload
@@ -247,12 +248,14 @@ func TestStartHotReloadKeepsProcessOnIdenticalRequest(t *testing.T) {
 	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
+	launched := len(env.started())
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1, "an unchanged request must reuse the running process")
-	require.False(t, env.procs[0].isStopped())
+	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
+	require.False(t, uvicornProcs(env)[0].isStopped())
+	require.Len(t, env.started(), launched, keepPathSpawnsNothing)
 }
 
 // TestStartHotReloadReplacesProcessOnChangedRequest is the counterpart: a
@@ -265,14 +268,14 @@ func TestStartHotReloadReplacesProcessOnChangedRequest(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
 
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.procs, 2)
-	require.True(t, env.procs[0].isStopped(), "the process carrying the old environment must be torn down")
-	require.Equal(t, []string{"trace"}, processEnv(env.procs[1], "LOG_LEVEL"))
+	require.Len(t, uvicornProcs(env), 2)
+	require.True(t, uvicornProcs(env)[0].isStopped(), "the process carrying the old environment must be torn down")
+	require.Equal(t, []string{"trace"}, processEnv(uvicornProcs(env)[1], "LOG_LEVEL"))
 }
 
 // TestStartOverrideBeatsSecret pins the other half of the configuration:
@@ -296,12 +299,12 @@ func TestStartOverrideBeatsSecret(t *testing.T) {
 	key := resources.ServiceSecretConfigurationKeyFromUnique("mod/store", "postgres", "password")
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "stub"}})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
 
-	require.Equal(t, []string{"stub"}, processEnv(env.procs[0], key))
+	require.Equal(t, []string{"stub"}, processEnv(uvicornProcs(env)[0], key))
 	// Secrets travel inside All(); an untouched one must still reach the process.
 	untouched := resources.ServiceSecretConfigurationKeyFromUnique("mod/store", "postgres", "token")
-	require.Equal(t, []string{"untouched-secret"}, processEnv(env.procs[0], untouched))
+	require.Equal(t, []string{"untouched-secret"}, processEnv(uvicornProcs(env)[0], untouched))
 }
 
 // TestStartWithoutOverridesLeavesEnvironmentUnchanged guards the blast radius of
@@ -313,11 +316,11 @@ func TestStartWithoutOverridesLeavesEnvironmentUnchanged(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
 
 	expected, err := runtime.EnvironmentVariables.All()
 	require.NoError(t, err)
-	require.Equal(t, resources.EnvironmentVariableAsStrings(expected), resources.EnvironmentVariableAsStrings(env.procs[0].envs))
+	require.Equal(t, resources.EnvironmentVariableAsStrings(expected), resources.EnvironmentVariableAsStrings(uvicornProcs(env)[0].envs))
 }
 
 // TestStartWithdrawnFixtureReverts proves the fixture is not a latch: dropping
@@ -329,12 +332,12 @@ func TestStartWithdrawnFixtureReverts(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "seed"})
 	require.NoError(t, err)
-	require.Equal(t, []string{"seed"}, processEnv(env.procs[0], resources.FixturePrefix))
+	require.Equal(t, []string{"seed"}, processEnv(uvicornProcs(env)[0], resources.FixturePrefix))
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 2)
-	require.Empty(t, processEnv(env.procs[1], resources.FixturePrefix), "a withdrawn fixture must not survive into the next process")
+	require.Len(t, uvicornProcs(env), 2)
+	require.Empty(t, processEnv(uvicornProcs(env)[1], resources.FixturePrefix), "a withdrawn fixture must not survive into the next process")
 }
 
 // TestStartWithdrawnOverrideRevertsToConfiguration is the same guarantee for
@@ -356,12 +359,12 @@ func TestStartWithdrawnOverrideRevertsToConfiguration(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "from-override"}})
 	require.NoError(t, err)
-	require.Equal(t, []string{"from-override"}, processEnv(env.procs[0], key))
+	require.Equal(t, []string{"from-override"}, processEnv(uvicornProcs(env)[0], key))
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 2)
-	require.Equal(t, []string{"from-configuration"}, processEnv(env.procs[1], key))
+	require.Len(t, uvicornProcs(env), 2)
+	require.Equal(t, []string{"from-configuration"}, processEnv(uvicornProcs(env)[1], key))
 }
 
 // TestStartWithdrawnOverrideDisappearsWithoutConfiguration covers the same
@@ -372,12 +375,12 @@ func TestStartWithdrawnOverrideDisappearsWithoutConfiguration(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Equal(t, []string{"debug"}, processEnv(env.procs[0], "LOG_LEVEL"))
+	require.Equal(t, []string{"debug"}, processEnv(uvicornProcs(env)[0], "LOG_LEVEL"))
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 2)
-	require.Empty(t, processEnv(env.procs[1], "LOG_LEVEL"))
+	require.Len(t, uvicornProcs(env), 2)
+	require.Empty(t, processEnv(uvicornProcs(env)[1], "LOG_LEVEL"))
 }
 
 // TestStartIgnoresSpecsOnlyChange pins that the restart decision reads only the
@@ -390,15 +393,15 @@ func TestStartIgnoresSpecsOnlyChange(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
+	require.Len(t, uvicornProcs(env), 1)
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{
 		Overrides: map[string]string{"LOG_LEVEL": "debug"},
 		Specs:     &basev0.Specs{Fields: map[string]*basev0.SpecValue{"unread": {}}},
 	})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1, "a Specs-only difference must not restart the process")
-	require.False(t, env.procs[0].isStopped())
+	require.Len(t, uvicornProcs(env), 1, "a Specs-only difference must not restart the process")
+	require.False(t, uvicornProcs(env)[0].isStopped())
 }
 
 // TestStartSerializesConcurrentStarts guards the runner lifecycle: Start and
@@ -411,7 +414,7 @@ func TestStartSerializesConcurrentStarts(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Len(t, env.started(), 1)
+	require.Len(t, uvicornProcs(env), 1)
 
 	var wg sync.WaitGroup
 	for range 4 {
@@ -424,11 +427,11 @@ func TestStartSerializesConcurrentStarts(t *testing.T) {
 	}
 	wg.Wait()
 
-	procs := env.started()
-	require.Len(t, procs, 2, "the changed request must produce exactly one replacement process")
-	require.True(t, procs[0].isStopped())
-	require.False(t, procs[1].isStopped())
-	require.Equal(t, []string{"trace"}, processEnv(procs[1], "LOG_LEVEL"))
+	serviceProcs := uvicornProcs(env)
+	require.Len(t, serviceProcs, 2, "the changed request must produce exactly one replacement process")
+	require.True(t, serviceProcs[0].isStopped())
+	require.False(t, serviceProcs[1].isStopped())
+	require.Equal(t, []string{"trace"}, processEnv(serviceProcs[1], "LOG_LEVEL"))
 }
 
 // TestUnresolvedDependencies pins the diagnostic for dependency addresses that
@@ -447,6 +450,44 @@ func TestUnresolvedDependencies(t *testing.T) {
 
 // currentRunner reads the live generation the way the runtime's own code does.
 // The supervisor goroutine replaces it under the same mutex.
+// keepPathSpawnsNothing is why the keep-the-process path counts EVERY process
+// and not just the service's.
+//
+// Counting all of them is what pins that the path spawns nothing at all — the
+// interpreter probe included. That matters because the artifact it reports is
+// the one the launch resolved, re-reported unchanged (startedartifact.go): a
+// keep path that probed again would answer the same thing today and would have
+// stopped describing the launch, which is the property, so it has to fail here.
+const keepPathSpawnsNothing = "a Start that keeps its process must spawn nothing — not even the interpreter probe, whose answer belongs to the launch"
+
+// uvicornProcs is the SERVICE processes a Start launched, in order.
+//
+// A launch also runs the interpreter probe on the same environment
+// (startedartifact.go), so "the process this Start owns" is no longer
+// "uvicornProcs(env)[0]". These tests are about the service process, so they say so
+// rather than counting every process the environment has seen.
+func uvicornProcs(env *fakeRunnerEnvironment) []*fakeProc {
+	var procs []*fakeProc
+	for _, proc := range env.started() {
+		if slices.Contains(proc.args, "uvicorn") {
+			procs = append(procs, proc)
+		}
+	}
+	return procs
+}
+
+// probeProc is the interpreter probe the last launch ran.
+func probeProc(t *testing.T, env *fakeRunnerEnvironment) *fakeProc {
+	t.Helper()
+	for i := len(env.started()) - 1; i >= 0; i-- {
+		if proc := env.started()[i]; slices.Contains(proc.args, "--no-sync") {
+			return proc
+		}
+	}
+	t.Fatal("the launch never ran the interpreter probe")
+	return nil
+}
+
 func currentRunner(runtime *Runtime) *runnerHandle {
 	runtime.runnerMu.Lock()
 	defer runtime.runnerMu.Unlock()
@@ -481,9 +522,9 @@ func TestStartWithoutHotReloadOmitsReloadFlag(t *testing.T) {
 
 	_, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
 	require.NoError(t, err)
-	require.Len(t, env.procs, 1)
-	require.Equal(t, "uv", env.procs[0].bin)
-	require.NotContains(t, env.procs[0].args, "--reload")
+	require.Len(t, uvicornProcs(env), 1)
+	require.Equal(t, "uv", uvicornProcs(env)[0].bin)
+	require.NotContains(t, uvicornProcs(env)[0].args, "--reload")
 }
 
 // TestStartWithoutHotReloadIsIdempotent covers the setting that used to skip
@@ -495,13 +536,15 @@ func TestStartWithoutHotReloadIsIdempotent(t *testing.T) {
 
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Len(t, env.started(), 1)
+	require.Len(t, uvicornProcs(env), 1)
+	launched := len(env.started())
 
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.started(), 1, "an unchanged request must reuse the running process")
-	require.False(t, env.procs[0].isStopped())
+	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
+	require.False(t, uvicornProcs(env)[0].isStopped())
+	require.Len(t, env.started(), launched, keepPathSpawnsNothing)
 }
 
 // TestStartWithoutHotReloadReplacesProcessOnChangedRequest is the counterpart:
@@ -517,11 +560,11 @@ func TestStartWithoutHotReloadReplacesProcessOnChangedRequest(t *testing.T) {
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
 
-	procs := env.started()
-	require.Len(t, procs, 2)
-	require.True(t, procs[0].isStopped(), "the process carrying the old environment must be torn down")
-	require.False(t, procs[1].isStopped())
-	require.Equal(t, []string{"trace"}, processEnv(procs[1], "LOG_LEVEL"))
+	serviceProcs := uvicornProcs(env)
+	require.Len(t, serviceProcs, 2)
+	require.True(t, serviceProcs[0].isStopped(), "the process carrying the old environment must be torn down")
+	require.False(t, serviceProcs[1].isStopped())
+	require.Equal(t, []string{"trace"}, processEnv(serviceProcs[1], "LOG_LEVEL"))
 }
 
 // TestStartRestartsDeadProcess covers the shortcut that used to answer STARTED
@@ -534,18 +577,18 @@ func TestStartRestartsDeadProcess(t *testing.T) {
 	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
-	require.Len(t, env.started(), 1)
+	require.Len(t, uvicornProcs(env), 1)
 
-	env.procs[0].die(errors.New("exit status 1"))
+	uvicornProcs(env)[0].die(errors.New("exit status 1"))
 
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
-	procs := env.started()
-	require.Len(t, procs, 2, "an unchanged request against a dead process must start a new one")
-	require.False(t, procs[1].isStopped())
-	require.Equal(t, []string{"debug"}, processEnv(procs[1], "LOG_LEVEL"))
+	serviceProcs := uvicornProcs(env)
+	require.Len(t, serviceProcs, 2, "an unchanged request against a dead process must start a new one")
+	require.False(t, serviceProcs[1].isStopped())
+	require.Equal(t, []string{"debug"}, processEnv(serviceProcs[1], "LOG_LEVEL"))
 }
 
 // TestRunnerExitRevokesStarted is the reason the supervisor exists: a process
@@ -561,7 +604,7 @@ func TestRunnerExitRevokesStarted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, startStatus(t, runtime).GetState())
 
-	proc := env.procs[0]
+	proc := uvicornProcs(env)[0]
 	_, err = proc.output.Write([]byte("ImportError: no module named 'missing'\n"))
 	require.NoError(t, err)
 	proc.die(errors.New("exit status 1"))
@@ -584,7 +627,7 @@ func TestCleanRunnerExitRevokesStarted(t *testing.T) {
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 
-	env.procs[0].die(nil)
+	uvicornProcs(env)[0].die(nil)
 
 	require.Eventually(t, func() bool {
 		return startStatus(t, runtime).GetState() == runtimev0.StartStatus_ERROR
@@ -623,7 +666,7 @@ func TestStaleRunnerExitLeavesReplacementStarted(t *testing.T) {
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
-	require.Len(t, env.started(), 2)
+	require.Len(t, uvicornProcs(env), 2)
 
 	runtime.reportRunnerExit(stale, errors.New("exit status 1"))
 
@@ -705,8 +748,8 @@ func TestStartRelaunchesWhenInitRepublishesThePort(t *testing.T) {
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
-	require.Len(t, env.started(), 1)
-	require.Contains(t, env.started()[0].args, "9000")
+	require.Len(t, uvicornProcs(env), 1)
+	require.Contains(t, uvicornProcs(env)[0].args, "9000")
 
 	// What a re-Init resolving a different network mapping publishes.
 	runtime.port = 9100
@@ -714,10 +757,10 @@ func TestStartRelaunchesWhenInitRepublishesThePort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
-	procs := env.started()
-	require.Len(t, procs, 2, "the process on the superseded port must be replaced")
-	require.True(t, procs[0].isStopped(), "the process on the old port must be stopped")
-	require.Contains(t, procs[1].args, "9100")
+	serviceProcs := uvicornProcs(env)
+	require.Len(t, serviceProcs, 2, "the process on the superseded port must be replaced")
+	require.True(t, serviceProcs[0].isStopped(), "the process on the old port must be stopped")
+	require.Contains(t, serviceProcs[1].args, "9100")
 }
 
 // TestStartDoesNotRefoldAnUnchangedRequest pins the other half: the port change
@@ -737,9 +780,9 @@ func TestStartDoesNotRefoldAnUnchangedRequest(t *testing.T) {
 	_, err = runtime.Start(ctx, req)
 	require.NoError(t, err)
 
-	procs := env.started()
-	require.Len(t, procs, 2)
-	require.Equal(t, []string{"debug"}, processEnv(procs[1], "LOG_LEVEL"),
+	serviceProcs := uvicornProcs(env)
+	require.Len(t, serviceProcs, 2)
+	require.Equal(t, []string{"debug"}, processEnv(serviceProcs[1], "LOG_LEVEL"),
 		"an unchanged request must be folded into the environment manager exactly once")
 	require.Equal(t, 1, runtime.appliedOverrides["LOG_LEVEL"])
 }
