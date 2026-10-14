@@ -249,11 +249,13 @@ func TestStartHotReloadKeepsProcessOnIdenticalRequest(t *testing.T) {
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
+	launched := len(env.started())
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
 	require.False(t, uvicornProcs(env)[0].isStopped())
+	require.Len(t, env.started(), launched, keepPathSpawnsNothing)
 }
 
 // TestStartHotReloadReplacesProcessOnChangedRequest is the counterpart: a
@@ -448,6 +450,16 @@ func TestUnresolvedDependencies(t *testing.T) {
 
 // currentRunner reads the live generation the way the runtime's own code does.
 // The supervisor goroutine replaces it under the same mutex.
+// keepPathSpawnsNothing is why the keep-the-process path counts EVERY process
+// and not just the service's.
+//
+// Counting all of them is what pins that the path spawns nothing at all — the
+// interpreter probe included. That matters because the artifact it reports is
+// the one the launch resolved, re-reported unchanged (startedartifact.go): a
+// keep path that probed again would answer the same thing today and would have
+// stopped describing the launch, which is the property, so it has to fail here.
+const keepPathSpawnsNothing = "a Start that keeps its process must spawn nothing — not even the interpreter probe, whose answer belongs to the launch"
+
 // uvicornProcs is the SERVICE processes a Start launched, in order.
 //
 // A launch also runs the interpreter probe on the same environment
@@ -525,12 +537,14 @@ func TestStartWithoutHotReloadIsIdempotent(t *testing.T) {
 	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
+	launched := len(env.started())
 
 	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
 	require.False(t, uvicornProcs(env)[0].isStopped())
+	require.Len(t, env.started(), launched, keepPathSpawnsNothing)
 }
 
 // TestStartWithoutHotReloadReplacesProcessOnChangedRequest is the counterpart:
@@ -735,7 +749,7 @@ func TestStartRelaunchesWhenInitRepublishesThePort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1)
-	require.Contains(t, env.started()[0].args, "9000")
+	require.Contains(t, uvicornProcs(env)[0].args, "9000")
 
 	// What a re-Init resolving a different network mapping publishes.
 	runtime.port = 9100

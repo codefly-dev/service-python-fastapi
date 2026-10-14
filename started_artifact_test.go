@@ -413,6 +413,43 @@ func TestTheClosureNamesAWorkspaceLockAboveTheService(t *testing.T) {
 	require.ErrorContains(t, err, "the image build context cannot include it")
 }
 
+// TestAnUnreachableWorkspaceRootIsRefusedBeforeItsLock pins the order of the
+// recipe's two refusals, which splitting the discovery out made swappable.
+//
+// A root the build context cannot reach is refused for THAT reason whether or
+// not it has a lock: told to run `uv lock` there instead, a user would do the
+// work and be refused anyway.
+func TestAnUnreachableWorkspaceRootIsRefusedBeforeItsLock(t *testing.T) {
+	tree := uvTree(t, map[string]string{
+		".git/HEAD":               "ref: refs/heads/main\n",
+		"pyproject.toml":          "[tool.uv.workspace]\nmembers = [\"svc/code\"]\n",
+		"svc/code/pyproject.toml": "[project]\nname = \"svc\"\n",
+		"svc/code/src/main.py":    "app = None\n",
+	})
+	service, project := filepath.Join(tree, "svc"), filepath.Join(tree, "svc", "code")
+
+	// No uv.lock anywhere, and the root is out of the service's reach.
+	_, err := enclosingUVWorkspace(service, project)
+	require.ErrorContains(t, err, "the image build context cannot include it")
+	require.NotContains(t, err.Error(), "run `uv lock` there")
+
+	// Reachable but unlocked is the other refusal, and still says so.
+	locked := uvTree(t, map[string]string{
+		".git/HEAD":               "ref: refs/heads/main\n",
+		"svc/pyproject.toml":      "[tool.uv.workspace]\nmembers = [\"code\"]\n",
+		"svc/code/pyproject.toml": "[project]\nname = \"svc\"\n",
+		"svc/code/src/main.py":    "app = None\n",
+	})
+	_, err = enclosingUVWorkspace(filepath.Join(locked, "svc"), filepath.Join(locked, "svc", "code"))
+	require.ErrorContains(t, err, "run `uv lock` there")
+
+	// And the runtime, which has no reachability rule, names the lock it
+	// expected rather than inheriting either refusal.
+	_, err = startedSources(service, project)
+	require.ErrorContains(t, err, "uv.lock")
+	require.NotContains(t, err.Error(), "the image build context cannot include it")
+}
+
 // TestTheClosureRefusesToDescribeABuildItCannotRead: a missing lock is not an
 // artifact with a gap in it. Naming the rest would have the consumer approve a
 // digest that says nothing about the dependencies the process imported, so the
@@ -491,6 +528,16 @@ func TestTheInterpreterProbeLeavesTheEnvironmentAlone(t *testing.T) {
 
 	source := uvProject(t, servingApp)
 	runtime := uvicornRuntime(t, source, false)
+
+	// The project is DIRTY on purpose: `uvProject` leaves the lock current, and
+	// against a current lock a flagless `uv run` changes nothing either — so a
+	// synced fixture would pass this test with both flags deleted. Bumping the
+	// version makes uv.lock stale, which is what a plain `uv run` rewrites.
+	manifest := filepath.Join(source, "pyproject.toml")
+	current, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest,
+		[]byte(strings.Replace(string(current), `version = "0.0.0"`, `version = "0.0.1"`, 1)), 0o644))
 	before := treeState(t, source)
 
 	interpreter, err := runtime.probeInterpreter(context.Background(), runtime.runnerEnvironment, nil)
@@ -498,7 +545,7 @@ func TestTheInterpreterProbeLeavesTheEnvironmentAlone(t *testing.T) {
 	require.NotEmpty(t, interpreter)
 
 	require.Equal(t, before, treeState(t, source),
-		"the probe rewrote the environment or the lock a serving process runs off")
+		"the probe installed into the environment or rewrote the lock it is about to name as part of the build")
 }
 
 // treeState is every file under root with its size and modification time,

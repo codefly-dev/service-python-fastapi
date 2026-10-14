@@ -159,7 +159,11 @@ func (s *Runtime) launchedInterpreter(ctx context.Context, startEnvs []*resource
 // running. The window this leaves is real and is documented rather than
 // papered over: between an edit and the restart that picks it up, the digest
 // the consumer takes describes the tree rather than the process's loaded
-// image. Only a restart closes it, and `--reload` is what performs one.
+// image. Only a restart closes it. For a `*.py` edit `--reload` performs one;
+// for anything else — the very prompt-and-schema class the closure argues
+// hardest for naming — neither uvicorn's reloader nor this agent's watcher
+// fires, so the window stays open until a restart happens for some other
+// reason.
 //
 // Nil is a deliberate answer, not a failure to report: the contract has an
 // agent that cannot name the file it ran report no artifact, so that a consumer
@@ -173,13 +177,17 @@ func (s *Runtime) startedArtifact() *runtimev0.StartedArtifact {
 		return nil
 	}
 	if s.interpreter == "" {
-		// Init could not name it, or never ran. Either way this agent does not
-		// know what it is running, which is reported as nothing.
+		// The launch could not name it, or nothing has been launched. Either
+		// way this agent does not know what it is running, which is reported
+		// as nothing.
 		return nil
 	}
 	sources, err := startedSources(s.Location, s.Service.SourceLocation)
 	if err != nil {
-		s.Wool.Warn("cannot name the sources this start ran, so it reports no started artifact", wool.ErrField(err))
+		// Error for the same reason as the interpreter above: the consumer's
+		// refusal names the wrong cause, and this is the path a uv workspace
+		// layout actually takes.
+		s.Wool.Error("cannot name the sources this start ran, so it reports no started artifact", wool.ErrField(err))
 		return nil
 	}
 	return &runtimev0.StartedArtifact{Executable: s.interpreter, Sources: sources}

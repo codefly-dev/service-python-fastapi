@@ -66,9 +66,15 @@ func enclosingUVWorkspace(serviceDir, sourceDir string) (*uvWorkspaceMembership,
 	if err != nil {
 		return nil, err
 	}
+	// Containment first, then the lock: a root the build context cannot reach
+	// is refused for that reason whether or not it has a lock, because
+	// `uv lock` there would not make the image buildable.
 	if !within(service, root) {
 		return nil, fmt.Errorf("the project %s is a member of the uv workspace rooted at %s, outside the service %s: the image build context cannot include it",
 			project, root, service)
+	}
+	if _, err := os.Stat(filepath.Join(root, "uv.lock")); err != nil {
+		return nil, fmt.Errorf("the uv workspace rooted at %s, which the project %s is a member of, has no uv.lock: run `uv lock` there", root, project)
 	}
 	member, err := filepath.Rel(root, project)
 	if err != nil {
@@ -81,15 +87,21 @@ func enclosingUVWorkspace(serviceDir, sourceDir string) (*uvWorkspaceMembership,
 	return &uvWorkspaceMembership{Root: filepath.ToSlash(relative), Member: filepath.ToSlash(member)}, nil
 }
 
-// uvWorkspaceRoot is the directory whose uv.lock uv resolves the project at
-// sourceDir against, or "" when the project is its own root — it has a lock of
-// its own, or no workspace above it inside the repository lists it.
+// uvWorkspaceRoot is the directory uv resolves the project at sourceDir
+// against, or "" when the project is its own root — it has a lock of its own,
+// or no workspace above it inside the repository lists it.
 //
 // The walk stops at the repository, not at the service: uv climbs from the
 // project until it finds a `[tool.uv.workspace]` that lists it, and a root
 // above the service directory is a layout uv resolves and the agent runs. Only
-// a consumer that has to COPY the tree cares where the service boundary falls,
-// and that rule lives with it (see enclosingUVWorkspace).
+// a consumer that has to COPY the tree cares where the service boundary falls.
+//
+// It DISCOVERS and does not judge: whether the root must be reachable, and
+// whether its lock has to be there, are each caller's rule, applied in the
+// order whose diagnostic is the useful one. The recipe refuses an out-of-reach
+// root before asking about its lock, because `uv lock` there would not make the
+// image buildable; the runtime names the lock it expects and reports what is
+// actually missing (see startedSources).
 func uvWorkspaceRoot(serviceDir, sourceDir string) (string, error) {
 	project, err := filepath.EvalSymlinks(sourceDir)
 	if err != nil {
@@ -121,9 +133,6 @@ func uvWorkspaceRoot(serviceDir, sourceDir string) (string, error) {
 			if !workspace.lists(filepath.ToSlash(member)) {
 				// uv treats a project a workspace does not list as standalone.
 				return "", nil
-			}
-			if _, err := os.Stat(filepath.Join(directory, "uv.lock")); err != nil {
-				return "", fmt.Errorf("the uv workspace rooted at %s, which the project %s is a member of, has no uv.lock: run `uv lock` there", directory, project)
 			}
 			return directory, nil
 		}
