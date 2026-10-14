@@ -14,6 +14,24 @@ Some of the things this agent provides for you:
 - Dockerfile and verifiable build plan generation (requires `output_directory`); the CLI owns image builds, builder selection, caching, and publishing
 - Kubernetes deployment
 
+## What a native run approves
+
+A native `codefly run` delivers your service to the host as the build it is
+running, and this agent reports that build rather than letting the run guess
+one. It names the interpreter `uv run` executes your app with — asked of uv, so
+a `UV_PROJECT_ENVIRONMENT` or a `.python-version` of yours is honoured — along
+with `pyproject.toml`, the `uv.lock` uv resolves against (your uv workspace
+root's, when your project is a member of one) and every file under `src/`, not
+only the `*.py` ones: a prompt or a schema your app loads is part of what runs.
+
+Your virtual environment is not part of it. `.venv/` is uv's materialization of
+the lock, and the lock and the interpreter already identify it; tool caches
+(`__pycache__`, `.ruff_cache`, …) are derived from code already named, and
+`tests/` is never imported by the serving process. Two things are therefore
+outside the build: a `[tool.uv.sources]` path dependency's own code, whose
+declaration is named but whose contents are not, and a container run, which
+approves its image digest instead.
+
 ## Declared container health
 
 Kubernetes probes follow the authored REST endpoint's health predicates and transport. HTTP checks preserve accepted statuses and bounded body containment; redirects are not followed. Secured container-local checks authenticate the listener against the exact certificate mounted at `UVICORN_SSL_CERTFILE` before sending HTTP data. The isolated Python probe imports no application code and emits no response content or certificate material.

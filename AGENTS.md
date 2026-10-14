@@ -126,6 +126,7 @@ anything from it.
 | `runtime.go` | Init/Start/Stop/Destroy, uvicorn supervision, hot reload, the lock order |
 | `builder.go` | `Create` scaffolding, OpenAPI endpoint loading, Docker + kustomize recipes |
 | `uvsources.go` | the assembled build context: `[tool.uv.sources]` paths leaving the project |
+| `startedartifact.go` | what a native start reports it ran (`runtime-started-artifact/v1`) |
 | `probes.go`, `probe.py` | endpoint health translated to Kubernetes probes / a local probe |
 | `templates/` | **what ships** — embedded via `go:embed`, rendered on `Create` |
 | `base/` | a checked-in sample service, embedded nowhere |
@@ -146,6 +147,11 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   any dependent service. The swagger file does not exist at `Create` time — the
   service generates it at runtime from its own `src/openapi.py` — so absent is
   a normal state there, not an error to code around.
+- **A native start says what it ran.** Before *every* `StartResponse`, `Start`
+  reports the interpreter `uv run` resolves — asked of uv, never derived from a
+  `.venv` path — with the manifest, the lock uv resolves and the `src/` tree. A
+  restart that keeps an unchanged process must name it again (core consumes the
+  report) and a failed start names nothing: `startedartifact.go` has the rest.
 - **Readiness is the endpoint's declared health check, never an open port.**
   Probe intents (readiness / startup / liveness) stay separate through
   `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.

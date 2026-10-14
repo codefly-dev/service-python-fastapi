@@ -62,6 +62,14 @@ type Runtime struct {
 	runnerEnvironment runners.RunnerEnvironment
 	runner            *runnerHandle
 
+	// interpreter is the absolute path of the python `uv run` executes the app
+	// with, as uv resolved it in runnerEnvironment (see startedartifact.go).
+	// Init publishes it, Start reports it, and the teardown that drops the
+	// environment drops it too — it describes that environment, and a stale one
+	// would name a build nothing is running. Guarded by runnerMu, like the
+	// environment it belongs to.
+	interpreter string
+
 	// runnerMu serializes the runner lifecycle. Start, Stop and the supervisor
 	// goroutines are concurrent and all replace s.runner; without it two
 	// overlapping Starts can each stop the same process and leave one of their
@@ -513,6 +521,10 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 	s.Wool.Debug("successful init of runner")
 
+	// What a start will report it ran. Asked here, where the environment is
+	// resolved, so a Start launches exactly one process (startedartifact.go).
+	s.resolveInterpreter(ctx, env)
+
 	openAPI := builders.NewDependencies("api",
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(cacheLocation)
 	openApiUpdate, err := openAPI.Updated(ctx)
@@ -575,7 +587,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 			// an Init between two identical Starts can republish the ports,
 			// and the process bound to the old one is not what this request
 			// describes however unchanged the request is.
-			return s.Base.Runtime.StartResponse()
+			//
+			// It still names what it runs: StartResponse consumes the report,
+			// so keeping a process without describing it again would stamp no
+			// artifact on this start and have a native run refuse a service
+			// that is up and unchanged.
+			return s.started()
 		default:
 			// Different inputs only reach the service through a new process:
 			// --reload re-executes the app inside the process it was launched
@@ -671,11 +688,25 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	// STARTED is recorded before the supervisor is armed: revoking a status
 	// that was never committed would leave the orchestrator reading STARTED for
 	// a process that is already gone.
-	resp, err := s.Base.Runtime.StartResponse()
+	resp, err := s.started()
 	go s.superviseRunner(runningContext, handle)
 
 	s.Wool.Debug("start done")
 	return resp, err
+}
+
+// started names what this start ran and answers STARTED.
+//
+// Every successful Start returns through here, because core consumes the
+// report at each StartResponse: an agent that names its build at the first
+// start and not at the restart reports nothing for the restart, which a
+// consumer refuses rather than carrying the previous process's answer over to
+// the one now running. The failure paths deliberately do not go through it —
+// StartError discards any report, so a build named for a process that never
+// served is never stamped on the attempt that does.
+func (s *Runtime) started() (*runtimev0.StartResponse, error) {
+	s.Base.Runtime.ReportStartedArtifact(s.startedArtifact())
+	return s.Base.Runtime.StartResponse()
 }
 
 // defaultServeTimeout bounds how long Start waits for the HTTP endpoint to
@@ -1089,6 +1120,7 @@ func (s *Runtime) endExecution(ctx context.Context) (bool, error) {
 			// a fresh one rather than hand Code and the REPL a dead handle.
 			released = true
 			s.runnerEnvironment = nil
+			s.interpreter = ""
 			s.FastAPI.Service.SetActiveEnvironment(nil)
 		}
 	}

@@ -84,6 +84,9 @@ func uvicornRuntime(t *testing.T, source string, hotReload bool) *Runtime {
 	require.NoError(t, err)
 	runtime.runnerEnvironment = env
 	runtime.port = freePort(t)
+	// Init asks uv which interpreter a start will run (startedartifact.go);
+	// these tests enter at Start, so the same question is asked here.
+	runtime.resolveInterpreter(ctx, env)
 
 	t.Cleanup(func() {
 		_, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{})
