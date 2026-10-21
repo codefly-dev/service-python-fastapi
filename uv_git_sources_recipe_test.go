@@ -21,7 +21,8 @@ const (
 
 // gitSourcesLock is a lock in the form uv writes it: two packages built from
 // subdirectories of one repository at one commit, the same repository at a
-// second commit, an ssh source with a port, and a registry package.
+// second commit, an ssh source with a port, an http and a file source, which
+// cannot be mirrored, and a registry package.
 var gitSourcesLock = fmt.Sprintf(`version = 1
 requires-python = ">=3.12"
 
@@ -46,6 +47,16 @@ version = "0.1.0"
 source = { git = "ssh://git@git.example.invalid:2222/acme/tools.git?rev=main#%[2]s" }
 
 [[package]]
+name = "libe"
+version = "0.1.0"
+source = { git = "http://token@git.example.invalid/acme/plain?rev=main#%[1]s" }
+
+[[package]]
+name = "libf"
+version = "0.1.0"
+source = { git = "file:///srv/local?rev=main#%[1]s" }
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -67,35 +78,31 @@ func requireDeclares(t *testing.T, want, got []*builderv0.GitSourceDownload) {
 
 // TestLockedGitSourcesDeclaresEachLockedCommitOnce reads the URL uv hands git
 // (the recorded one up to its query) and the locked commit, sorted, with a
-// repository at one commit declared once however many packages it builds.
+// repository at one commit declared once however many packages it builds. The
+// http and file sources are left out, named by package for the warning, and
+// left to the build to fetch as before.
 func TestLockedGitSourcesDeclaresEachLockedCommitOnce(t *testing.T) {
 	lock := filepath.Join(t.TempDir(), "uv.lock")
 	writeFile(t, lock, gitSourcesLock)
-	declared, err := lockedGitSources(lock)
+	declared, unmirrored, err := lockedGitSources(lock)
 	require.NoError(t, err)
 	requireDeclares(t, gitSourcesDeclared, declared)
+	require.Equal(t, []string{"libe", "libf"}, unmirrored)
 
 	mirrors := uvGitMirrors(declared)
 	require.Len(t, mirrors, 2, "one mirror per repository")
 	require.Equal(t, services.GitSourceMirrorPath("https://git.example.invalid/acme/mono"), mirrors[0].Path)
 }
 
-// TestLockedGitSourcesRefusesWhatTheBuildCannotBeSupplied names the package,
-// never the URL, which may carry a credential.
-func TestLockedGitSourcesRefusesWhatTheBuildCannotBeSupplied(t *testing.T) {
-	for name, source := range map[string]string{
-		"insecure": "http://token@git.example.invalid/acme/mono?rev=main#" + commitA,
-		"local":    "file:///srv/mono#" + commitA,
-		"unpinned": "https://token@git.example.invalid/acme/mono?rev=main",
-	} {
-		t.Run(name, func(t *testing.T) {
-			lock := filepath.Join(t.TempDir(), "uv.lock")
-			writeFile(t, lock, fmt.Sprintf("version = 1\n\n[[package]]\nname = \"liba\"\nversion = \"0.1.0\"\nsource = { git = %q }\n", source))
-			_, err := lockedGitSources(lock)
-			require.ErrorContains(t, err, `package "liba"`)
-			require.NotContains(t, err.Error(), "token")
-		})
-	}
+// TestLockedGitSourcesRefusesAnUnpinnedSource: uv always records the commit,
+// so a git source without one is a malformed lock. The error names the
+// package, never the URL, which may carry a credential.
+func TestLockedGitSourcesRefusesAnUnpinnedSource(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "uv.lock")
+	writeFile(t, lock, "version = 1\n\n[[package]]\nname = \"liba\"\nversion = \"0.1.0\"\nsource = { git = \"https://token@git.example.invalid/acme/mono?rev=main\" }\n")
+	_, _, err := lockedGitSources(lock)
+	require.ErrorContains(t, err, `package "liba"`)
+	require.NotContains(t, err.Error(), "token")
 }
 
 // TestBuildDeclaresTheLockedGitSources holds the recipe: exactly the lock's git

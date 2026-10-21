@@ -251,9 +251,13 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
-	gitSources, err := lockedGitSources(uvLockPath(s.Location, s.SourceLocation, membership))
+	gitSources, unmirrored, err := lockedGitSources(uvLockPath(s.Location, s.SourceLocation, membership))
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
+	}
+	for _, name := range unmirrored {
+		// The URL is not logged: a lock may still carry a credential in it.
+		s.Wool.Warn("git source is neither https nor ssh, so it is not mirrored: the image build fetches it itself", wool.Field("package", name))
 	}
 	var options []services.RecipeOption
 	if len(gitSources) > 0 {

@@ -56,13 +56,17 @@ func uvLockPath(serviceDir, sourceDir string, membership *uvWorkspaceMembership)
 // from subdirectories of one repository at one commit share a declaration. A
 // project with no lock declares nothing; its build fails on the missing lock as
 // it always has.
-func lockedGitSources(lockPath string) ([]*builderv0.GitSourceDownload, error) {
+//
+// Only https and ssh sources can be mirrored. The packages locked to any other
+// git URL (http, file) are returned as unmirrored and left out of the
+// declaration: the build fetches them itself, as it always has.
+func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload, unmirrored []string, err error) {
 	content, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var lock struct {
 		Package []struct {
@@ -73,10 +77,9 @@ func lockedGitSources(lockPath string) ([]*builderv0.GitSourceDownload, error) {
 		} `toml:"package"`
 	}
 	if err := toml.Unmarshal(content, &lock); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", lockPath, err)
+		return nil, nil, fmt.Errorf("parse %s: %w", lockPath, err)
 	}
 	seen := map[[2]string]struct{}{}
-	var downloads []*builderv0.GitSourceDownload
 	for _, pkg := range lock.Package {
 		if pkg.Source.Git == "" {
 			continue
@@ -85,11 +88,12 @@ func lockedGitSources(lockPath string) ([]*builderv0.GitSourceDownload, error) {
 		// named a credential may still carry one.
 		locked, commit, found := strings.Cut(pkg.Source.Git, "#")
 		if !found || commit == "" {
-			return nil, fmt.Errorf("%s: package %q is locked to a git source without a commit: run `uv lock`", lockPath, pkg.Name)
+			return nil, nil, fmt.Errorf("%s: package %q is locked to a git source without a commit: run `uv lock`", lockPath, pkg.Name)
 		}
 		repository, _, _ := strings.Cut(locked, "?")
 		if !strings.HasPrefix(repository, "https://") && !strings.HasPrefix(repository, "ssh://") {
-			return nil, fmt.Errorf("%s: package %q is locked to a git source that is not an https:// or ssh:// URL, which an image build cannot be supplied", lockPath, pkg.Name)
+			unmirrored = append(unmirrored, pkg.Name)
+			continue
 		}
 		key := [2]string{repository, commit}
 		if _, ok := seen[key]; ok {
@@ -104,7 +108,7 @@ func lockedGitSources(lockPath string) ([]*builderv0.GitSourceDownload, error) {
 		}
 		return downloads[i].GetCommit() < downloads[j].GetCommit()
 	})
-	return downloads, nil
+	return downloads, unmirrored, nil
 }
 
 // uvGitMirrors is each declared repository once, in declaration order, with
