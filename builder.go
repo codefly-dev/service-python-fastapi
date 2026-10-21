@@ -216,6 +216,14 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	// A project that is a member of a uv workspace in the service is built from
 	// that workspace, copied whole (see enclosingUVWorkspace); its path sources
 	// must then stay inside the service the context carries.
+	// uvicorn's logging configuration and its filter module, written into the
+	// project exactly as a native start writes them, before any context is
+	// assembled from it: the build context is the service directory (or the
+	// assembled copy of it), and the Dockerfile copies them from code/ beside
+	// src (uvicorn_logging.go).
+	if err := writeUvicornLogging(s.SourceLocation); err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
 	membership, err := enclosingUVWorkspace(s.Location, s.SourceLocation)
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
@@ -257,11 +265,6 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		docker.IgnorePatterns = ephemeralIgnorePatterns()
 	}
 	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
-		return s.Base.Builder.BuildError(err)
-	}
-	// uvicorn's logging configuration and its filter module, which the
-	// Dockerfile copies beside the code (uvicorn_logging.go).
-	if err := writeUvicornLogging(outputDir); err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
 	image := s.DockerImage(dockerRequest).FullName()

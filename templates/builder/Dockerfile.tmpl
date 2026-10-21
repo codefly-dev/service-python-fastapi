@@ -76,8 +76,8 @@ WORKDIR /app/code
 
 # uvicorn's logging configuration and the filter it names (uvicorn_logging.go):
 # health probes are dropped from the access log, everything else is as uvicorn
-# writes it. Both files are rendered into the build context by the builder.
-COPY --chown=appuser uvicorn-log-config.json codefly_uvicorn_logging.py ./
+# writes it. The builder writes both into the project before the build.
+COPY --chown=appuser {{.ServicePrefix}}code/uvicorn-log-config.json {{.ServicePrefix}}code/codefly_uvicorn_logging.py ./
 
 # Default REST port (overridden by codefly at runtime).
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
