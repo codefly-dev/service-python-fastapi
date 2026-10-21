@@ -259,6 +259,11 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err := s.Base.Templates(ctx, docker, services.WithBuilder(builderFS).WithDestination("%s", outputDir)); err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
+	// uvicorn's logging configuration and its filter module, which the
+	// Dockerfile copies beside the code (uvicorn_logging.go).
+	if err := writeUvicornLogging(outputDir); err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
 	image := s.DockerImage(dockerRequest).FullName()
 	if assembled == nil {
 		// Only the Dockerfile and its ignore were written, and the application's
