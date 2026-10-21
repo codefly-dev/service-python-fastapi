@@ -42,6 +42,13 @@ type uvGitMirror struct {
 	Repository string
 }
 
+// unmirroredSource is a locked git source the recipe does not declare.
+type unmirroredSource struct {
+	Package string
+	// Reason is core's, which never quotes the URL.
+	Reason string
+}
+
 // uvLockPath is the lock uv syncs the project from: the workspace root's for a
 // member of a workspace in the service, the project's own otherwise.
 func uvLockPath(serviceDir, sourceDir string, membership *uvWorkspaceMembership) string {
@@ -57,10 +64,12 @@ func uvLockPath(serviceDir, sourceDir string, membership *uvWorkspaceMembership)
 // project with no lock declares nothing; its build fails on the missing lock as
 // it always has.
 //
-// Only https and ssh sources can be mirrored. The packages locked to any other
-// git URL (http, file) are returned as unmirrored and left out of the
-// declaration: the build fetches them itself, as it always has.
-func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload, unmirrored []string, err error) {
+// A source core would refuse to declare (services.GitSourceRepositoryProblem:
+// http, file, a credential, percent-encoding, "@" in the path, ...) is
+// returned as unmirrored, with core's reason, and is neither declared nor
+// rendered: the build fetches it itself, as it always has. A source whose
+// commit is missing or not a full object id makes the lock malformed.
+func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload, unmirrored []unmirroredSource, err error) {
 	content, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil
@@ -87,12 +96,12 @@ func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload
 		// The URL is not quoted in errors: a lock written from a source that
 		// named a credential may still carry one.
 		locked, commit, found := strings.Cut(pkg.Source.Git, "#")
-		if !found || commit == "" {
-			return nil, nil, fmt.Errorf("%s: package %q is locked to a git source without a commit: run `uv lock`", lockPath, pkg.Name)
+		if !found || !services.IsGitSourceCommit(commit) {
+			return nil, nil, fmt.Errorf("%s: package %q is locked to a git source without a full commit id: run `uv lock`", lockPath, pkg.Name)
 		}
 		repository, _, _ := strings.Cut(locked, "?")
-		if !strings.HasPrefix(repository, "https://") && !strings.HasPrefix(repository, "ssh://") {
-			unmirrored = append(unmirrored, pkg.Name)
+		if reason := services.GitSourceRepositoryProblem(repository); reason != "" {
+			unmirrored = append(unmirrored, unmirroredSource{Package: pkg.Name, Reason: reason})
 			continue
 		}
 		key := [2]string{repository, commit}
