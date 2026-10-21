@@ -258,7 +258,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	for _, source := range unmirrored {
 		// The URL is not logged: a lock may still carry a credential in it.
 		s.Wool.Warn("git source is not mirrored: the image build fetches it itself",
-			wool.Field("package", source.Package), wool.Field("reason", "repository "+source.Reason))
+			wool.Field("package", source.Package), wool.Field("reason", source.Reason))
 	}
 	var options []services.RecipeOption
 	if len(gitSources) > 0 {

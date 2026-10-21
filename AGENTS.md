@@ -162,9 +162,10 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   A git source is declared in the recipe (`git_source_downloads`) by the URL
   exactly as `uv.lock` records it up to its query, which is what uv hands git;
   the caller fetches it with its own credentials and the Dockerfile maps that
-  URL onto the mirror. A normalized URL would miss the mirror silently. A
-  source core refuses to declare is neither declared nor rendered (a warning
-  names the package and core's reason) and the build fetches it, as before.
+  URL onto the mirror, ahead of inherited git config. A normalized URL would
+  miss the mirror silently. A source core refuses, or whose URL begins an
+  undeclared locked one (insteadOf matches by prefix), is not declared or
+  rendered; a warning names the package and why, and the build fetches it.
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
   `:latest`. The default `ghcr.io/codefly-dev/python` companion is built from
   core and pinned by the digest of its multi-platform index — prefer it. Its tag

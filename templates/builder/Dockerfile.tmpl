@@ -58,12 +58,23 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # With the caller's mirrors, git reads each locked repository from its mirror
 # instead of the URL the lock records (uv hands git that URL unchanged), so no
 # credential is needed, and a commit missing from the mirror fails here rather
-# than prompting for one. The mappings are appended after any git configuration
-# the environment already carries (GIT_CONFIG_COUNT), never in its place.
+# than prompting for one. The mirror mappings take the first entries of git's
+# environment configuration, so they win over an inherited rewrite of the same
+# URL, and the entries the environment already carries (GIT_CONFIG_COUNT, read
+# as git reads it) move after them, read by name and never evaluated. A count
+# git would reject is left as it is, for git to reject as before.
 RUN --mount=type=bind,from=uvsources,target=/uvsources \
-    if [ -n "$(ls -A /uvsources)" ]; then n=${GIT_CONFIG_COUNT:-0}{{range .GitSources}} && \
-      export "GIT_CONFIG_KEY_$n=url.file:///uvsources/{{.Path}}.insteadOf" "GIT_CONFIG_VALUE_$n="'{{.Repository}}' && n=$((n+1)){{end}} && \
-      export GIT_CONFIG_COUNT=$n GIT_TERMINAL_PROMPT=0; fi && \
+    if [ -n "$(ls -A /uvsources)" ]; then \
+      n=${GIT_CONFIG_COUNT:-0}; n=${n#+}; while [ "${n#0}" != "$n" ] && [ -n "${n#0}" ]; do n=${n#0}; done; \
+      case $n in ''|*[!0-9]*) ;; *) \
+        i=$n; while [ "$i" -gt 0 ]; do i=$((i-1)); \
+          eval "k=\${GIT_CONFIG_KEY_$i}"; eval "v=\${GIT_CONFIG_VALUE_$i}"; \
+          export "GIT_CONFIG_KEY_$((i+{{len .GitSources}}))=$k" "GIT_CONFIG_VALUE_$((i+{{len .GitSources}}))=$v"; \
+        done; \
+        export GIT_CONFIG_COUNT=$((n+{{len .GitSources}})) GIT_TERMINAL_PROMPT=0{{range $i, $source := .GitSources}} \
+          GIT_CONFIG_KEY_{{$i}}='url.file:///uvsources/{{$source.Path}}.insteadOf' GIT_CONFIG_VALUE_{{$i}}='{{$source.Repository}}'{{end}};; \
+      esac; \
+    fi && \
     mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
 {{- else}}
 RUN mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable

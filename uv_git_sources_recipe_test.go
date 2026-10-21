@@ -104,11 +104,11 @@ func TestLockedGitSourcesDeclaresEachLockedCommitOnce(t *testing.T) {
 	require.NoError(t, err)
 	requireDeclares(t, gitSourcesDeclared, declared)
 	require.Equal(t, []unmirroredSource{
-		{Package: "libe", Reason: "must start with https:// or ssh://"},
-		{Package: "libf", Reason: "must start with https:// or ssh://"},
-		{Package: "libg", Reason: "must carry no user information over https"},
-		{Package: "libh", Reason: "must carry no percent-encoding"},
-		{Package: "libi", Reason: "must carry no @ in the path"},
+		{Package: "libe", Reason: "repository must start with https:// or ssh://"},
+		{Package: "libf", Reason: "repository must start with https:// or ssh://"},
+		{Package: "libg", Reason: "repository must carry no user information over https"},
+		{Package: "libh", Reason: "repository must carry no percent-encoding"},
+		{Package: "libi", Reason: "repository must carry no @ in the path"},
 	}, unmirrored)
 
 	mirrors := uvGitMirrors(declared)
@@ -274,30 +274,108 @@ example-git-lib = { git = %q, subdirectory = "lib", rev = %q }
 	require.Contains(t, string(out), "git.example.invalid")
 }
 
-// TestGitSourceMappingKeepsInheritedGitConfig runs the rendered mapping in the
-// builder base image with git configuration already in the environment, as a
-// base image or an earlier ENV may set it: the mappings are appended after it,
-// and both are in effect.
-func TestGitSourceMappingKeepsInheritedGitConfig(t *testing.T) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker is not installed: the mapping cannot be run")
+// lockWith is a uv-form lock with one package per git source, all at commitA.
+func lockWith(sources ...string) string {
+	lock := "version = 1\n"
+	for i, source := range sources {
+		lock += fmt.Sprintf("\n[[package]]\nname = \"lib%d\"\nversion = \"0.1.0\"\nsource = { git = \"%s?rev=main#%s\" }\n", i, source, commitA)
 	}
+	return lock
+}
+
+// TestLockedGitSourcesLeavesOutAPrefixOfAnUndeclaredSource: git's insteadOf
+// rewrites every URL that begins with the declared one, so a declared URL
+// that begins another locked source's undeclared URL would send that source to
+// the wrong mirror. It is left out too, until no such capture remains.
+func TestLockedGitSourcesLeavesOutAPrefixOfAnUndeclaredSource(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "uv.lock")
+	writeFile(t, lock, lockWith("https://h.example/acme/mono", "https://h.example/acme/mono@v1",
+		"https://h.example/acme/x", "https://h.example/acme/xy", "https://h.example/acme/xyz@v1", "https://h.example/acme/kept"))
+	declared, unmirrored, err := lockedGitSources(lock)
+	require.NoError(t, err)
+	requireDeclares(t, []*builderv0.GitSourceDownload{{Repository: "https://h.example/acme/kept", Commit: commitA, MirrorContext: "uvsources"}}, declared)
+	var names []string
+	for _, source := range unmirrored {
+		names = append(names, source.Package)
+	}
+	require.ElementsMatch(t, []string{"lib0", "lib1", "lib2", "lib3", "lib4"}, names)
+	require.Contains(t, unmirrored, unmirroredSource{Package: "lib0", Reason: prefixCaptureReason})
+	require.Contains(t, unmirrored, unmirroredSource{Package: "lib2", Reason: prefixCaptureReason})
+}
+
+// TestLockedGitSourcesKeepsALongerDeclaredSource: git applies the longest
+// matching insteadOf, so two declared URLs, one beginning the other, each
+// reach their own mirror.
+func TestLockedGitSourcesKeepsALongerDeclaredSource(t *testing.T) {
+	lock := filepath.Join(t.TempDir(), "uv.lock")
+	writeFile(t, lock, lockWith("https://h.example/acme/mono", "https://h.example/acme/mono.git"))
+	declared, unmirrored, err := lockedGitSources(lock)
+	require.NoError(t, err)
+	require.Empty(t, unmirrored)
+	require.Len(t, declared, 2)
+}
+
+// runMapping renders the recipe for lock and runs its mirror mapping, then
+// script, in the builder base image with env set, as a base image or an
+// earlier ENV may set it.
+func runMapping(t *testing.T, lock string, env []string, script string) string {
+	t.Helper()
 	builder, _ := createdBuilder(t)
-	writeFile(t, filepath.Join(builder.SourceLocation, "uv.lock"), gitSourcesLock)
+	writeFile(t, filepath.Join(builder.SourceLocation, "uv.lock"), lock)
 	outputDir := t.TempDir()
 	dockerfile := dockerfileOf(t, outputDir, emitRecipe(t, builder, outputDir))
-	start := strings.Index(dockerfile, "RUN --mount=type=bind,from=uvsources,target=/uvsources \\\n")
+	run := "RUN --mount=type=bind,from=uvsources,target=/uvsources \\\n"
+	start := strings.Index(dockerfile, run)
 	end := strings.Index(dockerfile, "mkdir -p /opt/uv/python && uv sync")
 	require.True(t, start >= 0 && end > start, "the rendered sync step has no mirror mapping")
-	mapping := strings.ReplaceAll(dockerfile[start+len("RUN --mount=type=bind,from=uvsources,target=/uvsources \\\n"):end], "\\\n", "")
+	mapping := strings.ReplaceAll(dockerfile[start+len(run):end], "\\\n", "")
 
 	mirrors := t.TempDir()
 	writeFile(t, filepath.Join(mirrors, "present"), "")
-	mono := "url.file:///uvsources/" + services.GitSourceMirrorPath("https://git.example.invalid/acme/mono") + ".insteadOf"
-	out, err := exec.CommandContext(t.Context(), "docker", "run", "--rm", "--network=none",
-		"-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=user.name", "-e", "GIT_CONFIG_VALUE_0=inherited",
-		"-v", mirrors+":/uvsources:ro", runtimeImage.FullName(),
-		"sh", "-c", mapping+"git config --get user.name && git config --get "+mono+" && echo count=$GIT_CONFIG_COUNT").CombinedOutput()
+	args := []string{"run", "--rm", "--network=none", "-w", "/tmp", "-v", mirrors + ":/uvsources:ro"}
+	for _, variable := range env {
+		args = append(args, "-e", variable)
+	}
+	out, err := exec.CommandContext(t.Context(), "docker", append(args, runtimeImage.FullName(), "sh", "-c", mapping+script)...).CombinedOutput()
 	require.NoError(t, err, "%s", out)
-	require.Equal(t, "inherited\nhttps://git.example.invalid/acme/mono\ncount=3\n", string(out))
+	return string(out)
+}
+
+// TestGitSourceMappingInTheBuilderImage runs the rendered mapping where it
+// runs: the mirror wins over an inherited rewrite of the same URL, inherited
+// entries survive whatever form their count takes, and a source left out of
+// the declaration is not rewritten by a mapping that begins it.
+func TestGitSourceMappingInTheBuilderImage(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not installed: the mapping cannot be run")
+	}
+	const mono = "https://git.example.invalid/acme/mono"
+	mirror := "file:///uvsources/" + services.GitSourceMirrorPath(mono)
+	t.Run("inherited rewrite of a declared URL", func(t *testing.T) {
+		out := runMapping(t, gitSourcesLock, []string{"GIT_CONFIG_COUNT=2",
+			"GIT_CONFIG_KEY_0=url.https://proxy.invalid/.insteadOf", "GIT_CONFIG_VALUE_0=" + mono,
+			"GIT_CONFIG_KEY_1=user.name", "GIT_CONFIG_VALUE_1=inherited $HOME `x` \"q\""},
+			"git ls-remote --get-url "+mono+" && git config --get user.name && git config --get url.https://proxy.invalid/.insteadOf && echo count=$GIT_CONFIG_COUNT")
+		require.Equal(t, mirror+"\ninherited $HOME `x` \"q\"\n"+mono+"\ncount=4\n", out)
+	})
+	for _, count := range []string{"01", "+1"} {
+		t.Run("count "+count, func(t *testing.T) {
+			out := runMapping(t, gitSourcesLock, []string{"GIT_CONFIG_COUNT=" + count, "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=inherited"},
+				"git ls-remote --get-url "+mono+" && git config --get user.name && echo count=$GIT_CONFIG_COUNT")
+			require.Equal(t, mirror+"\ninherited\ncount=3\n", out)
+		})
+	}
+	t.Run("count 08", func(t *testing.T) {
+		env := []string{"GIT_CONFIG_COUNT=08"}
+		for i := 0; i < 8; i++ {
+			env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=test.k%d", i, i), fmt.Sprintf("GIT_CONFIG_VALUE_%d=v%d", i, i))
+		}
+		out := runMapping(t, gitSourcesLock, env, "git ls-remote --get-url "+mono+" && git config --get test.k0 && git config --get test.k7 && echo count=$GIT_CONFIG_COUNT")
+		require.Equal(t, mirror+"\nv0\nv7\ncount=10\n", out)
+	})
+	t.Run("an undeclared source the declared URL begins", func(t *testing.T) {
+		out := runMapping(t, lockWith(mono, mono+"@v1", "https://git.example.invalid/acme/tools"), nil,
+			"git ls-remote --get-url "+mono+"@v1 && git ls-remote --get-url "+mono)
+		require.Equal(t, mono+"@v1\n"+mono+"\n", out)
+	})
 }
