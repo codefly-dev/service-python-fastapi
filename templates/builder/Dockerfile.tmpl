@@ -57,10 +57,12 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # With the caller's mirrors, git reads each locked repository from its mirror
 # instead of the URL the lock records (uv hands git that URL unchanged), so no
 # credential is needed, and a commit missing from the mirror fails here rather
-# than prompting for one.
+# than prompting for one. The mappings are appended after any git configuration
+# the environment already carries (GIT_CONFIG_COUNT), never in its place.
 RUN --mount=type=bind,from=uvsources,target=/uvsources \
-    if [ -n "$(ls -A /uvsources)" ]; then export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT={{len .GitSources}}{{range $i, $source := .GitSources}} \
-      GIT_CONFIG_KEY_{{$i}}='url.file:///uvsources/{{$source.Path}}.insteadOf' GIT_CONFIG_VALUE_{{$i}}='{{$source.Repository}}'{{end}}; fi && \
+    if [ -n "$(ls -A /uvsources)" ]; then n=${GIT_CONFIG_COUNT:-0}{{range .GitSources}} && \
+      export "GIT_CONFIG_KEY_$n=url.file:///uvsources/{{.Path}}.insteadOf" "GIT_CONFIG_VALUE_$n="'{{.Repository}}' && n=$((n+1)){{end}} && \
+      export GIT_CONFIG_COUNT=$n GIT_TERMINAL_PROMPT=0; fi && \
     mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
 {{- else}}
 RUN mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable

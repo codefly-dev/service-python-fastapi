@@ -35,11 +35,13 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # With the caller's mirrors, git reads each locked repository from its mirror
 # instead of the URL the lock records (uv hands git that URL unchanged), so no
 # credential is needed, and a commit missing from the mirror fails here rather
-# than prompting for one.
+# than prompting for one. The mappings are appended after any git configuration
+# the environment already carries (GIT_CONFIG_COUNT), never in its place.
 RUN --mount=type=bind,from=uvsources,target=/uvsources \
-    if [ -n "$(ls -A /uvsources)" ]; then export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
-      GIT_CONFIG_KEY_0='url.file:///uvsources/c9fa8363b851c2643d648edad1c8c7892904f717385511fe4771422d0817a55e.git.insteadOf' GIT_CONFIG_VALUE_0='https://git.example.invalid/acme/mono' \
-      GIT_CONFIG_KEY_1='url.file:///uvsources/d2b987abe743521016c33e82dba28324380629b9d2544f9e5213ee4299a3af6c.git.insteadOf' GIT_CONFIG_VALUE_1='ssh://git@git.example.invalid:2222/acme/tools.git'; fi && \
+    if [ -n "$(ls -A /uvsources)" ]; then n=${GIT_CONFIG_COUNT:-0} && \
+      export "GIT_CONFIG_KEY_$n=url.file:///uvsources/c9fa8363b851c2643d648edad1c8c7892904f717385511fe4771422d0817a55e.git.insteadOf" "GIT_CONFIG_VALUE_$n="'https://git.example.invalid/acme/mono' && n=$((n+1)) && \
+      export "GIT_CONFIG_KEY_$n=url.file:///uvsources/d2b987abe743521016c33e82dba28324380629b9d2544f9e5213ee4299a3af6c.git.insteadOf" "GIT_CONFIG_VALUE_$n="'ssh://git@git.example.invalid:2222/acme/tools.git' && n=$((n+1)) && \
+      export GIT_CONFIG_COUNT=$n GIT_TERMINAL_PROMPT=0; fi && \
     mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
 
 

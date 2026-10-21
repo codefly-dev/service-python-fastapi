@@ -273,3 +273,31 @@ example-git-lib = { git = %q, subdirectory = "lib", rev = %q }
 	require.Error(t, err, "without the mirror the unreachable URL must fail the build:\n%s", out)
 	require.Contains(t, string(out), "git.example.invalid")
 }
+
+// TestGitSourceMappingKeepsInheritedGitConfig runs the rendered mapping in the
+// builder base image with git configuration already in the environment, as a
+// base image or an earlier ENV may set it: the mappings are appended after it,
+// and both are in effect.
+func TestGitSourceMappingKeepsInheritedGitConfig(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not installed: the mapping cannot be run")
+	}
+	builder, _ := createdBuilder(t)
+	writeFile(t, filepath.Join(builder.SourceLocation, "uv.lock"), gitSourcesLock)
+	outputDir := t.TempDir()
+	dockerfile := dockerfileOf(t, outputDir, emitRecipe(t, builder, outputDir))
+	start := strings.Index(dockerfile, "RUN --mount=type=bind,from=uvsources,target=/uvsources \\\n")
+	end := strings.Index(dockerfile, "mkdir -p /opt/uv/python && uv sync")
+	require.True(t, start >= 0 && end > start, "the rendered sync step has no mirror mapping")
+	mapping := strings.ReplaceAll(dockerfile[start+len("RUN --mount=type=bind,from=uvsources,target=/uvsources \\\n"):end], "\\\n", "")
+
+	mirrors := t.TempDir()
+	writeFile(t, filepath.Join(mirrors, "present"), "")
+	mono := "url.file:///uvsources/" + services.GitSourceMirrorPath("https://git.example.invalid/acme/mono") + ".insteadOf"
+	out, err := exec.CommandContext(t.Context(), "docker", "run", "--rm", "--network=none",
+		"-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=user.name", "-e", "GIT_CONFIG_VALUE_0=inherited",
+		"-v", mirrors+":/uvsources:ro", runtimeImage.FullName(),
+		"sh", "-c", mapping+"git config --get user.name && git config --get "+mono+" && echo count=$GIT_CONFIG_COUNT").CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	require.Equal(t, "inherited\nhttps://git.example.invalid/acme/mono\ncount=3\n", string(out))
+}
