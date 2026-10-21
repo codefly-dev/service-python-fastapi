@@ -596,6 +596,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
 	}
 
+	// The logging configuration uvicorn is started with (uvicorn_logging.go),
+	// written beside the project so the filter module is importable from the
+	// working directory uvicorn puts on sys.path.
+	if err := writeUvicornLogging(s.Service.SourceLocation); err != nil {
+		return s.Base.Runtime.StartError(err)
+	}
 	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(s.port, s.FastAPI.Settings.HotReload)...)
 	if err != nil {
 		return s.Base.Runtime.StartError(err)
@@ -758,7 +764,7 @@ func httpAnswers(ctx context.Context, target string) error {
 // makes uvicorn fork a supervisor that re-executes the app on source edits,
 // which is not what a service configured without hot reload asked for.
 func uvicornArgs(port uint16, hotReload bool) []string {
-	args := []string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", port)}
+	args := []string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", port), "--log-config", uvicornLogConfigFile}
 	if hotReload {
 		args = append(args, "--reload")
 	}

@@ -196,5 +196,7 @@ func TestBuildShipsSiblingPackages(t *testing.T) {
 		"COPY --chown=appuser code/src code/src",
 		"COPY --chown=appuser code/adapters code/adapters",
 		"COPY --chown=appuser code/model_service code/model_service",
+		// uvicorn's logging configuration and filter, written by the builder (uvicorn_logging.go).
+		"COPY --chown=appuser code/uvicorn-log-config.json code/codefly_uvicorn_logging.py ./",
 	}, copies)
 }
