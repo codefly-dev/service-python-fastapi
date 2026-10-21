@@ -36,23 +36,21 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # With the caller's mirrors, git reads each locked repository from its mirror
 # instead of the URL the lock records (uv hands git that URL unchanged), so no
 # credential is needed, and a commit missing from the mirror fails here rather
-# than prompting for one. The mirror mappings take the first entries of git's
-# environment configuration, so they win over an inherited rewrite of the same
-# URL, and the entries the environment already carries (GIT_CONFIG_COUNT, read
-# as git reads it) move after them, read by name and never evaluated. A count
-# git would reject is left as it is, for git to reject as before.
+# than prompting for one. The mappings are appended after the git configuration
+# the environment already carries, when its GIT_CONFIG_COUNT is a plain count;
+# otherwise the configuration is left alone and the sources are fetched as
+# without a mirror. An image whose own git configuration (system, global or
+# environment) already rewrites a declared repository's URL keeps its rewrite:
+# git prefers it, and the build fetches that source as it does without a mirror.
 RUN --mount=type=bind,from=uvsources,target=/uvsources \
     if [ -n "$(ls -A /uvsources)" ]; then \
-      n=${GIT_CONFIG_COUNT:-0}; n=${n#+}; while [ "${n#0}" != "$n" ] && [ -n "${n#0}" ]; do n=${n#0}; done; \
-      case $n in ''|*[!0-9]*) ;; *) \
-        i=$n; while [ "$i" -gt 0 ]; do i=$((i-1)); \
-          eval "k=\${GIT_CONFIG_KEY_$i}"; eval "v=\${GIT_CONFIG_VALUE_$i}"; \
-          export "GIT_CONFIG_KEY_$((i+2))=$k" "GIT_CONFIG_VALUE_$((i+2))=$v"; \
-        done; \
-        export GIT_CONFIG_COUNT=$((n+2)) GIT_TERMINAL_PROMPT=0 \
-          GIT_CONFIG_KEY_0='url.file:///uvsources/c9fa8363b851c2643d648edad1c8c7892904f717385511fe4771422d0817a55e.git.insteadOf' GIT_CONFIG_VALUE_0='https://git.example.invalid/acme/mono' \
-          GIT_CONFIG_KEY_1='url.file:///uvsources/d2b987abe743521016c33e82dba28324380629b9d2544f9e5213ee4299a3af6c.git.insteadOf' GIT_CONFIG_VALUE_1='ssh://git@git.example.invalid:2222/acme/tools.git';; \
-      esac; \
+      n=${GIT_CONFIG_COUNT:-0}; n=${n#+}; \
+      case $n in ''|*[!0-9]*) n= ;; *) while [ "${n#0}" != "$n" ] && [ -n "${n#0}" ]; do n=${n#0}; done; [ ${#n} -le 4 ] || n= ;; esac; \
+      if [ -z "$n" ]; then echo "inherited GIT_CONFIG_COUNT is not a plain count; git sources are fetched without the mirror"; \
+      else export GIT_TERMINAL_PROMPT=0 \
+        "GIT_CONFIG_KEY_$((n+0))=url.file:///uvsources/c9fa8363b851c2643d648edad1c8c7892904f717385511fe4771422d0817a55e.git.insteadOf" "GIT_CONFIG_VALUE_$((n+0))="'https://git.example.invalid/acme/mono' \
+        "GIT_CONFIG_KEY_$((n+1))=url.file:///uvsources/d2b987abe743521016c33e82dba28324380629b9d2544f9e5213ee4299a3af6c.git.insteadOf" "GIT_CONFIG_VALUE_$((n+1))="'ssh://git@git.example.invalid:2222/acme/tools.git' \
+        GIT_CONFIG_COUNT=$((n+2)); fi; \
     fi && \
     mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
 

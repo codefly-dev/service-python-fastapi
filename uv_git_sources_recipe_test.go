@@ -342,36 +342,45 @@ func runMapping(t *testing.T, lock string, env []string, script string) string {
 }
 
 // TestGitSourceMappingInTheBuilderImage runs the rendered mapping where it
-// runs: the mirror wins over an inherited rewrite of the same URL, inherited
-// entries survive whatever form their count takes, and a source left out of
-// the declaration is not rewritten by a mapping that begins it.
+// runs: appended after the git configuration the environment carries when its
+// count is plain, leaving that configuration alone otherwise, and never
+// rewriting a source left out of the declaration.
 func TestGitSourceMappingInTheBuilderImage(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker is not installed: the mapping cannot be run")
 	}
 	const mono = "https://git.example.invalid/acme/mono"
 	mirror := "file:///uvsources/" + services.GitSourceMirrorPath(mono)
-	t.Run("inherited rewrite of a declared URL", func(t *testing.T) {
-		out := runMapping(t, gitSourcesLock, []string{"GIT_CONFIG_COUNT=2",
-			"GIT_CONFIG_KEY_0=url.https://proxy.invalid/.insteadOf", "GIT_CONFIG_VALUE_0=" + mono,
-			"GIT_CONFIG_KEY_1=user.name", "GIT_CONFIG_VALUE_1=inherited $HOME `x` \"q\""},
-			"git ls-remote --get-url "+mono+" && git config --get user.name && git config --get url.https://proxy.invalid/.insteadOf && echo count=$GIT_CONFIG_COUNT")
-		require.Equal(t, mirror+"\ninherited $HOME `x` \"q\"\n"+mono+"\ncount=4\n", out)
-	})
-	for _, count := range []string{"01", "+1"} {
+	inherited := []string{"GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=inherited"}
+	for _, count := range []string{"", "1", "01", "+1"} {
 		t.Run("count "+count, func(t *testing.T) {
-			out := runMapping(t, gitSourcesLock, []string{"GIT_CONFIG_COUNT=" + count, "GIT_CONFIG_KEY_0=user.name", "GIT_CONFIG_VALUE_0=inherited"},
-				"git ls-remote --get-url "+mono+" && git config --get user.name && echo count=$GIT_CONFIG_COUNT")
-			require.Equal(t, mirror+"\ninherited\ncount=3\n", out)
+			env := append([]string{"GIT_CONFIG_COUNT=" + count}, inherited...)
+			if count == "" {
+				env = nil
+			}
+			out := runMapping(t, gitSourcesLock, env, "git ls-remote --get-url "+mono+" && { git config --get user.name || true; } && echo count=$GIT_CONFIG_COUNT")
+			want := mirror + "\ninherited\ncount=3\n"
+			if count == "" {
+				want = mirror + "\ncount=2\n"
+			}
+			require.Equal(t, want, out)
 		})
 	}
-	t.Run("count 08", func(t *testing.T) {
-		env := []string{"GIT_CONFIG_COUNT=08"}
-		for i := 0; i < 8; i++ {
-			env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=test.k%d", i, i), fmt.Sprintf("GIT_CONFIG_VALUE_%d=v%d", i, i))
-		}
-		out := runMapping(t, gitSourcesLock, env, "git ls-remote --get-url "+mono+" && git config --get test.k0 && git config --get test.k7 && echo count=$GIT_CONFIG_COUNT")
-		require.Equal(t, mirror+"\nv0\nv7\ncount=10\n", out)
+	for _, count := range []string{" 1", "-0", "99999", "abc"} {
+		t.Run("count "+count, func(t *testing.T) {
+			env := append([]string{"GIT_CONFIG_COUNT=" + count}, inherited...)
+			out := runMapping(t, gitSourcesLock, env, `echo "count=[$GIT_CONFIG_COUNT] keys=$(env | grep -c '^GIT_CONFIG_KEY_') prompt=[$GIT_TERMINAL_PROMPT]"`)
+			require.Equal(t, "inherited GIT_CONFIG_COUNT is not a plain count; git sources are fetched without the mirror\ncount=["+count+"] keys=1 prompt=[]\n", out)
+		})
+	}
+	// The limitation, as it is today without a mirror: an image whose own git
+	// configuration rewrites a declared URL keeps its rewrite, which git
+	// prefers, so the source is fetched where the image says, not broken.
+	t.Run("inherited rewrite of a declared URL", func(t *testing.T) {
+		out := runMapping(t, gitSourcesLock, []string{"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=url.https://proxy.invalid/.insteadOf", "GIT_CONFIG_VALUE_0=" + mono},
+			"git ls-remote --get-url "+mono+" && echo count=$GIT_CONFIG_COUNT")
+		require.Equal(t, "https://proxy.invalid/\ncount=3\n", out)
 	})
 	t.Run("an undeclared source the declared URL begins", func(t *testing.T) {
 		out := runMapping(t, lockWith(mono, mono+"@v1", "https://git.example.invalid/acme/tools"), nil,
