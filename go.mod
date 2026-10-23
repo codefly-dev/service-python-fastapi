@@ -1,9 +1,9 @@
 module github.com/codefly-dev/service-python-fastapi
 
-go 1.27.2
+go 1.27.3
 
 require (
-	github.com/codefly-dev/core v0.19.6-0.20261021213826-abdc7077fb98
+	github.com/codefly-dev/core v0.19.6
 	github.com/codefly-dev/service-python v0.0.66
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/stretchr/testify v1.12.1
