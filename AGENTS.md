@@ -67,9 +67,9 @@ within reach.
 ## Build and test
 
 Derived from `.github/workflows/ci.yml`, which delegates to core's shared
-`go-service-ci.yml`, pinned to the linked core's tag (`@v0.19.4`; move it with
+`go-service-ci.yml`, pinned to the linked core's tag (`@v0.19.6`; move it with
 the core bump), and adds a `race` job of its own. Go comes from `go.mod`
-(1.27.2). All of it runs locally:
+(1.27.3). All of it runs locally:
 
 ```bash
 go build ./...          # CI: build job
@@ -126,6 +126,7 @@ anything from it.
 | `runtime.go` | Init/Start/Stop/Destroy, uvicorn supervision, hot reload, the lock order |
 | `builder.go` | `Create` scaffolding, OpenAPI endpoint loading, Docker + kustomize recipes |
 | `uvsources.go` | the assembled build context: `[tool.uv.sources]` paths leaving the project |
+| `uvgitsources.go` | the git commits `uv.lock` pins, declared for the caller to mirror into the build |
 | `probes.go`, `probe.py` | endpoint health translated to Kubernetes probes / a local probe |
 | `templates/` | **what ships** — embedded via `go:embed`, rendered on `Create` |
 | `base/` | a checked-in sample service, embedded nowhere |
@@ -158,6 +159,13 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   same relative path resolves there; that plan claims the whole tree
   (`RECIPE_INVENTORY_SCOPE_TREE`), the Dockerfile-only one claims just what it
   emitted. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
+  A git source is declared in the recipe (`git_source_downloads`) by the URL
+  exactly as `uv.lock` records it up to its query, which is what uv hands git;
+  the caller fetches it with its own credentials and the Dockerfile maps that
+  URL onto the mirror; a normalized URL would miss it silently. A source core
+  refuses, or whose URL begins an undeclared locked one (insteadOf is a
+  prefix match), is not declared; a warning says why. An image whose own git
+  config already rewrites a declared URL keeps that rewrite (git prefers it).
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
   `:latest`. The default `ghcr.io/codefly-dev/python` companion is built from
   core and pinned by the digest of its multi-platform index — prefer it. Its tag

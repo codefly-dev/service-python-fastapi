@@ -192,6 +192,9 @@ type DockerTemplating struct {
 	// IgnorePatterns are the dockerignore entries of a recipe that copies the
 	// service tree whole.
 	IgnorePatterns []string
+	// GitSources are the repositories of the git commits the lock pins, which
+	// the builder stage reads from the caller's mirrors (uvgitsources.go).
+	GitSources []uvGitMirror
 }
 
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
@@ -248,11 +251,25 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
+	gitSources, unmirrored, err := lockedGitSources(uvLockPath(s.Location, s.SourceLocation, membership))
+	if err != nil {
+		return s.Base.Builder.BuildError(err)
+	}
+	for _, source := range unmirrored {
+		// The URL is not logged: a lock may still carry a credential in it.
+		s.Wool.Warn("git source is not mirrored: the image build fetches it itself",
+			wool.Field("package", source.Package), wool.Field("reason", source.Reason))
+	}
+	var options []services.RecipeOption
+	if len(gitSources) > 0 {
+		options = append(options, services.WithGitSourceDownloads(gitSources...))
+	}
 	docker := DockerTemplating{
 		Builder:        runtimeImage.FullName(),
 		Components:     components,
 		UVImage:        uvImage,
 		ProjectWorkdir: defaultProjectWorkdir,
+		GitSources:     uvGitMirrors(gitSources),
 	}
 	if assembled != nil {
 		docker.ServicePrefix = assembled.ServicePrefix
@@ -272,19 +289,23 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		// Only the Dockerfile and its ignore were written, and the application's
 		// inputs are the service's own tree: the plan claims what it emitted and
 		// the caller builds the service directory.
-		return s.Base.Builder.SingleImageBuildResponse(req, image, emitted)
+		return s.Base.Builder.SingleImageBuildResponse(req, image, emitted, options...)
 	}
 	// The whole destination was assembled by this build, so the plan claims all
 	// of it and the caller builds the assembled tree rather than the service
 	// directory — which is what RECIPE_INVENTORY_SCOPE_TREE declares.
-	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{{
+	recipe := &builderv0.DockerBuildRecipe{
 		Name:         "app",
 		Dockerfile:   "Dockerfile",
 		Context:      ".",
 		Dockerignore: dockerignoreOf(emitted),
 		Image:        image,
 		Platforms:    services.RecipeBuildPlatforms(),
-	}})
+	}
+	for _, option := range options {
+		option(recipe)
+	}
+	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{recipe})
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
