@@ -73,9 +73,13 @@ _PROTOCOL_ERROR, _REFUSED_STREAM = 0x1, 0x7
 # refused alone, with REFUSED_STREAM, which a client retries safely: the server never
 # processed it. What the face tracks per connection is bounded by it.
 DEFAULT_MAX_OPEN_CALLS = 1000
-# Frames for the client (refusals) the relay holds while the server's frame in flight
-# completes; a client that makes it hold more is closed.
-_MAX_QUEUED_FOR_CLIENT = 1024
+# Bytes of frames for the client (refusals, a GOAWAY) the relay holds while the server's
+# frame in flight completes; past it the relay reads nothing more from the client until
+# they are written, so a client that opens calls faster than it reads them stalls itself.
+_MAX_QUEUED_FOR_CLIENT = 16 * 1024
+# How long a closing relay waits for the server's frame in flight to complete, so the
+# client's GOAWAY lands between two frames.
+_GOAWAY_GRACE_S = 5.0
 # The most of a SETTINGS or GOAWAY payload the relay reads; the rest is skipped.
 _CONTROL_PAYLOAD = 256
 _ENVELOPE = struct.Struct(">BI")
@@ -338,9 +342,11 @@ class _Connection:
         what the server allows at once (SETTINGS_MAX_CONCURRENT_STREAMS,
         ``DEFAULT_MAX_OPEN_CALLS`` when it advertises none) is refused alone: the client
         gets RST_STREAM REFUSED_STREAM, and the server its header block, which keeps the
-        connection's header compression in step, then the same reset. A client that opens
-        an even stream, which no HTTP/2 client does, gets a GOAWAY naming why, and the
-        connection is closed."""
+        connection's header compression in step, then the same reset. A refusal is
+        written between two of the server's frames; while more than
+        ``_MAX_QUEUED_FOR_CLIENT`` bytes of them wait, the client is not read. A client
+        that opens an even stream, which no HTTP/2 client does, gets a GOAWAY naming why,
+        and the connection is closed."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
         loop = asyncio.get_running_loop()
@@ -349,7 +355,8 @@ class _Connection:
         highest = accepted = 0
         refusing = 0  # the refused stream whose header block is still arriving
         max_calls = DEFAULT_MAX_OPEN_CALLS
-        to_client: list[bytes] = []  # frames for the client, written at a frame boundary
+        to_client = bytearray()  # frames for the client, written at a frame boundary
+        flushed = asyncio.Event()  # set when the server pump wrote them
         told = False  # the face wrote to the client since the client pump last drained
 
         def from_client(kind, flags, stream, payload):
@@ -395,15 +402,19 @@ class _Connection:
 
         def tell_client(frame):
             nonlocal told
-            # Only between two of the server's frames: queued while one is half relayed.
-            # A client that keeps opening calls while it reads nothing is not served.
+            # Only between two of the server's frames: queued while one is half relayed,
+            # and written by the server pump at that frame's end.
             if server.at_boundary and not to_client:
                 writer.write(frame)
                 told = True
-            elif len(to_client) >= _MAX_QUEUED_FOR_CLIENT:
-                raise _ProtocolError("the client opens calls past the limit and reads nothing")
             else:
-                to_client.append(frame)
+                to_client.extend(frame)
+
+        async def written():
+            """Wait until the server pump has written what is queued for the client."""
+            while to_client:
+                flushed.clear()
+                await flushed.wait()
 
         def relay(chunk, sink, frames, ends, queued):
             at = 0
@@ -411,8 +422,9 @@ class _Connection:
                 sink.write(chunk[at:end] + after)
                 at = end
                 if queued:
-                    sink.write(b"".join(queued))
+                    sink.write(bytes(queued))
                     queued.clear()
+                    flushed.set()
             if frames.error is None:
                 sink.write(chunk[at:])
 
@@ -424,14 +436,20 @@ class _Connection:
                     relay(chunk, sink, frames, frames.feed(chunk), queued)
                     if frames.error is not None:
                         _log.info("connect face: closing a gRPC connection: %s", frames.error)
-                        if server.at_boundary:
-                            reason = str(frames.error)
-                            writer.write(_goaway(accepted, _PROTOCOL_ERROR, reason))
+                        tell_client(_goaway(accepted, _PROTOCOL_ERROR, str(frames.error)))
+                        try:
+                            await asyncio.wait_for(written(), _GOAWAY_GRACE_S)
+                        except TimeoutError:
+                            pass
                         return
                     await sink.drain()
-                    if sink is not writer and told:
-                        told = False
-                        await writer.drain()  # the refusals: a client must read them
+                    if sink is not writer:
+                        # The refusals: a client must read them before it is read again.
+                        if len(to_client) >= _MAX_QUEUED_FOR_CLIENT:
+                            await written()
+                        if told:
+                            told = False
+                            await writer.drain()
             except (ConnectionError, OSError):
                 pass
 
@@ -445,7 +463,7 @@ class _Connection:
                 await asyncio.sleep(remaining if remaining > 0 else self.idle_timeout)
 
         tasks = (
-            asyncio.ensure_future(pump(reader, upstream_writer, client, [])),
+            asyncio.ensure_future(pump(reader, upstream_writer, client, bytearray())),
             asyncio.ensure_future(pump(upstream_reader, writer, server, to_client)),
             asyncio.ensure_future(idle()),
         )
