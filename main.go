@@ -88,8 +88,10 @@ type Settings struct {
 	// onto the grpc.aio server, so it needs grpc-server and adds no API of its
 	// own. The agent writes the face (code/src/rpc/connect_gen.py) at sync,
 	// removes it when the setting is off, and hands the process its port as
-	// CODEFLY_CONNECT_PORT; the scaffold's src/main.py starts it once the gRPC
-	// server listens whenever the module is there. Off by default.
+	// CODEFLY_CONNECT_PORT, locally and in the deployment, exactly when it is
+	// on: the scaffold's src/main.py starts the face on that variable once the
+	// gRPC server listens. Start refuses a run where nothing then listens on the
+	// connect port. Off by default.
 	ConnectEndpoint bool `yaml:"connect-endpoint"`
 
 	// RuntimeImage overrides the default codefly-built runtime image.

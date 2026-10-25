@@ -20,17 +20,18 @@ end to end, so they are served on the gRPC protocol only.
 Request bodies are bounded by ``max_message_bytes`` (gRPC's 4 MiB unless the service
 raises it) before they are read, and every read is bounded in time: an HTTP/1.1 read by
 ``read_timeout`` (``idle_timeout`` between requests), and a relayed gRPC connection is
-closed once it has carried no byte either way for ``idle_timeout``. A gRPC stream that
-must stay silent longer keeps its connection with HTTP/2 keepalive pings.
+closed once it has had no open call for ``idle_timeout``, as Go's HTTP/2 server bounds an
+idle connection. A call in flight is never cut by the face, however long its handler
+takes to answer: its deadline and the gRPC server's own policy bound it.
 A JSON request field the service's proto does not know is ignored, as connect-go's codec
 ignores it, so a client built from a newer proto calls a Python service and a Go one alike.
 
-The agent's generated ``src/main.py`` calls ``start`` once its gRPC server listens, on
-the port the agent hands the process as ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` where
-the mapping is fixed), and stops the face before that server. A service that starts the
-face from its own code with ``serve`` keeps that one: ``start`` serves nothing while a
-face started in this process is open. It needs ``grpcio``, ``protobuf`` and ``h11``
-(uvicorn's own HTTP/1.1 parser) in the service's dependencies.
+The agent hands the process ``CODEFLY_CONNECT_PORT`` exactly when the service sets
+``connect-endpoint``, locally and in its deployment. The agent's generated
+``src/main.py`` then calls ``start`` once its gRPC server listens and stops the face
+before that server; a service with its own main calls ``serve`` itself. It needs
+``grpcio``, ``protobuf`` and ``h11`` (uvicorn's own HTTP/1.1 parser) in the service's
+dependencies.
 """
 
 from __future__ import annotations
@@ -59,6 +60,10 @@ DEFAULT_READ_TIMEOUT_S = 30.0
 DEFAULT_IDLE_TIMEOUT_S = 120.0
 
 _PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+# An HTTP/2 frame header: 24-bit length, type, flags, stream id (RFC 9113 section 4.1).
+_FRAME = struct.Struct(">BHBBI")
+_DATA, _HEADERS, _RST_STREAM = 0x0, 0x1, 0x3
+_END_STREAM_FLAG = 0x1
 _ENVELOPE = struct.Struct(">BI")
 _COMPRESSED, _END_STREAM, _TRAILERS = 0x01, 0x02, 0x80
 _STATUS_DETAILS = "grpc-status-details-bin"
@@ -104,9 +109,6 @@ _CODES = {
 }
 
 _log = logging.getLogger("codefly.connect")
-# The faces open in this process, so ``start`` never opens a second listener beside one
-# the service's own code opened.
-_faces: set[ConnectFace] = set()
 
 
 class CallError(Exception):
@@ -143,7 +145,6 @@ class ConnectFace:
         self._connections: set[asyncio.Task] = set()
 
     async def stop(self, grace: float | None = 5.0) -> None:
-        _faces.discard(self)
         self._server.close()
         for task in list(self._connections):
             task.cancel()
@@ -194,20 +195,48 @@ async def serve(
     server = await asyncio.start_server(accepted, host, port)
     bound = server.sockets[0].getsockname()[1]
     face = ConnectFace(server, channel, bound)
-    _faces.add(face)
     return face
 
 
 async def start(grpc_port: int, **options) -> ConnectFace | None:
     """Start the face the agent's generated ``src/main.py`` starts: on
-    ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` when unset) over the gRPC server on
-    ``grpc_port``, with ``serve``'s ``options``. Return None, starting nothing, while a
-    face started in this process is open: the service started its own."""
-    if _faces:
-        _log.info("connect face: already served on port %d", next(iter(_faces)).port)
+    ``CODEFLY_CONNECT_PORT`` over the gRPC server on ``grpc_port``, with ``serve``'s
+    ``options``. Without that variable the service does not set ``connect-endpoint``:
+    return None, starting nothing, and say why."""
+    port = os.environ.get(PORT_ENV)
+    if not port:
+        _log.warning(
+            "connect face: %s is unset, so connect-endpoint is off: not serving", PORT_ENV
+        )
         return None
-    port = int(os.environ.get(PORT_ENV) or DEFAULT_PORT)
-    return await serve(port, grpc_port, **options)
+    return await serve(int(port), grpc_port, **options)
+
+
+class _Frames:
+    """The HTTP/2 frame headers in one direction of a relayed connection, after the
+    preface: ``on_frame(type, flags, stream)`` for each, payloads skipped."""
+
+    def __init__(self, on_frame):
+        self._on_frame = on_frame
+        self._header = bytearray()
+        self._skip = 0
+
+    def feed(self, data: bytes) -> None:
+        at = 0
+        while at < len(data):
+            if self._skip:
+                step = min(self._skip, len(data) - at)
+                self._skip -= step
+                at += step
+                continue
+            step = min(_FRAME.size - len(self._header), len(data) - at)
+            self._header += data[at : at + step]
+            at += step
+            if len(self._header) == _FRAME.size:
+                high, low, kind, flags, stream = _FRAME.unpack(self._header)
+                self._header.clear()
+                self._skip = high << 16 | low
+                self._on_frame(kind, flags, stream & 0x7FFFFFFF)
 
 
 class _Connection:
@@ -230,17 +259,31 @@ class _Connection:
 
     async def _relay(self, reader, writer, head):
         """gRPC over HTTP/2: the bytes go to the gRPC server as they came, until the
-        connection has carried nothing either way for ``idle_timeout``."""
+        connection has had no open call for ``idle_timeout``. The frame headers say which
+        calls are open: the client's HEADERS opens one, and the server's END_STREAM or
+        either side's RST_STREAM ends it."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
         loop = asyncio.get_running_loop()
         last = loop.time()
+        calls: set[int] = set()
 
-        async def pump(source, sink):
+        def from_client(kind, flags, stream):
+            if kind == _HEADERS and stream:
+                calls.add(stream)
+            elif kind == _RST_STREAM:
+                calls.discard(stream)
+
+        def from_server(kind, flags, stream):
+            if kind == _RST_STREAM or (kind in (_DATA, _HEADERS) and flags & _END_STREAM_FLAG):
+                calls.discard(stream)
+
+        async def pump(source, sink, frames):
             nonlocal last
             try:
                 while chunk := await source.read(65536):
                     last = loop.time()
+                    frames.feed(chunk)
                     sink.write(chunk)
                     await sink.drain()
                 if sink.can_write_eof():
@@ -249,12 +292,19 @@ class _Connection:
                 pass
 
         async def idle():
-            # One bound for both directions: a server stream whose client sends nothing
-            # is not idle while the server answers.
-            while (remaining := last + self.idle_timeout - loop.time()) > 0:
-                await asyncio.sleep(remaining)
+            # The clock runs from the last byte either way, and only ends the connection
+            # while no call is open: a handler computing an answer sends nothing.
+            while True:
+                remaining = last + self.idle_timeout - loop.time()
+                if remaining <= 0 and not calls:
+                    return
+                await asyncio.sleep(remaining if remaining > 0 else self.idle_timeout)
 
-        pumps = asyncio.gather(pump(reader, upstream_writer), pump(upstream_reader, writer))
+        client, server = _Frames(from_client), _Frames(from_server)
+
+        pumps = asyncio.gather(
+            pump(reader, upstream_writer, client), pump(upstream_reader, writer, server)
+        )
         watchdog = asyncio.ensure_future(idle())
         try:
             await asyncio.wait((pumps, watchdog), return_when=asyncio.FIRST_COMPLETED)

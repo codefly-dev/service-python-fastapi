@@ -74,6 +74,12 @@ spec:
             # writable scratch mount so libraries that use ~/.cache still work.
             - name: HOME
               value: /tmp
+{{- if .Deployment.Parameters.ConnectEnabled }}
+            # connect-endpoint is on: the app serves the Connect face on this
+            # port, and only when the variable is set.
+            - name: CODEFLY_CONNECT_PORT
+              value: "{{ .Deployment.Parameters.ConnectPort }}"
+{{- end }}
 {{- if .Restricted }}
 {{- range $environmentVariable, $reference := .SecretReferences }}
             - name: {{ $environmentVariable }}

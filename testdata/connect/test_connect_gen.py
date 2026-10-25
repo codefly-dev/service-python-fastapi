@@ -345,26 +345,73 @@ async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
         upstream.close()
 
 
-async def test_start_serves_the_agents_port_once(monkeypatch):
+async def test_start_serves_only_on_the_agents_port(monkeypatch):
     server = grpc.aio.server()
     server.add_generic_rpc_handlers((_handler(),))
     grpc_port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
-    monkeypatch.setenv(connect_gen.PORT_ENV, "0")
     try:
-        # The service's own code started a face: the generated start opens no second one.
-        own = await connect_gen.serve(0, grpc_port, host="127.0.0.1")
+        # No CODEFLY_CONNECT_PORT: the service does not set connect-endpoint, whatever
+        # file is on disk, so nothing binds.
+        monkeypatch.delenv(connect_gen.PORT_ENV, raising=False)
         assert await connect_gen.start(grpc_port, host="127.0.0.1") is None
-        await own.stop()
+        monkeypatch.setenv(connect_gen.PORT_ENV, "0")
         started = await connect_gen.start(grpc_port, host="127.0.0.1")
         assert started is not None
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"http://127.0.0.1:{started.port}/echo.v1.Echo/Say",
-                json={"text": "s"},
-                headers={"content-type": "application/json", "x-caller": "zoe"},
-            )
-        assert r.json() == {"text": "s|zoe"}
-        await started.stop()
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{started.port}/echo.v1.Echo/Say",
+                    json={"text": "s"},
+                    headers={"content-type": "application/json", "x-caller": "zoe"},
+                )
+            assert r.json() == {"text": "s|zoe"}
+        finally:
+            await started.stop()
     finally:
         await server.stop(None)
+
+
+@pytest.fixture
+async def short_idle():
+    """A face whose idle bound (0.5 s) is shorter than the slow call (2 s)."""
+    server = grpc.aio.server(interceptors=(Proof(),))
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(
+        0, grpc_port, host="127.0.0.1", read_timeout=0.5, idle_timeout=0.5
+    )
+    try:
+        yield listener
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_a_grpc_call_in_flight_outlives_the_idle_bound(short_idle):
+    # The handler sends nothing for 2 s: an open call is never idle.
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
+        say_call = channel.unary_unary(
+            "/echo.v1.Echo/Say",
+            request_serializer=Msg.SerializeToString,
+            response_deserializer=Msg.FromString,
+        )
+        answer = await say_call(Msg(text="slow"), metadata=tuple(STAMP.items()), timeout=10)
+    assert answer.text == "slow|maya"
+
+
+async def test_a_grpc_connection_with_no_open_call_is_closed(short_idle):
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
+        say_call = channel.unary_unary(
+            "/echo.v1.Echo/Say",
+            request_serializer=Msg.SerializeToString,
+            response_deserializer=Msg.FromString,
+        )
+        assert (await say_call(Msg(text="q"), metadata=tuple(STAMP.items()))).text == "q|maya"
+        # The call ended: the relayed connection is idle, and closed past the bound.
+        for _ in range(30):
+            if not short_idle._connections:
+                break
+            await asyncio.sleep(0.1)
+        assert not short_idle._connections

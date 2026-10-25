@@ -125,3 +125,41 @@ func TestStartFailsWhenTheEndpointNeverAnswers(t *testing.T) {
 	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, env.started(), 2)
 }
+
+// TestStartRefusesAConnectFaceNobodyServes: with connect-endpoint on, an app
+// whose HTTP endpoint answers but whose main never starts the Connect face (a
+// src/main.py scaffolded before the generated main started it) is a failed
+// Start naming the setting and the fix, not a STARTED behind a refused port.
+func TestStartRefusesAConnectFaceNobodyServes(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	runtime, env := startTestRuntime(t)
+	runtime.serveAddress = server.URL
+	runtime.connectAddress = closedAddress(t)
+
+	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Contains(t, resp.GetStatus().GetMessage(), "connect-endpoint is on but nothing serves the Connect face")
+	require.Contains(t, resp.GetStatus().GetMessage(), "connect_gen.start")
+	require.True(t, env.started()[0].isStopped(), "the app that does not serve its face must be stopped")
+	require.Nil(t, currentRunner(runtime))
+}
+
+// TestStartWaitsForTheConnectFace: a face that answers, whatever the status
+// (it answers a GET with 405), is a STARTED service.
+func TestStartWaitsForTheConnectFace(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	face := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	t.Cleanup(face.Close)
+	runtime, _ := startTestRuntime(t)
+	runtime.serveAddress = server.URL
+	runtime.connectAddress = strings.TrimPrefix(face.URL, "http://")
+
+	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+}

@@ -78,11 +78,15 @@ func TestDeploymentRendersConnectPort(t *testing.T) {
 	deployment, err := os.ReadFile(filepath.Join(enabled, "base", "deployment.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(deployment), "containerPort: 8081")
+	require.Contains(t, string(deployment), "- name: CODEFLY_CONNECT_PORT\n              value: \"8081\"")
 
 	disabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{GRPCEnabled: true, GRPCPort: 9090}))
 	svc, err = os.ReadFile(filepath.Join(disabled, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(svc), "connect-port")
+	deployment, err = os.ReadFile(filepath.Join(disabled, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(deployment), "CODEFLY_CONNECT_PORT")
 }
 
 // TestConnectFaceServesEveryProtocol runs the face's own suite
@@ -163,9 +167,11 @@ func TestSyncConnectFaceFollowsTheSetting(t *testing.T) {
 }
 
 // TestGeneratedMainServesConnect boots a scaffolded gRPC service's own
-// src/main.py under uvicorn, as the runtime does. With connect-endpoint on,
-// Sync's face answers a Connect call on CODEFLY_CONNECT_PORT and stops with
-// the app; with it off, nothing listens there even with the variable set.
+// src/main.py under uvicorn, as the runtime does. With connect-endpoint on
+// (CODEFLY_CONNECT_PORT set, the face synced), the face answers a Connect call
+// and stops with the app. With it off (the variable unset), a face left on
+// disk binds nothing, not even its 8081 default. On but never synced, the app
+// refuses to start and says to sync.
 func TestGeneratedMainServesConnect(t *testing.T) {
 	if testing.Short() {
 		t.Skip("boots a scaffolded service with uv")
@@ -192,7 +198,7 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 
 	builder.FastAPI.Settings.ConnectEndpoint = true
 	require.NoError(t, builder.syncConnectFace())
-	app := bootScaffold(t, code)
+	app := bootScaffold(t, code, true)
 	request, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", app.connect),
 		strings.NewReader(`{"message":"over connect","addedLater":1}`))
@@ -208,12 +214,24 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 	app.stop(t)
 	require.False(t, listens(app.connect), "the face outlived the app")
 
-	builder.FastAPI.Settings.ConnectEndpoint = false
-	require.NoError(t, builder.syncConnectFace())
-	app = bootScaffold(t, code)
+	// Off, with the face still on disk (no sync since): the variable is the switch.
+	defaultFree := !listens(8081)
+	app = bootScaffold(t, code, false)
 	require.True(t, listens(app.grpc), "the gRPC server is up")
-	require.False(t, listens(app.connect), "a service without connect-endpoint opened the Connect port")
+	if defaultFree {
+		require.False(t, listens(8081), "a service without connect-endpoint bound the face's default port")
+	}
 	app.stop(t)
+
+	// On, never synced: the app says what is missing instead of serving no face.
+	require.NoError(t, os.Remove(filepath.Join(root, connectFacePath)))
+	refused := startScaffold(t, code, true)
+	select {
+	case <-refused.exited:
+	case <-time.After(3 * time.Minute):
+		t.Fatalf("the app served without its Connect face:\n%s", refused.output)
+	}
+	require.Contains(t, refused.output.String(), "src/rpc/connect_gen.py is missing: run `codefly sync service`")
 }
 
 type scaffoldApp struct {
@@ -223,22 +241,37 @@ type scaffoldApp struct {
 	rest, grpc, connect uint16
 }
 
-// bootScaffold runs the scaffold's app under uvicorn and returns once it
-// answers on its REST port: uvicorn listens only after every startup handler,
-// gRPC and Connect included, has run.
-func bootScaffold(t *testing.T, code string) *scaffoldApp {
+// startScaffold launches the scaffold's app under uvicorn with the variables
+// the runtime hands it: CODEFLY_CONNECT_PORT only when connect is on.
+func startScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
 	t.Helper()
 	app := &scaffoldApp{output: &lockedOutput{}, exited: make(chan error, 1),
 		rest: freePort(t), grpc: freePort(t), connect: freePort(t)}
 	app.cmd = exec.Command("uv", "run", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", fmt.Sprint(app.rest))
 	app.cmd.Dir = code
-	app.cmd.Env = append(os.Environ(),
-		fmt.Sprintf("CODEFLY_GRPC_PORT=%d", app.grpc),
-		fmt.Sprintf("CODEFLY_CONNECT_PORT=%d", app.connect))
+	environment := []string{fmt.Sprintf("CODEFLY_GRPC_PORT=%d", app.grpc)}
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "CODEFLY_CONNECT_PORT=") {
+			environment = append(environment, variable)
+		}
+	}
+	if connect {
+		environment = append(environment, fmt.Sprintf("CODEFLY_CONNECT_PORT=%d", app.connect))
+	}
+	app.cmd.Env = environment
 	app.cmd.Stdout, app.cmd.Stderr = app.output, app.output
 	require.NoError(t, app.cmd.Start())
 	go func() { app.exited <- app.cmd.Wait() }()
 	t.Cleanup(func() { _ = app.cmd.Process.Kill() })
+	return app
+}
+
+// bootScaffold starts the scaffold's app and returns once it answers on its
+// REST port: uvicorn listens only after every startup handler, gRPC and
+// Connect included, has run.
+func bootScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
+	t.Helper()
+	app := startScaffold(t, code, connect)
 	deadline := time.Now().Add(3 * time.Minute) // a cold uv sync
 	for !answers(app.rest) {
 		select {
