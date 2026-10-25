@@ -66,8 +66,11 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	defer s.Wool.Catch()
 
 	// Call generic first — it loads Settings, Endpoints, handles CreationMode.
+	// It reports a failure in the response's state, not the error: stop there,
+	// or the endpoint lookup below replaces the real cause with "no rest
+	// endpoint found".
 	resp, err := s.Builder.Load(ctx, req)
-	if err != nil {
+	if err != nil || resp.GetState().GetState() == builderv0.LoadStatus_ERROR {
 		return resp, err
 	}
 	requirements.Localize(s.Location)
