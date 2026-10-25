@@ -1,4 +1,5 @@
-import os
+{{ if .GRPCEnabled }}import importlib.util
+{{ end }}import os
 
 from codefly_sdk import codefly
 from fastapi import FastAPI
@@ -59,11 +60,16 @@ for plugin in plugins:
 # The port is provided by codefly at runtime; it falls back to the standard
 # gRPC port in container/Kubernetes where the mapping is fixed.
 _grpc_server = None
+# The Connect face (Connect, gRPC-Web and gRPC on one listener over the gRPC
+# server). codefly writes src/rpc/connect_gen.py at sync when the service sets
+# connect-endpoint and removes it when it does not, so the module being there is
+# the switch; it listens on CODEFLY_CONNECT_PORT.
+_connect_face = None
 
 
 @app.on_event("startup")
 async def _start_grpc():
-    global _grpc_server
+    global _grpc_server, _connect_face
     # Imported inside the handler, not at module load: the generated stubs
     # are produced by `codefly sync` and importing this module must not depend
     # on them (openapi.py imports src.main to emit the schema before sync).
@@ -71,10 +77,17 @@ async def _start_grpc():
 
     port = int(os.environ.get("CODEFLY_GRPC_PORT", "9090"))
     _grpc_server = await _grpc_serve(port)
+    if importlib.util.find_spec("src.rpc.connect_gen") is not None:
+        from src.rpc import connect_gen
+
+        # None when this process already serves a face the service started itself.
+        _connect_face = await connect_gen.start(port)
 
 
 @app.on_event("shutdown")
 async def _stop_grpc():
+    if _connect_face is not None:
+        await _connect_face.stop()
     if _grpc_server is not None:
         await _grpc_server.stop(grace=5)
 {{- end }}

@@ -18,12 +18,19 @@ metadata come back as headers and trailers. Client and bidirectional streams nee
 end to end, so they are served on the gRPC protocol only.
 
 Request bodies are bounded by ``max_message_bytes`` (gRPC's 4 MiB unless the service
-raises it) before they are read, and every read is bounded in time.
+raises it) before they are read, and every read is bounded in time: an HTTP/1.1 read by
+``read_timeout`` (``idle_timeout`` between requests), and a relayed gRPC connection is
+closed once it has carried no byte either way for ``idle_timeout``. A gRPC stream that
+must stay silent longer keeps its connection with HTTP/2 keepalive pings.
+A JSON request field the service's proto does not know is ignored, as connect-go's codec
+ignores it, so a client built from a newer proto calls a Python service and a Go one alike.
 
-The service starts it from its lifespan, beside its gRPC server, on the port the agent
-hands the process as ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` where the mapping is
-fixed). It needs ``grpcio``, ``protobuf`` and ``h11`` (uvicorn's own HTTP/1.1 parser) in
-the service's dependencies.
+The agent's generated ``src/main.py`` calls ``start`` once its gRPC server listens, on
+the port the agent hands the process as ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` where
+the mapping is fixed), and stops the face before that server. A service that starts the
+face from its own code with ``serve`` keeps that one: ``start`` serves nothing while a
+face started in this process is open. It needs ``grpcio``, ``protobuf`` and ``h11``
+(uvicorn's own HTTP/1.1 parser) in the service's dependencies.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import struct
 import zlib
@@ -42,7 +50,7 @@ import grpc
 import h11
 from google.protobuf import any_pb2, descriptor_pool, json_format, message_factory
 
-__all__ = ["ConnectFace", "serve"]
+__all__ = ["ConnectFace", "serve", "start"]
 
 PORT_ENV = "CODEFLY_CONNECT_PORT"
 DEFAULT_PORT = 8081
@@ -96,6 +104,9 @@ _CODES = {
 }
 
 _log = logging.getLogger("codefly.connect")
+# The faces open in this process, so ``start`` never opens a second listener beside one
+# the service's own code opened.
+_faces: set[ConnectFace] = set()
 
 
 class CallError(Exception):
@@ -132,6 +143,7 @@ class ConnectFace:
         self._connections: set[asyncio.Task] = set()
 
     async def stop(self, grace: float | None = 5.0) -> None:
+        _faces.discard(self)
         self._server.close()
         for task in list(self._connections):
             task.cancel()
@@ -182,7 +194,20 @@ async def serve(
     server = await asyncio.start_server(accepted, host, port)
     bound = server.sockets[0].getsockname()[1]
     face = ConnectFace(server, channel, bound)
+    _faces.add(face)
     return face
+
+
+async def start(grpc_port: int, **options) -> ConnectFace | None:
+    """Start the face the agent's generated ``src/main.py`` starts: on
+    ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` when unset) over the gRPC server on
+    ``grpc_port``, with ``serve``'s ``options``. Return None, starting nothing, while a
+    face started in this process is open: the service started its own."""
+    if _faces:
+        _log.info("connect face: already served on port %d", next(iter(_faces)).port)
+        return None
+    port = int(os.environ.get(PORT_ENV) or DEFAULT_PORT)
+    return await serve(port, grpc_port, **options)
 
 
 class _Connection:
@@ -204,13 +229,18 @@ class _Connection:
             await self._http1(reader, writer, head)
 
     async def _relay(self, reader, writer, head):
-        """gRPC over HTTP/2: the bytes go to the gRPC server as they came."""
+        """gRPC over HTTP/2: the bytes go to the gRPC server as they came, until the
+        connection has carried nothing either way for ``idle_timeout``."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
+        loop = asyncio.get_running_loop()
+        last = loop.time()
 
         async def pump(source, sink):
+            nonlocal last
             try:
                 while chunk := await source.read(65536):
+                    last = loop.time()
                     sink.write(chunk)
                     await sink.drain()
                 if sink.can_write_eof():
@@ -218,9 +248,20 @@ class _Connection:
             except (ConnectionError, OSError):
                 pass
 
+        async def idle():
+            # One bound for both directions: a server stream whose client sends nothing
+            # is not idle while the server answers.
+            while (remaining := last + self.idle_timeout - loop.time()) > 0:
+                await asyncio.sleep(remaining)
+
+        pumps = asyncio.gather(pump(reader, upstream_writer), pump(upstream_reader, writer))
+        watchdog = asyncio.ensure_future(idle())
         try:
-            await asyncio.gather(pump(reader, upstream_writer), pump(upstream_reader, writer))
+            await asyncio.wait((pumps, watchdog), return_when=asyncio.FIRST_COMPLETED)
         finally:
+            pumps.cancel()
+            watchdog.cancel()
+            await asyncio.gather(pumps, watchdog, return_exceptions=True)
             upstream_writer.close()
 
     async def _read(self, reader, timeout):
@@ -326,7 +367,10 @@ class _Codec:
         if self.name == "proto":
             return data
         try:
-            return json_format.Parse(data or b"{}", cls()).SerializeToString()
+            # Unknown fields are dropped, as connect-go's JSON codec does: a client built
+            # from a newer contract still reaches a service on the older one.
+            message = json_format.Parse(data or b"{}", cls(), ignore_unknown_fields=True)
+            return message.SerializeToString()
         except (json_format.ParseError, UnicodeDecodeError, ValueError) as exc:
             raise CallError(grpc.StatusCode.INVALID_ARGUMENT, f"unmarshal JSON: {exc}") from exc
 

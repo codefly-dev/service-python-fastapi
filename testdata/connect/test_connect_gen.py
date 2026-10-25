@@ -284,3 +284,87 @@ async def test_one_connection_serves_several_calls(face):
         assert chunk, seen
         seen += chunk
     writer.close()
+
+
+async def test_connect_json_ignores_unknown_fields(face):
+    # connect-go's JSON codec discards unknown fields: a client built from a newer
+    # contract reaches a Python service exactly as it reaches a Go one.
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            _url(face, "Say"),
+            json={"text": "hi", "count": 1, "addedLater": {"x": 1}},
+            headers={"content-type": "application/json", **STAMP},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"text": "hi|maya", "count": 1}
+
+
+async def test_a_silent_grpc_connection_is_closed_after_the_idle_bound():
+    # An upstream that accepts and never answers: only the face's own bound ends it.
+    upstream = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    listener = await connect_gen.serve(
+        0,
+        upstream.sockets[0].getsockname()[1],
+        host="127.0.0.1",
+        read_timeout=0.5,
+        idle_timeout=0.5,
+    )
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+        writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+        writer.close()
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
+    # Bytes in either direction keep the relay open: a server stream whose client sends
+    # nothing is not idle.
+    async def drip(reader, writer):
+        for _ in range(6):
+            writer.write(b".")
+            await writer.drain()
+            await asyncio.sleep(0.2)
+        writer.close()
+
+    upstream = await asyncio.start_server(drip, "127.0.0.1", 0)
+    listener = await connect_gen.serve(
+        0, upstream.sockets[0].getsockname()[1], host="127.0.0.1", idle_timeout=0.5
+    )
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+        writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b"......"
+        writer.close()
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_start_serves_the_agents_port_once(monkeypatch):
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    monkeypatch.setenv(connect_gen.PORT_ENV, "0")
+    try:
+        # The service's own code started a face: the generated start opens no second one.
+        own = await connect_gen.serve(0, grpc_port, host="127.0.0.1")
+        assert await connect_gen.start(grpc_port, host="127.0.0.1") is None
+        await own.stop()
+        started = await connect_gen.start(grpc_port, host="127.0.0.1")
+        assert started is not None
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"http://127.0.0.1:{started.port}/echo.v1.Echo/Say",
+                json={"text": "s"},
+                headers={"content-type": "application/json", "x-caller": "zoe"},
+            )
+        assert r.json() == {"text": "s|zoe"}
+        await started.stop()
+    finally:
+        await server.stop(None)
