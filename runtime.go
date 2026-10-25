@@ -153,6 +153,10 @@ type Runtime struct {
 	// connectPort is the mapped port for the Connect face, passed to the
 	// Python process as CODEFLY_CONNECT_PORT. Zero when Connect is disabled.
 	connectPort uint16
+	// connectAddress is the address Init resolved for the Connect face, which
+	// Start requires to answer once the HTTP endpoint does. Empty when Connect
+	// is disabled.
+	connectAddress string
 
 	cacheLocation string
 
@@ -506,6 +510,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Base.Runtime.InitError(connectErr)
 		}
 		s.connectPort = uint16(connectNet.Port)
+		s.connectAddress = connectNet.Address
 		s.Infof("connect will run on %s", connectNet.Address)
 	}
 
@@ -667,7 +672,8 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 	if s.connectPort != 0 {
 		// The same for the Connect face (src/rpc/connect_gen.py), which the
-		// lifespan starts over the gRPC server; its fixed fallback is 8081.
+		// app starts over the gRPC server on this variable alone: unset, it
+		// serves no face.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_CONNECT_PORT", s.connectPort))
 	}
 
@@ -741,11 +747,7 @@ func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error 
 	if s.serveAddress == "" {
 		return nil
 	}
-	target := s.serveAddress
-	if !strings.Contains(target, "://") {
-		target = "http://" + target
-	}
-	target = strings.TrimRight(target, "/") + "/"
+	target := httpTarget(s.serveAddress)
 	timeout := s.serveTimeout
 	if timeout <= 0 {
 		timeout = defaultServeTimeout
@@ -762,7 +764,7 @@ func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error 
 		err := answers(ctx, target)
 		if err == nil {
 			s.Infof("fastapi app serving on %s after %s", s.serveAddress, time.Since(started).Round(100*time.Millisecond))
-			return nil
+			return s.awaitConnect(ctx, answers)
 		}
 		last = err
 		if !s.runnerAlive(ctx, handle) {
@@ -776,6 +778,47 @@ func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error 
 		case <-time.After(servePollInterval):
 		}
 	}
+}
+
+// connectGrace is how long the Connect face may lag the HTTP endpoint. The
+// scaffold's main starts it in the startup uvicorn finishes before it listens,
+// so it normally answers at once; the grace covers an app that starts it from
+// its own lifespan a moment later.
+const connectGrace = 5 * time.Second
+
+// awaitConnect requires the Connect face to answer once the HTTP endpoint
+// does. connect-endpoint advertises the port to every consumer, so a process
+// that never serves it (a main.py scaffolded before the generated main started
+// the face) is refused by name rather than left STARTED with a port that
+// refuses connections. The face answers any HTTP request, a GET with 405.
+func (s *Runtime) awaitConnect(ctx context.Context, answers func(context.Context, string) error) error {
+	if s.connectAddress == "" {
+		return nil
+	}
+	target := httpTarget(s.connectAddress)
+	deadline := time.Now().Add(connectGrace)
+	for {
+		err := answers(ctx, target)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return fmt.Errorf("%s is on but nothing serves the Connect face at %s: the app must start it once its gRPC server listens, as the scaffold's src/main.py does (connect_gen.start(grpc_port) from src/rpc/connect_gen.py): %v", ConnectEndpointSetting, s.connectAddress, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(servePollInterval):
+		}
+	}
+}
+
+// httpTarget is address as the URL of its root, whether or not it carries a
+// scheme.
+func httpTarget(address string) string {
+	if !strings.Contains(address, "://") {
+		address = "http://" + address
+	}
+	return strings.TrimRight(address, "/") + "/"
 }
 
 // serveClient is what httpAnswers probes with: one bounded attempt, and a

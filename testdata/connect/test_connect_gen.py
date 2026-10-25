@@ -284,3 +284,250 @@ async def test_one_connection_serves_several_calls(face):
         assert chunk, seen
         seen += chunk
     writer.close()
+
+
+async def test_connect_json_ignores_unknown_fields(face):
+    # connect-go's JSON codec discards unknown fields: a client built from a newer
+    # contract reaches a Python service exactly as it reaches a Go one.
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            _url(face, "Say"),
+            json={"text": "hi", "count": 1, "addedLater": {"x": 1}},
+            headers={"content-type": "application/json", **STAMP},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"text": "hi|maya", "count": 1}
+
+
+async def test_a_silent_grpc_connection_is_closed_after_the_idle_bound():
+    # An upstream that accepts and never answers: only the face's own bound ends it.
+    upstream = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    listener = await connect_gen.serve(
+        0,
+        upstream.sockets[0].getsockname()[1],
+        host="127.0.0.1",
+        read_timeout=0.5,
+        idle_timeout=0.5,
+    )
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+        writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+        writer.close()
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
+    # Bytes in either direction keep the relay open: a server stream whose client sends
+    # nothing is not idle.
+    async def drip(reader, writer):
+        for _ in range(6):
+            writer.write(b".")
+            await writer.drain()
+            await asyncio.sleep(0.2)
+        writer.close()
+
+    upstream = await asyncio.start_server(drip, "127.0.0.1", 0)
+    listener = await connect_gen.serve(
+        0, upstream.sockets[0].getsockname()[1], host="127.0.0.1", idle_timeout=0.5
+    )
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+        writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 3) == b"......"
+        writer.close()
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_start_serves_only_on_the_agents_port(monkeypatch):
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        # No CODEFLY_CONNECT_PORT: the service does not set connect-endpoint, whatever
+        # file is on disk, so nothing binds.
+        monkeypatch.delenv(connect_gen.PORT_ENV, raising=False)
+        assert await connect_gen.start(grpc_port, host="127.0.0.1") is None
+        monkeypatch.setenv(connect_gen.PORT_ENV, "0")
+        started = await connect_gen.start(grpc_port, host="127.0.0.1")
+        assert started is not None
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"http://127.0.0.1:{started.port}/echo.v1.Echo/Say",
+                    json={"text": "s"},
+                    headers={"content-type": "application/json", "x-caller": "zoe"},
+                )
+            assert r.json() == {"text": "s|zoe"}
+        finally:
+            await started.stop()
+    finally:
+        await server.stop(None)
+
+
+@pytest.fixture
+async def short_idle():
+    """A face whose idle bound (0.5 s) is shorter than the slow call (2 s)."""
+    server = grpc.aio.server(interceptors=(Proof(),))
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(
+        0, grpc_port, host="127.0.0.1", read_timeout=0.5, idle_timeout=0.5
+    )
+    try:
+        yield listener
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_a_grpc_call_in_flight_outlives_the_idle_bound(short_idle):
+    # The handler sends nothing for 2 s: an open call is never idle.
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
+        say_call = channel.unary_unary(
+            "/echo.v1.Echo/Say",
+            request_serializer=Msg.SerializeToString,
+            response_deserializer=Msg.FromString,
+        )
+        answer = await say_call(Msg(text="slow"), metadata=tuple(STAMP.items()), timeout=10)
+    assert answer.text == "slow|maya"
+
+
+async def test_a_grpc_connection_with_no_open_call_is_closed(short_idle):
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
+        say_call = channel.unary_unary(
+            "/echo.v1.Echo/Say",
+            request_serializer=Msg.SerializeToString,
+            response_deserializer=Msg.FromString,
+        )
+        assert (await say_call(Msg(text="q"), metadata=tuple(STAMP.items()))).text == "q|maya"
+        # The call ended: the relayed connection is idle, and closed past the bound.
+        for _ in range(30):
+            if not short_idle._connections:
+                break
+            await asyncio.sleep(0.1)
+        assert not short_idle._connections
+
+
+PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+
+def h2_frame(kind, flags, stream, payload=b""):
+    size = len(payload)
+    return struct.pack(">BHBBI", size >> 16, size & 0xFFFF, kind, flags, stream) + payload
+
+
+SETTINGS = h2_frame(0x4, 0, 0)
+
+
+def opens(stream):
+    """A HEADERS frame opening ``stream`` (END_HEADERS; one indexed field)."""
+    return h2_frame(0x1, 0x4, stream, b"\x82")
+
+
+@pytest.fixture
+async def silent_upstream():
+    """A gRPC address that accepts, reads everything and never answers, so only the face's
+    own rules end a connection relayed to it, and ``face(**options)`` serving over it.
+    ``state["close_after"]`` makes it hang up after that many seconds instead."""
+    held, faces = [], []
+    state = {"close_after": None}
+
+    async def accept(reader, writer):
+        held.append(writer)
+        if state["close_after"] is not None:
+            await asyncio.sleep(state["close_after"])
+            writer.close()
+            return
+        while await reader.read(65536):
+            pass
+
+    upstream = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = upstream.sockets[0].getsockname()[1]
+
+    async def face(**options):
+        listener = await connect_gen.serve(0, port, host="127.0.0.1", **options)
+        faces.append(listener)
+        return listener
+
+    try:
+        yield face, state
+    finally:
+        for listener in faces:
+            await listener.stop()
+        for writer in held:
+            writer.close()
+        upstream.close()
+
+
+async def closed_within(listener, payload, seconds):
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    writer.write(payload)
+    await writer.drain()
+    try:
+        async with asyncio.timeout(seconds):
+            while await reader.read(65536):
+                pass
+        return True
+    except TimeoutError:
+        return False
+    finally:
+        writer.close()
+
+
+async def test_a_client_opening_an_even_stream_is_closed(silent_upstream):
+    # A client never opens an even stream; grpcio ignores one silently, so a face that
+    # recorded it as a call would hold the connection, and its memory, forever.
+    face, _ = silent_upstream
+    payload = PREFACE + SETTINGS + b"".join(opens(2 * n) for n in range(1, 1000))
+    assert await closed_within(await face(), payload, 2)
+
+
+async def test_open_calls_on_one_connection_are_bounded(silent_upstream):
+    face, _ = silent_upstream
+    listener = await face()
+    calls = connect_gen.DEFAULT_MAX_OPEN_CALLS
+    within = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls))
+    assert not await closed_within(listener, within, 1)
+    beyond = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls + 1))
+    assert await closed_within(listener, beyond, 2)
+
+
+async def test_a_stream_id_below_the_highest_opens_no_call(silent_upstream):
+    # 1 and 99 are calls; 3 after 99 is not a new one. Once 1 and 99 are reset no call is
+    # open, and the connection is closed past the idle bound.
+    face, _ = silent_upstream
+    reset = lambda stream: h2_frame(0x3, 0, stream, b"\x00\x00\x00\x08")  # noqa: E731
+    payload = PREFACE + SETTINGS + opens(1) + opens(99) + opens(3) + reset(1) + reset(99)
+    assert await closed_within(await face(idle_timeout=0.5), payload, 2)
+
+
+async def test_the_relay_ends_when_the_grpc_server_hangs_up(silent_upstream):
+    # A call is recorded open and the client is silent: the server closing its side
+    # still ends the connection, rather than leaving the client's open.
+    face, state = silent_upstream
+    state["close_after"] = 0.3
+    listener = await face()
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    writer.write(PREFACE + SETTINGS + opens(1))
+    await writer.drain()
+    try:
+        await asyncio.sleep(0.1)
+        assert listener._connections, "the face took the connection"
+        await asyncio.sleep(0.3)  # the server hangs up
+        for _ in range(20):
+            if not listener._connections:
+                break
+            await asyncio.sleep(0.1)
+        assert not listener._connections, "the face still holds the client's connection"
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+    finally:
+        writer.close()

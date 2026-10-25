@@ -18,12 +18,20 @@ metadata come back as headers and trailers. Client and bidirectional streams nee
 end to end, so they are served on the gRPC protocol only.
 
 Request bodies are bounded by ``max_message_bytes`` (gRPC's 4 MiB unless the service
-raises it) before they are read, and every read is bounded in time.
+raises it) before they are read, and every read is bounded in time: an HTTP/1.1 read by
+``read_timeout`` (``idle_timeout`` between requests), and a relayed gRPC connection is
+closed once it has had no open call for ``idle_timeout``, as Go's HTTP/2 server bounds an
+idle connection. A call in flight is never cut by the face, however long its handler
+takes to answer: its deadline and the gRPC server's own policy bound it.
+A JSON request field the service's proto does not know is ignored, as connect-go's codec
+ignores it, so a client built from a newer proto calls a Python service and a Go one alike.
 
-The service starts it from its lifespan, beside its gRPC server, on the port the agent
-hands the process as ``CODEFLY_CONNECT_PORT`` (``DEFAULT_PORT`` where the mapping is
-fixed). It needs ``grpcio``, ``protobuf`` and ``h11`` (uvicorn's own HTTP/1.1 parser) in
-the service's dependencies.
+The agent hands the process ``CODEFLY_CONNECT_PORT`` exactly when the service sets
+``connect-endpoint``, locally and in its deployment. The agent's generated
+``src/main.py`` then calls ``start`` once its gRPC server listens and stops the face
+before that server; a service with its own main calls ``serve`` itself. It needs
+``grpcio``, ``protobuf`` and ``h11`` (uvicorn's own HTTP/1.1 parser) in the service's
+dependencies.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import struct
 import zlib
@@ -42,15 +51,27 @@ import grpc
 import h11
 from google.protobuf import any_pb2, descriptor_pool, json_format, message_factory
 
-__all__ = ["ConnectFace", "serve"]
+__all__ = ["ConnectFace", "serve", "start"]
 
 PORT_ENV = "CODEFLY_CONNECT_PORT"
+# The port a deployment hands the face (CODEFLY_CONNECT_PORT); ``start`` reads only the variable.
 DEFAULT_PORT = 8081
 DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 DEFAULT_READ_TIMEOUT_S = 30.0
 DEFAULT_IDLE_TIMEOUT_S = 120.0
 
 _PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+# An HTTP/2 frame header: 24-bit length, type, flags, stream id (RFC 9113 section 4.1).
+_FRAME = struct.Struct(">BHBBI")
+_DATA, _HEADERS, _RST_STREAM, _SETTINGS, _GOAWAY = 0x0, 0x1, 0x3, 0x4, 0x7
+_END_STREAM_FLAG, _ACK_FLAG = 0x1, 0x1
+_MAX_CONCURRENT_STREAMS = 0x3
+# Calls one relayed connection may hold open when the gRPC server advertises no
+# SETTINGS_MAX_CONCURRENT_STREAMS (grpcio advertises none); past it the face closes the
+# connection, so what it tracks per connection is bounded.
+DEFAULT_MAX_OPEN_CALLS = 1000
+# The most of a SETTINGS or GOAWAY payload the relay reads; the rest is skipped.
+_CONTROL_PAYLOAD = 256
 _ENVELOPE = struct.Struct(">BI")
 _COMPRESSED, _END_STREAM, _TRAILERS = 0x01, 0x02, 0x80
 _STATUS_DETAILS = "grpc-status-details-bin"
@@ -185,6 +206,75 @@ async def serve(
     return face
 
 
+async def start(grpc_port: int, **options) -> ConnectFace | None:
+    """Start the face the agent's generated ``src/main.py`` starts: on
+    ``CODEFLY_CONNECT_PORT`` over the gRPC server on ``grpc_port``, with ``serve``'s
+    ``options``. Without that variable the service does not set ``connect-endpoint``:
+    return None, starting nothing, and say why."""
+    port = os.environ.get(PORT_ENV)
+    if not port:
+        _log.warning(
+            "connect face: %s is unset, so connect-endpoint is off: not serving", PORT_ENV
+        )
+        return None
+    return await serve(int(port), grpc_port, **options)
+
+
+class _ProtocolError(Exception):
+    """A client frame no HTTP/2 client may send: the relay closes the connection."""
+
+
+class _Frames:
+    """The HTTP/2 frames in one direction of a relayed connection, after the preface:
+    ``on_frame(type, flags, stream, payload)`` for each. The payload is read for SETTINGS
+    and GOAWAY only (at most ``_CONTROL_PAYLOAD`` bytes of it) and skipped otherwise."""
+
+    def __init__(self, on_frame):
+        self._on_frame = on_frame
+        self._header = bytearray()
+        self._frame = None  # (type, flags, stream) while its payload is read
+        self._payload = bytearray()
+        self._keep = 0  # payload bytes still to read
+        self._skip = 0  # payload bytes still to skip
+
+    def feed(self, data: bytes) -> None:
+        at = 0
+        while at < len(data):
+            if self._keep:
+                step = min(self._keep, len(data) - at)
+                self._payload += data[at : at + step]
+                self._keep -= step
+                at += step
+                if not self._keep:
+                    self._emit()
+                continue
+            if self._skip:
+                step = min(self._skip, len(data) - at)
+                self._skip -= step
+                at += step
+                continue
+            step = min(_FRAME.size - len(self._header), len(data) - at)
+            self._header += data[at : at + step]
+            at += step
+            if len(self._header) == _FRAME.size:
+                high, low, kind, flags, stream = _FRAME.unpack(self._header)
+                self._header.clear()
+                length = high << 16 | low
+                self._frame = (kind, flags, stream & 0x7FFFFFFF)
+                if kind in (_SETTINGS, _GOAWAY):
+                    self._keep = min(length, _CONTROL_PAYLOAD)
+                    self._skip = length - self._keep
+                else:
+                    self._skip = length
+                if not self._keep:
+                    self._emit()
+
+    def _emit(self):
+        payload = bytes(self._payload)
+        self._payload.clear()
+        self._on_frame(*self._frame, payload)
+
+
 class _Connection:
     def __init__(self, channel, grpc_address, limit, read_timeout, idle_timeout):
         self.channel, self.grpc_address, self.limit = channel, grpc_address, limit
@@ -204,23 +294,88 @@ class _Connection:
             await self._http1(reader, writer, head)
 
     async def _relay(self, reader, writer, head):
-        """gRPC over HTTP/2: the bytes go to the gRPC server as they came."""
+        """gRPC over HTTP/2: the bytes go to the gRPC server as they came, until either
+        side closes, or the connection has had no open call for ``idle_timeout``.
+
+        The frame headers say which calls are open: a client HEADERS on a new stream (odd,
+        above every stream before it) opens one, and the server's END_STREAM, either
+        side's RST_STREAM, or the server's GOAWAY above the stream ends it. A client that
+        opens an even stream, or more calls than the server allows at once
+        (SETTINGS_MAX_CONCURRENT_STREAMS, ``DEFAULT_MAX_OPEN_CALLS`` when it advertises
+        none), is closed: no HTTP/2 client does either."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
+        loop = asyncio.get_running_loop()
+        last = loop.time()
+        calls: set[int] = set()
+        highest = 0
+        max_calls = DEFAULT_MAX_OPEN_CALLS
 
-        async def pump(source, sink):
+        def from_client(kind, flags, stream, payload):
+            nonlocal highest
+            if kind == _HEADERS:
+                if stream % 2 == 0:
+                    raise _ProtocolError(f"HEADERS on stream {stream}, which a server opens")
+                if stream <= highest:
+                    # Trailers on a call, or a stream the server refuses as closed:
+                    # never a new call.
+                    return
+                highest = stream
+                if len(calls) >= max_calls:
+                    raise _ProtocolError(f"more than {max_calls} calls open at once")
+                calls.add(stream)
+            elif kind == _RST_STREAM:
+                calls.discard(stream)
+
+        def from_server(kind, flags, stream, payload):
+            nonlocal max_calls
+            if kind == _RST_STREAM or (kind in (_DATA, _HEADERS) and flags & _END_STREAM_FLAG):
+                calls.discard(stream)
+            elif kind == _SETTINGS and not flags & _ACK_FLAG:
+                for at in range(0, len(payload) - 5, 6):
+                    key, value = struct.unpack_from(">HI", payload, at)
+                    if key == _MAX_CONCURRENT_STREAMS:
+                        max_calls = value
+            elif kind == _GOAWAY and len(payload) >= 4:
+                # Streams above the last one the server processes are never answered.
+                last_stream = struct.unpack_from(">I", payload)[0] & 0x7FFFFFFF
+                calls.difference_update({call for call in calls if call > last_stream})
+
+        async def pump(source, sink, frames):
+            nonlocal last
             try:
                 while chunk := await source.read(65536):
+                    last = loop.time()
+                    frames.feed(chunk)
                     sink.write(chunk)
                     await sink.drain()
-                if sink.can_write_eof():
-                    sink.write_eof()
             except (ConnectionError, OSError):
                 pass
+            except _ProtocolError as refusal:
+                _log.info("connect face: closing a gRPC connection: %s", refusal)
 
+        async def idle():
+            # The clock runs from the last byte either way, and only ends the connection
+            # while no call is open: a handler computing an answer sends nothing.
+            while True:
+                remaining = last + self.idle_timeout - loop.time()
+                if remaining <= 0 and not calls:
+                    return
+                await asyncio.sleep(remaining if remaining > 0 else self.idle_timeout)
+
+        tasks = (
+            asyncio.ensure_future(pump(reader, upstream_writer, _Frames(from_client))),
+            asyncio.ensure_future(pump(upstream_reader, writer, _Frames(from_server))),
+            asyncio.ensure_future(idle()),
+        )
         try:
-            await asyncio.gather(pump(reader, upstream_writer), pump(upstream_reader, writer))
+            # Either side closing ends the relay: an HTTP/2 connection is not half-closed,
+            # and a call still recorded open cannot be answered once its server has gone.
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             upstream_writer.close()
 
     async def _read(self, reader, timeout):
@@ -326,7 +481,10 @@ class _Codec:
         if self.name == "proto":
             return data
         try:
-            return json_format.Parse(data or b"{}", cls()).SerializeToString()
+            # Unknown fields are dropped, as connect-go's JSON codec does: a client built
+            # from a newer contract still reaches a service on the older one.
+            message = json_format.Parse(data or b"{}", cls(), ignore_unknown_fields=True)
+            return message.SerializeToString()
         except (json_format.ParseError, UnicodeDecodeError, ValueError) as exc:
             raise CallError(grpc.StatusCode.INVALID_ARGUMENT, f"unmarshal JSON: {exc}") from exc
 

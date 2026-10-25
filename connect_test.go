@@ -2,10 +2,18 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	agenttesting "github.com/codefly-dev/core/agents/testing"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
@@ -70,11 +78,15 @@ func TestDeploymentRendersConnectPort(t *testing.T) {
 	deployment, err := os.ReadFile(filepath.Join(enabled, "base", "deployment.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(deployment), "containerPort: 8081")
+	require.Contains(t, string(deployment), "- name: CODEFLY_CONNECT_PORT\n              value: \"8081\"")
 
 	disabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{GRPCEnabled: true, GRPCPort: 9090}))
 	svc, err = os.ReadFile(filepath.Join(disabled, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(svc), "connect-port")
+	deployment, err = os.ReadFile(filepath.Join(disabled, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(deployment), "CODEFLY_CONNECT_PORT")
 }
 
 // TestConnectFaceServesEveryProtocol runs the face's own suite
@@ -129,4 +141,195 @@ func TestBuilderLoadReadsTheAgentsSettings(t *testing.T) {
 	require.True(t, loaded.FastAPI.Settings.GRPCServer.Enabled)
 	require.True(t, loaded.FastAPI.Settings.ConnectEndpoint)
 	require.Equal(t, filepath.Join(created.Location, "code"), loaded.Service.SourceLocation)
+}
+
+// TestSyncConnectFaceFollowsTheSetting proves Sync removes the face it wrote
+// once connect-endpoint is off (the scaffold's main starts the face whenever
+// the module is there) and leaves a file at that path the agent did not write.
+func TestSyncConnectFaceFollowsTheSetting(t *testing.T) {
+	builder := NewBuilder(NewService())
+	builder.Location = t.TempDir()
+	builder.FastAPI.Settings.GRPCServer.Enabled = true
+	target := filepath.Join(builder.Location, connectFacePath)
+
+	builder.FastAPI.Settings.ConnectEndpoint = true
+	require.NoError(t, builder.syncConnectFace())
+	require.FileExists(t, target)
+
+	builder.FastAPI.Settings.ConnectEndpoint = false
+	require.NoError(t, builder.syncConnectFace())
+	require.NoFileExists(t, target)
+	require.NoError(t, builder.syncConnectFace(), "nothing to remove is not an error")
+
+	require.NoError(t, os.WriteFile(target, []byte("# the service's own\n"), 0o644))
+	require.NoError(t, builder.syncConnectFace())
+	require.FileExists(t, target)
+}
+
+// TestGeneratedMainServesConnect boots a scaffolded gRPC service's own
+// src/main.py under uvicorn, as the runtime does. With connect-endpoint on
+// (CODEFLY_CONNECT_PORT set, the face synced), the face answers a Connect call
+// and stops with the app. With it off (the variable unset), a face left on
+// disk binds nothing, not even its 8081 default. On but never synced, the app
+// refuses to start and says to sync.
+func TestGeneratedMainServesConnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("boots a scaffolded service with uv")
+	}
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv is not installed: the scaffolded service cannot run")
+	}
+	builder, root := createServiceForTest(t, map[string]*agentv0.Answer{
+		HotReload:      confirmAnswer(false),
+		PublicEndpoint: confirmAnswer(false),
+		GRPCServer:     confirmAnswer(true),
+	})
+	code := filepath.Join(root, "code")
+	// The stubs Sync generates with Buf, generated the way the scaffold's own
+	// tests/rpc/conftest.py does when run directly: same plugins, no network
+	// plugin registry.
+	generated := filepath.Join(code, "src", "rpc", "_generated")
+	require.NoError(t, os.MkdirAll(generated, 0o755))
+	protoc := exec.Command("uv", "run", "python", "-m", "grpc_tools.protoc",
+		"-I../proto", "--python_out=src/rpc/_generated", "--grpc_python_out=src/rpc/_generated", "../proto/api.proto")
+	protoc.Dir = code
+	out, err := protoc.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+
+	builder.FastAPI.Settings.ConnectEndpoint = true
+	require.NoError(t, builder.syncConnectFace())
+	app := bootScaffold(t, code, true)
+	request, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", app.connect),
+		strings.NewReader(`{"message":"over connect","addedLater":1}`))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
+	require.JSONEq(t, `{"message":"over connect"}`, string(body))
+	app.stop(t)
+	require.False(t, listens(app.connect), "the face outlived the app")
+
+	// Off, with the face still on disk (no sync since): the variable is the switch.
+	defaultFree := !listens(8081)
+	app = bootScaffold(t, code, false)
+	require.True(t, listens(app.grpc), "the gRPC server is up")
+	if defaultFree {
+		require.False(t, listens(8081), "a service without connect-endpoint bound the face's default port")
+	}
+	app.stop(t)
+
+	// On, never synced: the app says what is missing instead of serving no face.
+	require.NoError(t, os.Remove(filepath.Join(root, connectFacePath)))
+	refused := startScaffold(t, code, true)
+	select {
+	case <-refused.exited:
+	case <-time.After(3 * time.Minute):
+		t.Fatalf("the app served without its Connect face:\n%s", refused.output)
+	}
+	require.Contains(t, refused.output.String(), "src/rpc/connect_gen.py is missing: run `codefly sync service`")
+}
+
+type scaffoldApp struct {
+	cmd                 *exec.Cmd
+	exited              chan error
+	output              *lockedOutput
+	rest, grpc, connect uint16
+}
+
+// startScaffold launches the scaffold's app under uvicorn with the variables
+// the runtime hands it: CODEFLY_CONNECT_PORT only when connect is on.
+func startScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
+	t.Helper()
+	app := &scaffoldApp{output: &lockedOutput{}, exited: make(chan error, 1),
+		rest: freePort(t), grpc: freePort(t), connect: freePort(t)}
+	app.cmd = exec.Command("uv", "run", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", fmt.Sprint(app.rest))
+	app.cmd.Dir = code
+	environment := []string{fmt.Sprintf("CODEFLY_GRPC_PORT=%d", app.grpc)}
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "CODEFLY_CONNECT_PORT=") {
+			environment = append(environment, variable)
+		}
+	}
+	if connect {
+		environment = append(environment, fmt.Sprintf("CODEFLY_CONNECT_PORT=%d", app.connect))
+	}
+	app.cmd.Env = environment
+	app.cmd.Stdout, app.cmd.Stderr = app.output, app.output
+	require.NoError(t, app.cmd.Start())
+	go func() { app.exited <- app.cmd.Wait() }()
+	t.Cleanup(func() { _ = app.cmd.Process.Kill() })
+	return app
+}
+
+// bootScaffold starts the scaffold's app and returns once it answers on its
+// REST port: uvicorn listens only after every startup handler, gRPC and
+// Connect included, has run.
+func bootScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
+	t.Helper()
+	app := startScaffold(t, code, connect)
+	deadline := time.Now().Add(3 * time.Minute) // a cold uv sync
+	for !answers(app.rest) {
+		select {
+		case err := <-app.exited:
+			t.Fatalf("the app exited before serving: %v\n%s", err, app.output)
+		case <-time.After(200 * time.Millisecond):
+		}
+		require.True(t, time.Now().Before(deadline), "the app never served:\n%s", app.output)
+	}
+	return app
+}
+
+// stop asks uvicorn to shut down, which runs the app's shutdown handlers.
+func (a *scaffoldApp) stop(t *testing.T) {
+	t.Helper()
+	require.NoError(t, a.cmd.Process.Signal(syscall.SIGTERM))
+	select {
+	case <-a.exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the app did not stop:\n%s", a.output)
+	}
+	require.NotContains(t, a.output.String(), "Traceback", a.output.String())
+}
+
+// answers reports whether the scaffold's /version route answers.
+func answers(port uint16) bool {
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/version", port))
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// lockedOutput is the app's combined output, read while the app writes it.
+type lockedOutput struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (o *lockedOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.Write(p)
+}
+
+func (o *lockedOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.String()
+}
+
+func listens(port uint16) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
