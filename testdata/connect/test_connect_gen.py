@@ -64,12 +64,18 @@ async def say(request, context):
         await context.abort(grpc.StatusCode.PERMISSION_DENIED, "denied: not yours")
     if request.text == "slow":
         await asyncio.sleep(2)
+    if request.text == "big":
+        # An answer of ``count`` bytes from a request of a few.
+        return Msg(text="x" * request.count)
     await context.send_initial_metadata((("x-answer", "header"),))
     context.set_trailing_metadata((("x-trail", "trailer"), ("x-raw-bin", b"\x00\xff")))
     return Msg(text=f"{request.text}|{metadata.get('x-caller', '')}", count=request.count)
 
 
 async def count(request, context):
+    if request.text == "big":
+        yield Msg(text="x" * request.count)
+        return
     for n in range(request.count):
         yield Msg(text=request.text, count=n)
     if request.text == "fail":
@@ -268,6 +274,118 @@ async def test_http_refusals(face):
         )
     assert (unknown.status_code, get.status_code, media.status_code) == (404, 405, 415)
     assert big.status_code == 413
+    assert big.text == "content length (4096) exceeds the message bound"
+
+
+async def test_an_oversized_request_never_reaches_the_service(face):
+    # A separate response bound leaves requests past 1024 bytes refused.
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            _url(face, "Say"),
+            content=(request := Msg(text="x" * 2048).SerializeToString()),
+            headers={"content-type": "application/proto", **STAMP},
+        )
+    assert r.status_code == 413
+    assert r.text == f"content length ({len(request)}) exceeds the message bound"
+
+
+@pytest.mark.parametrize("size", [393 * 1024, 5 * 1024 * 1024])
+async def test_an_answer_larger_than_the_request_bound_is_answered(face, size):
+    # The face bounds requests at 1024 bytes; embedding-sized answers and answers
+    # above grpcio's default 4 MiB receive bound still come back on every protocol.
+    big = Msg(text="big", count=size)
+    async with httpx.AsyncClient() as client:
+        unary = await client.post(
+            _url(face, "Say"),
+            content=big.SerializeToString(),
+            headers={"content-type": "application/proto", **STAMP},
+        )
+        as_json = await client.post(
+            _url(face, "Say"),
+            json={"text": "big", "count": size},
+            headers={"content-type": "application/json", **STAMP},
+        )
+        web = await client.post(
+            _url(face, "Say"),
+            content=envelope(big.SerializeToString()),
+            headers={"content-type": "application/grpc-web+proto", **STAMP},
+        )
+        stream = await client.post(
+            _url(face, "Count"),
+            content=envelope(big.SerializeToString()),
+            headers={"content-type": "application/connect+proto", **STAMP},
+        )
+    assert unary.status_code == 200, unary.text
+    assert Msg.FromString(unary.content).text == "x" * size
+    assert as_json.status_code == 200, as_json.text
+    assert as_json.json() == {"text": "x" * size}
+    out = frames(web.content)
+    assert Msg.FromString(out[0][1]).text == "x" * size
+    assert "grpc-status: 0" in out[-1][1].decode()
+    out = frames(stream.content)
+    assert Msg.FromString(out[0][1]).text == "x" * size
+    assert out[-1] == (0x02, b"{}")
+
+
+@pytest.mark.parametrize(
+    "media",
+    [
+        "application/json",
+        "application/proto",
+        "application/connect+proto",
+        "application/connect+json",
+        "application/grpc-web+proto",
+    ],
+)
+async def test_max_response_bytes_bounds_answers_when_set(media):
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = None
+    try:
+        listener = await connect_gen.serve(
+            0, grpc_port, host="127.0.0.1", max_message_bytes=1024, max_response_bytes=2048
+        )
+        streaming = media.startswith("application/connect+")
+        enveloped = streaming or "grpc-web" in media
+        async with httpx.AsyncClient() as client:
+            for size in (1024, 4096):
+                message = Msg(text="big", count=size)
+                body = (
+                    json.dumps({"text": "big", "count": size}).encode()
+                    if "json" in media
+                    else message.SerializeToString()
+                )
+                r = await client.post(
+                    _url(listener, "Count" if streaming else "Say"),
+                    content=envelope(body) if enveloped else body,
+                    headers={"content-type": media},
+                )
+                if size == 1024:
+                    assert r.status_code == 200, r.text
+                    data = frames(r.content)[0][1] if enveloped else r.content
+                    text = (
+                        json.loads(data)["text"] if "json" in media else Msg.FromString(data).text
+                    )
+                    assert text == "x" * size
+                elif "grpc-web" in media:
+                    assert "grpc-status: 8" in frames(r.content)[-1][1].decode()
+                    assert "larger than max" in frames(r.content)[-1][1].decode()
+                else:
+                    if streaming:
+                        assert r.status_code == 200
+                        assert len(frames(r.content)) == 1
+                        error = json.loads(frames(r.content)[0][1])["error"]
+                    else:
+                        assert r.status_code == 429
+                        error = r.json()
+                    assert error["code"] == "resource_exhausted"
+                    assert "larger than max" in error["message"], error
+    finally:
+        if listener is not None:
+            await listener.stop()
+        await server.stop(None)
 
 
 async def test_one_connection_serves_several_calls(face):

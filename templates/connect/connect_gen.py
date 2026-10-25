@@ -18,7 +18,12 @@ metadata come back as headers and trailers. Client and bidirectional streams nee
 end to end, so they are served on the gRPC protocol only.
 
 Request bodies are bounded by ``max_message_bytes`` (gRPC's 4 MiB unless the service
-raises it) before they are read, and every read is bounded in time: an HTTP/1.1 read by
+raises it) before they are read. An answer the face transcodes is bounded apart, by
+``max_response_bytes`` (64 MiB unless the service sets it), so a service that keeps its
+requests small still answers with what its handler returns; past it the call ends
+``resource_exhausted``. Both are keyword options to ``serve`` and ``start``; a relayed gRPC
+call keeps the service's and the caller's own bounds. Every read is bounded in time: an
+HTTP/1.1 read by
 ``read_timeout`` (``idle_timeout`` between requests), and a relayed gRPC connection is
 closed once it has had no open call for ``idle_timeout``, as Go's HTTP/2 server bounds an
 idle connection. A call in flight is never cut by the face, however long its handler
@@ -57,6 +62,7 @@ PORT_ENV = "CODEFLY_CONNECT_PORT"
 # The port a deployment hands the face (CODEFLY_CONNECT_PORT); ``start`` reads only the variable.
 DEFAULT_PORT = 8081
 DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 DEFAULT_READ_TIMEOUT_S = 30.0
 DEFAULT_IDLE_TIMEOUT_S = 120.0
 
@@ -183,6 +189,7 @@ async def serve(
     host: str = "0.0.0.0",
     grpc_host: str = "127.0.0.1",
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     read_timeout: float = DEFAULT_READ_TIMEOUT_S,
     idle_timeout: float = DEFAULT_IDLE_TIMEOUT_S,
 ) -> ConnectFace:
@@ -193,7 +200,8 @@ async def serve(
     channel = grpc.aio.insecure_channel(
         target,
         options=[
-            ("grpc.max_receive_message_length", max_message_bytes),
+            # The face receives the service's answers and sends it the requests.
+            ("grpc.max_receive_message_length", max_response_bytes),
             ("grpc.max_send_message_length", max_message_bytes),
         ],
     )
