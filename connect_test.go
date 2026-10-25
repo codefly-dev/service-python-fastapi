@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -211,6 +212,8 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
 	require.JSONEq(t, `{"message":"over connect"}`, string(body))
+	require.Equal(t, uint32(1000), advertisedMaxStreams(t, app.grpc),
+		"the scaffold's gRPC server advertises the limit the face enforces, so a burst queues in the client")
 	app.stop(t)
 	require.False(t, listens(app.connect), "the face outlived the app")
 
@@ -323,6 +326,35 @@ func (o *lockedOutput) String() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.buf.String()
+}
+
+// advertisedMaxStreams reads SETTINGS_MAX_CONCURRENT_STREAMS from the first
+// SETTINGS frame the gRPC server on port sends; 0 when it advertises none.
+func advertisedMaxStreams(t *testing.T, port uint16) uint32 {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	_, err = conn.Write(append([]byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"), 0, 0, 0, 4, 0, 0, 0, 0, 0))
+	require.NoError(t, err)
+	for {
+		header := make([]byte, 9)
+		_, err = io.ReadFull(conn, header)
+		require.NoError(t, err)
+		payload := make([]byte, int(header[0])<<16|int(header[1])<<8|int(header[2]))
+		_, err = io.ReadFull(conn, payload)
+		require.NoError(t, err)
+		if header[3] != 4 || header[4]&1 != 0 { // not a SETTINGS, or an ACK
+			continue
+		}
+		for at := 0; at+6 <= len(payload); at += 6 {
+			if binary.BigEndian.Uint16(payload[at:]) == 3 {
+				return binary.BigEndian.Uint32(payload[at+2:])
+			}
+		}
+		return 0
+	}
 }
 
 func listens(port uint16) bool {

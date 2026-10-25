@@ -30,9 +30,17 @@ def register(server: grpc.aio.Server) -> None:
     health_pb2_grpc.add_HealthServicer_to_server(_HealthServicer(), server)
 
 
+# How many calls one client connection may have open at once, advertised to clients
+# (SETTINGS_MAX_CONCURRENT_STREAMS) so a burst queues in the client instead of being
+# refused. The Connect face reads the same setting and enforces it.
+MAX_CONCURRENT_STREAMS = 1000
+
+
 async def serve(port: int) -> grpc.aio.Server:
     """Start a grpc.aio server on ``port`` and return it (already started)."""
-    server = grpc.aio.server()
+    server = grpc.aio.server(
+        options=[("grpc.max_concurrent_streams", MAX_CONCURRENT_STREAMS)]
+    )
     register(server)
     # add_insecure_port returns 0 (it does not raise) when the port can't be
     # bound; without this check the server would "start" listening on nothing
