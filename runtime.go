@@ -672,7 +672,8 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 	if s.connectPort != 0 {
 		// The same for the Connect face (src/rpc/connect_gen.py), which the
-		// lifespan starts over the gRPC server; its fixed fallback is 8081.
+		// app starts over the gRPC server on this variable alone: unset, it
+		// serves no face.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_CONNECT_PORT", s.connectPort))
 	}
 
