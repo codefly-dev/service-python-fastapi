@@ -65,11 +65,16 @@ func NewBuilder(svc *Service) *Builder {
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
-	// Call generic first — it loads Settings, Endpoints, handles CreationMode.
-	// It reports a failure in the response's state, not the error: stop there,
-	// or the endpoint lookup below replaces the real cause with "no rest
-	// endpoint found".
-	resp, err := s.Builder.Load(ctx, req)
+	// The generic load with this agent's Settings: it loads them, the
+	// Endpoints, and handles CreationMode. The generic Load would decode the
+	// spec into its own half of the settings alone, leaving grpc-server and
+	// connect-endpoint unset on every loaded service, so Sync generated no
+	// server code and Deploy rendered no gRPC or Connect port. It reports a
+	// failure in the response's state, not the error: stop there, or the
+	// endpoint lookup below replaces the real cause with "no rest endpoint
+	// found".
+	resp, err := s.Base.Builder.LoadService(ctx, req, services.BuilderLoad{Settings: s.FastAPI.Settings})
+	s.Service.SourceLocation = s.Service.ResolveSourceLocation()
 	if err != nil || resp.GetState().GetState() == builderv0.LoadStatus_ERROR {
 		return resp, err
 	}

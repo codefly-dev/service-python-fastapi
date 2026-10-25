@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	agenttesting "github.com/codefly-dev/core/agents/testing"
+	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -92,4 +95,38 @@ func TestConnectFaceServesEveryProtocol(t *testing.T) {
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join("templates", "connect"), "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
+}
+
+// TestBuilderLoadReadsTheAgentsSettings is the regression guard for a loaded
+// (not created) service: the builder must see grpc-server and
+// connect-endpoint, or Sync writes neither the gRPC stubs nor the Connect face
+// and Deploy renders neither port.
+func TestBuilderLoadReadsTheAgentsSettings(t *testing.T) {
+	created, _ := createServiceForTest(t, map[string]*agentv0.Answer{
+		HotReload:      confirmAnswer(false),
+		PublicEndpoint: confirmAnswer(false),
+		GRPCServer:     confirmAnswer(true),
+	})
+	ctx := context.Background()
+	manifest := filepath.Join(created.Location, "service.codefly.yaml")
+	content, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	var document map[string]any
+	require.NoError(t, yaml.Unmarshal(content, &document))
+	spec, _ := document["spec"].(map[string]any)
+	require.Equal(t, true, spec["grpc-server"].(map[string]any)["enabled"])
+	spec["connect-endpoint"] = true
+	content, err = yaml.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, content, 0o644))
+
+	identity, err := created.Identity.Proto()
+	require.NoError(t, err)
+	loaded := NewBuilder(NewService())
+	resp, err := loaded.Load(ctx, &builderv0.LoadRequest{Identity: identity})
+	require.NoError(t, err)
+	require.NotEqual(t, builderv0.LoadStatus_ERROR, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.True(t, loaded.FastAPI.Settings.GRPCServer.Enabled)
+	require.True(t, loaded.FastAPI.Settings.ConnectEndpoint)
+	require.Equal(t, filepath.Join(created.Location, "code"), loaded.Service.SourceLocation)
 }
