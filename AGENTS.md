@@ -3,8 +3,8 @@
 This repo is one codefly agent binary: the **FastAPI specialization** of the
 generic Python agent. It composes `github.com/codefly-dev/service-python`'s
 `pkg/*` types and adds what FastAPI needs — uvicorn supervision and hot reload,
-OpenAPI-derived REST endpoints, an opt-in `grpc.aio` listener, the Dockerfile
-and kustomize recipes, and the scaffold a new FastAPI service is created from.
+OpenAPI-derived REST endpoints, an opt-in `grpc.aio` listener and Connect face,
+the Dockerfile and kustomize recipes, and the scaffold a new FastAPI service is created from.
 Dependency management is `uv`; poetry is not supported.
 
 It does **not** own:

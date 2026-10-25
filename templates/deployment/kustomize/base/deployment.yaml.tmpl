@@ -31,6 +31,10 @@ spec:
             - name: grpc
               containerPort: {{ .Deployment.Parameters.GRPCPort }}
 {{- end }}
+{{- if .Deployment.Parameters.ConnectEnabled }}
+            - name: connect
+              containerPort: {{ .Deployment.Parameters.ConnectPort }}
+{{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

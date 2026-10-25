@@ -43,8 +43,8 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/cloudflare/circl v1.6.5 h1:O64F26HEqNhznd/hrC5KZXVKYuKM2rx4deZDTc4ihQA=
 github.com/cloudflare/circl v1.6.5/go.mod h1:h5LNyxAc5nTue9DS5jT+48en2PSDYt3zdGnz5OstK6c=
-github.com/codefly-dev/core v0.19.6 h1:ZkCChK/BioK+B7zZ0fp+/rXDCy0k+lsdFqHjyc5xFIg=
-github.com/codefly-dev/core v0.19.6/go.mod h1:1ina3kP+YSAL4tlZvnEYd4P8bFGnJECfkP86ojeeF1A=
+github.com/codefly-dev/core v0.19.7-0.20261025070021-a3bf508a5e55 h1:U9rzO6zSCigIUHuiiUTKMEtNzyYZ3e6il3A+sEv8jJk=
+github.com/codefly-dev/core v0.19.7-0.20261025070021-a3bf508a5e55/go.mod h1:1ina3kP+YSAL4tlZvnEYd4P8bFGnJECfkP86ojeeF1A=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
 github.com/codefly-dev/service-python v0.0.66 h1:Y74QvKAYMaOnZcsfRxuD9dpQo3//7Mjo12RYELyrp5o=

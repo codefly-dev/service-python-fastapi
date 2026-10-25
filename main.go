@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/contract"
@@ -42,6 +43,9 @@ const (
 	HotReload      = "hot-reload"
 	PublicEndpoint = "public-endpoint"
 	GRPCServer     = "grpc-server"
+	// ConnectEndpointSetting is go-grpc's spelling for the same face: a
+	// listener serving Connect, gRPC-Web and gRPC over the service's gRPC server.
+	ConnectEndpointSetting = "connect-endpoint"
 )
 
 // defaultProtoPath is where the service-owned proto contract lives, relative
@@ -77,6 +81,15 @@ type Settings struct {
 	// GRPCServer opts the service into a grpc.aio listener running in the same
 	// process as the FastAPI app (see grpc-server:). Disabled by default.
 	GRPCServer GRPCServerSettings `yaml:"grpc-server"`
+
+	// ConnectEndpoint serves the service's gRPC API on a second listener that
+	// speaks Connect and gRPC-Web (HTTP/1.1) and gRPC (HTTP/2) on one port:
+	// the face a browser reaches through an L7 hop. Every call is transcoded
+	// onto the grpc.aio server, so it needs grpc-server and adds no API of its
+	// own. The agent writes the face (code/src/rpc/connect_gen.py) at sync and
+	// hands the process its port as CODEFLY_CONNECT_PORT; the app's lifespan
+	// starts it beside the gRPC server. Off by default.
+	ConnectEndpoint bool `yaml:"connect-endpoint"`
 
 	// RuntimeImage overrides the default codefly-built runtime image.
 	// Format: "name:tag". Plain "name" and ":latest" are rejected —
@@ -155,6 +168,19 @@ type Service struct {
 	// GRPCEndpoint is the service-owned gRPC endpoint, present only when
 	// Settings.GRPCServer.Enabled. Nil keeps the REST-only path untouched.
 	GRPCEndpoint *v0.Endpoint
+
+	// ConnectEndpoint is the Connect-family endpoint, present only when
+	// Settings.ConnectEndpoint.
+	ConnectEndpoint *v0.Endpoint
+}
+
+// connectSettingError refuses a Connect face with no gRPC server to transcode
+// onto: the face serves the gRPC server's API, never one of its own.
+func (s *Settings) connectSettingError() error {
+	if s.ConnectEndpoint && !s.GRPCServer.Enabled {
+		return fmt.Errorf("%s needs %s.enabled: the Connect face serves the gRPC server's API", ConnectEndpointSetting, GRPCServer)
+	}
+	return nil
 }
 
 // GetAgentInformation overrides the generic info to advertise HTTP protocol
@@ -178,8 +204,8 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		HotReload:  true,
 		Languages:  []agentv0.Language_Type{agentv0.Language_PYTHON},
 		// The agent can serve HTTP always and gRPC when a service opts in via
-		// grpc-server; advertising both declares the capability, not that every
-		// service exposes both.
+		// grpc-server (and Connect beside it, over HTTP); advertising both
+		// declares the capability, not that every service exposes both.
 		Protocols: []agentv0.Protocol_Type{agentv0.Protocol_HTTP, agentv0.Protocol_GRPC},
 		ReadMe:    readme,
 	}.Build()

@@ -150,6 +150,10 @@ type Runtime struct {
 	// to the Python process as CODEFLY_GRPC_PORT. Zero when gRPC is disabled.
 	grpcPort uint16
 
+	// connectPort is the mapped port for the Connect face, passed to the
+	// Python process as CODEFLY_CONNECT_PORT. Zero when Connect is disabled.
+	connectPort uint16
+
 	cacheLocation string
 
 	// destroyed marks the runtime as torn down, guarded by runnerMu. Destroy
@@ -199,6 +203,19 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		s.FastAPI.GRPCEndpoint, err = resources.FindGRPCEndpoint(ctx, s.Endpoints)
 		if err != nil {
 			return s.Base.Runtime.LoadError(err)
+		}
+	}
+
+	if err := s.FastAPI.Settings.connectSettingError(); err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
+	if s.FastAPI.Settings.ConnectEndpoint {
+		s.FastAPI.ConnectEndpoint, err = resources.FindConnectEndpoint(ctx, s.Endpoints)
+		if err != nil {
+			return s.Base.Runtime.LoadError(err)
+		}
+		if s.FastAPI.ConnectEndpoint == nil {
+			return s.Base.Runtime.LoadError(fmt.Errorf("%s is on but the service declares no endpoint with api: connect", ConnectEndpointSetting))
 		}
 	}
 
@@ -287,6 +304,14 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 				return nil, "", s.Wool.Wrapf(grpcErr, "cannot find grpc network instance")
 			}
 			dockerEnv.WithPort(ctx, uint16(grpcInstance.Port))
+		}
+
+		if s.FastAPI.ConnectEndpoint != nil {
+			connectInstance, connectErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.ConnectEndpoint, resources.NewNativeNetworkAccess())
+			if connectErr != nil {
+				return nil, "", s.Wool.Wrapf(connectErr, "cannot find connect network instance")
+			}
+			dockerEnv.WithPort(ctx, uint16(connectInstance.Port))
 		}
 
 		envPath := s.DockerEnvPath()
@@ -475,6 +500,15 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.Infof("grpc will run on %s", grpcNet.Address)
 	}
 
+	if s.FastAPI.ConnectEndpoint != nil {
+		connectNet, connectErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.ConnectEndpoint, resources.NewNativeNetworkAccess())
+		if connectErr != nil {
+			return s.Base.Runtime.InitError(connectErr)
+		}
+		s.connectPort = uint16(connectNet.Port)
+		s.Infof("connect will run on %s", connectNet.Address)
+	}
+
 	hasPyProject, err := shared.FileExists(ctx, path.Join(s.Service.SourceLocation, "pyproject.toml"))
 	if err != nil {
 		return s.Base.Runtime.InitError(err)
@@ -559,7 +593,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	inputs := startInputs(req)
-	launch := launchInputs(inputs, s.port, s.grpcPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
+	launch := launchInputs(inputs, s.port, s.grpcPort, s.connectPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
 
 	if s.runner != nil {
 		switch {
@@ -630,6 +664,11 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		// mapped port, so it is applied after the overrides and wins over a
 		// `--set` naming the same key.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
+	}
+	if s.connectPort != 0 {
+		// The same for the Connect face (src/rpc/connect_gen.py), which the
+		// lifespan starts over the gRPC server; its fixed fallback is 8081.
+		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_CONNECT_PORT", s.connectPort))
 	}
 
 	// The process must outlive this RPC, so it runs under a background context
@@ -938,8 +977,8 @@ func startInputs(req *runtimev0.StartRequest) string {
 // It is deliberately separate from startInputs: that one gates applyStartInputs,
 // which must fire only when the request itself changed, because the environment
 // manager appends overrides and endpoints without ever removing any.
-func launchInputs(requestInputs string, port uint16, grpcPort uint16, hotReload bool) string {
-	return fmt.Sprintf("%s\nport %d\ngrpc-port %d\nhot-reload %t", requestInputs, port, grpcPort, hotReload)
+func launchInputs(requestInputs string, port uint16, grpcPort uint16, connectPort uint16, hotReload bool) string {
+	return fmt.Sprintf("%s\nport %d\ngrpc-port %d\nconnect-port %d\nhot-reload %t", requestInputs, port, grpcPort, connectPort, hotReload)
 }
 
 // applyStartInputs folds the StartRequest into the environment manager. Callers
