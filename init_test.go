@@ -54,6 +54,7 @@ func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
 	require.NoError(t, os.MkdirAll(filepath.Join(source, "src"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(source, "pyproject.toml"), []byte(probeProject), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(source, "src", "main.py"), []byte("app = None\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(source, openAPIScript), []byte("# the scaffold's generator\n"), 0o600))
 	runtime.Service.SourceLocation = source
 
 	endpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "rest", Api: standards.REST}
@@ -120,6 +121,41 @@ func TestInitWorksAgainstTheEnvironmentItCaptured(t *testing.T) {
 	entries, err := os.ReadDir(cache)
 	require.NoError(t, err)
 	require.NotEmpty(t, entries, "the dependency hashes must land in the captured cache location")
+}
+
+// TestInitWithoutAnOpenAPIGeneratorRunsNone is a service whose API is on its
+// gRPC and Connect faces alone: its HTTP endpoint serves the probes, and it
+// ships no src/openapi.py. Init must make it ready without running one, or a
+// fresh checkout of such a service cannot start.
+func TestInitWithoutAnOpenAPIGeneratorRunsNone(t *testing.T) {
+	isolateWorkingDir(t)
+	ctx := context.Background()
+	runtime, req := initTestRuntime(t)
+	require.NoError(t, os.Remove(filepath.Join(runtime.Service.SourceLocation, openAPIScript)))
+
+	connect := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	runtime.FastAPI.Settings.GRPCServer.Enabled = true
+	runtime.FastAPI.Settings.ConnectEndpoint = true
+	runtime.FastAPI.ConnectEndpoint = connect
+	req.ProposedNetworkMappings = append(req.ProposedNetworkMappings, &basev0.NetworkMapping{
+		Endpoint: connect,
+		Instances: []*basev0.NetworkInstance{{
+			Access: resources.NewNativeNetworkAccess(), Hostname: "localhost", Port: 9998, Address: "localhost:9998",
+		}},
+	})
+
+	env := &fakeRunnerEnvironment{}
+	runtime.runnerEnvironment = env
+	runtime.cacheLocation = t.TempDir()
+
+	resp, err := runtime.Init(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	var commands [][]string
+	for _, proc := range env.started() {
+		commands = append(commands, append([]string{proc.bin}, proc.args...))
+	}
+	require.Equal(t, [][]string{{"uv", "sync"}}, commands, "no OpenAPI generator, so none runs")
 }
 
 // TestInitIsSafeWithConcurrentTeardown overlaps Init with the calls that own
