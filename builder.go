@@ -94,6 +94,9 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	if err != nil {
 		return s.Base.Builder.LoadError(err)
 	}
+	if err := s.FastAPI.Settings.connectSettingError(); err != nil {
+		return s.Base.Builder.LoadError(err)
+	}
 
 	return s.Base.Builder.LoadResponse()
 }
@@ -142,7 +145,40 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 			return s.Base.Builder.SyncError(err)
 		}
 	}
+	if s.FastAPI.Settings.ConnectEndpoint {
+		if err := s.writeConnectFace(); err != nil {
+			return s.Base.Builder.SyncError(err)
+		}
+	}
 	return s.Base.Builder.SyncResponse()
+}
+
+// connectFacePath is where the agent writes the Connect face, relative to the
+// service root: beside the generated gRPC bindings, importable as
+// src.rpc.connect_gen.
+const connectFacePath = "code/src/rpc/connect_gen.py"
+
+// connectFace is the Connect face every service with connect-endpoint gets,
+// byte for byte: it reads the methods it serves from the descriptors the
+// service's gRPC bindings register, so nothing in it is rendered per service.
+//
+//go:embed templates/connect/connect_gen.py
+var connectFace []byte
+
+// writeConnectFace writes the Connect face, replacing whatever is there: the
+// file is the agent's, and a hand edit is drift the next sync removes.
+func (s *Builder) writeConnectFace() error {
+	if err := s.FastAPI.Settings.connectSettingError(); err != nil {
+		return err
+	}
+	target := s.Local(connectFacePath)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return s.Wool.Wrapf(err, "cannot create %s", filepath.Dir(target))
+	}
+	if err := os.WriteFile(target, connectFace, 0o644); err != nil {
+		return s.Wool.Wrapf(err, "cannot write the Connect face")
+	}
+	return nil
 }
 
 // syncGRPCServer regenerates the Python protobuf + grpc.aio server stubs from
@@ -432,6 +468,11 @@ type Parameters struct {
 	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
 	GRPCEnabled bool
 	GRPCPort    int
+	// ConnectEnabled adds the Connect face's containerPort and Service port.
+	// ConnectPort is the fixed in-cluster port it binds (the app defaults to it
+	// when CODEFLY_CONNECT_PORT is unset).
+	ConnectEnabled bool
+	ConnectPort    int
 	// AutomountServiceAccountToken projects the ServiceAccount token into the
 	// pod. It stays false because the identity path is the metadata server or a
 	// webhook-projected token and the app does not call the API server. Setting
@@ -512,9 +553,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			DependencyConfigurations: true,
 		},
 		Parameters: Parameters{
-			Probes:      probes,
-			GRPCEnabled: s.FastAPI.Settings.GRPCServer.Enabled,
-			GRPCPort:    int(standards.Port(standards.GRPC)),
+			Probes:         probes,
+			GRPCEnabled:    s.FastAPI.Settings.GRPCServer.Enabled,
+			GRPCPort:       int(standards.Port(standards.GRPC)),
+			ConnectEnabled: s.FastAPI.Settings.ConnectEndpoint,
+			ConnectPort:    int(standards.Port(standards.CONNECT)),
 		},
 	})
 }
