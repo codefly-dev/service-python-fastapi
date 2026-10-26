@@ -213,6 +213,9 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
+	if err := s.FastAPI.unservedError(ctx, s.Endpoints); err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
 
 	if s.FastAPI.Settings.GRPCServer.Enabled {
 		s.FastAPI.GRPCEndpoint, err = resources.FindGRPCEndpoint(ctx, s.Endpoints)
@@ -499,7 +502,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitError(err)
 	}
 
+	// Every listener Init publishes is reset first: a reload that dropped an
+	// endpoint must not leave Start binding or waiting on the old one.
 	s.port, s.serveAddress = 0, ""
+	s.grpcPort, s.grpcAddress = 0, ""
+	s.connectPort, s.connectAddress = 0, ""
 	if s.FastAPI.HTTPEndpoint != nil {
 		net, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.HTTPEndpoint, resources.NewNativeNetworkAccess())
 		if err != nil {

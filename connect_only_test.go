@@ -331,3 +331,137 @@ func TestConnectOnlyServiceStarts(t *testing.T) {
 	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
 	require.NoError(t, err)
 }
+
+// rewriteManifest applies edit to a scaffolded service's manifest.
+func rewriteManifest(t *testing.T, root string, edit func(document map[string]any)) {
+	t.Helper()
+	manifest := filepath.Join(root, "service.codefly.yaml")
+	content, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	var document map[string]any
+	require.NoError(t, yaml.Unmarshal(content, &document))
+	edit(document)
+	content, err = yaml.Marshal(document)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifest, content, 0o644))
+}
+
+// TestUnservedServiceIsRefusedAtLoad: a manifest that lost its endpoints, or
+// whose gRPC server has no endpoint to serve, is refused by both Loads by name
+// instead of starting a process nothing reaches.
+func TestUnservedServiceIsRefusedAtLoad(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		answers map[string]*agentv0.Answer
+	}{
+		"no endpoints, no gRPC server": {answers: nil},
+		"gRPC server with no gRPC endpoint": {answers: map[string]*agentv0.Answer{
+			HotReload: confirmAnswer(false), PublicEndpoint: confirmAnswer(false), GRPCServer: confirmAnswer(true),
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			created, root := createServiceForTest(t, tc.answers)
+			rewriteManifest(t, root, func(document map[string]any) { delete(document, "endpoints") })
+			identity, err := created.Identity.Proto()
+			require.NoError(t, err)
+
+			loaded, err := NewBuilder(NewService()).Load(ctx, &builderv0.LoadRequest{Identity: identity})
+			require.NoError(t, err)
+			require.Equal(t, builderv0.LoadStatus_ERROR, loaded.GetState().GetState())
+			require.Contains(t, loaded.GetState().GetMessage(), "nothing would serve this service")
+
+			runtime := NewRuntime(NewService())
+			t.Cleanup(runtime.Base.StopWatcher)
+			resp, err := runtime.Load(ctx, &runtimev0.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
+			require.NoError(t, err)
+			require.Equal(t, runtimev0.LoadStatus_ERROR, resp.GetStatus().GetState())
+			require.Contains(t, resp.GetStatus().GetMessage(), "nothing would serve this service")
+		})
+	}
+}
+
+// grpcOnlyInit stands a runtime up at Init for a service whose one face is its
+// gRPC server, with the proposed mapping Init resolves it from.
+func grpcOnlyInit(t *testing.T) (*Runtime, *fakeRunnerEnvironment, *runtimev0.InitRequest, string) {
+	t.Helper()
+	runtime, req := initTestRuntime(t)
+	env := &fakeRunnerEnvironment{}
+	runtime.runnerEnvironment = env
+	runtime.cacheLocation = t.TempDir()
+	grpcEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "grpc", Api: standards.GRPC}
+	connectEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	runtime.FastAPI.HTTPEndpoint = nil
+	runtime.FastAPI.GRPCEndpoint = grpcEndpoint
+	mappings, _ := connectOnlyMappings(t, grpcEndpoint, connectEndpoint)
+	req.ProposedNetworkMappings = mappings[:1]
+	return runtime, env, req, mappings[0].GetInstances()[0].GetAddress()
+}
+
+// TestGRPCOnlyStartWaitsOnTheGRPCServer: with neither an HTTP endpoint nor a
+// Connect face, Start's readiness is the gRPC server's handshake at the address
+// Init resolved for it.
+func TestGRPCOnlyStartWaitsOnTheGRPCServer(t *testing.T) {
+	isolateWorkingDir(t)
+	ctx := context.Background()
+	runtime, _, req, grpcAddress := grpcOnlyInit(t)
+	var asked []string
+	runtime.answers = func(_ context.Context, target string) error {
+		asked = append(asked, target)
+		return nil
+	}
+	initialized, err := runtime.Init(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{}) })
+	require.Equal(t, []string{grpcAddress}, asked)
+}
+
+// TestInitDropsTheListenersAReloadRemoved: an Init after a reload that dropped
+// the Connect endpoint publishes no Connect port or address, so Start neither
+// hands the process the old port nor waits on the old face.
+func TestInitDropsTheListenersAReloadRemoved(t *testing.T) {
+	isolateWorkingDir(t)
+	ctx := context.Background()
+	runtime, env, req, grpcAddress := grpcOnlyInit(t)
+	connectEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	runtime.FastAPI.ConnectEndpoint = connectEndpoint
+	withConnect, _ := connectOnlyMappings(t, runtime.FastAPI.GRPCEndpoint, connectEndpoint)
+	req.ProposedNetworkMappings = append(req.ProposedNetworkMappings, withConnect[1])
+	initialized, err := runtime.Init(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.NotEmpty(t, runtime.connectAddress)
+
+	runtime.FastAPI.ConnectEndpoint = nil
+	req.ProposedNetworkMappings = req.ProposedNetworkMappings[:1]
+	initialized, err = runtime.Init(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+
+	var asked []string
+	runtime.answers = func(_ context.Context, target string) error {
+		asked = append(asked, target)
+		return nil
+	}
+	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{}) })
+	require.Equal(t, []string{grpcAddress}, asked)
+	require.Empty(t, processEnv(uvicornProc(t, env), "CODEFLY_CONNECT_PORT"))
+}
+
+// TestImageServesNoHTTPWithoutAnHTTPEndpoint: the image of a service with no
+// HTTP endpoint binds uvicorn to loopback, never 0.0.0.0:8080.
+func TestImageServesNoHTTPWithoutAnHTTPEndpoint(t *testing.T) {
+	builder, _ := createdBuilder(t)
+	builder.FastAPI.HTTPEndpoint = nil
+	outputDir := t.TempDir()
+	dockerfile := dockerfileOf(t, outputDir, emitRecipe(t, builder, outputDir))
+	require.Contains(t, dockerfile, `CMD ["uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]`)
+	require.NotContains(t, dockerfile, "0.0.0.0")
+	require.NotContains(t, dockerfile, "8080")
+}

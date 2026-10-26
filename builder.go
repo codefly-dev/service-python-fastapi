@@ -100,6 +100,9 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	if err != nil {
 		return s.Base.Builder.LoadError(err)
 	}
+	if err := s.FastAPI.unservedError(ctx, s.Endpoints); err != nil {
+		return s.Base.Builder.LoadError(err)
+	}
 	if err := s.FastAPI.Settings.connectSettingError(); err != nil {
 		return s.Base.Builder.LoadError(err)
 	}
@@ -267,6 +270,10 @@ type DockerTemplating struct {
 	// GitSources are the repositories of the git commits the lock pins, which
 	// the builder stage reads from the caller's mirrors (uvgitsources.go).
 	GitSources []uvGitMirror
+	// NoHTTPEndpoint starts uvicorn on a loopback port the system picks, as a
+	// native start does (uvicornArgs): a service with no HTTP endpoint serves
+	// no HTTP in the image either.
+	NoHTTPEndpoint bool
 }
 
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
@@ -342,6 +349,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		UVImage:        uvImage,
 		ProjectWorkdir: defaultProjectWorkdir,
 		GitSources:     uvGitMirrors(gitSources),
+		NoHTTPEndpoint: s.FastAPI.HTTPEndpoint == nil,
 	}
 	if assembled != nil {
 		docker.ServicePrefix = assembled.ServicePrefix

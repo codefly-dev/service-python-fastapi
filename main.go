@@ -204,6 +204,20 @@ func findHTTPEndpoint(ctx context.Context, endpoints []*v0.Endpoint) (*v0.Endpoi
 	return nil, fmt.Errorf("the app serves one HTTP listener, and the service declares %d HTTP endpoints (%s): keep one with api: rest or api: http", len(found), strings.Join(names, ", "))
 }
 
+// unservedError refuses a service nothing would serve: no HTTP endpoint, and
+// no gRPC endpoint for a gRPC server to serve. A manifest that lost its
+// endpoints would otherwise start a process nobody can reach, and Start would
+// have nothing to wait on before it answered STARTED.
+func (s *Service) unservedError(ctx context.Context, endpoints []*v0.Endpoint) error {
+	if s.HTTPEndpoint != nil {
+		return nil
+	}
+	if s.Settings.GRPCServer.Enabled && len(resources.FindEndpointsByAPI(ctx, standards.GRPC, endpoints)) > 0 {
+		return nil
+	}
+	return fmt.Errorf("nothing would serve this service: it declares no HTTP endpoint (api: rest or api: http) and no gRPC endpoint with %s.enabled", GRPCServer)
+}
+
 // connectSettingError refuses a Connect face with no gRPC server to transcode
 // onto: the face serves the gRPC server's API, never one of its own.
 func (s *Settings) connectSettingError() error {
