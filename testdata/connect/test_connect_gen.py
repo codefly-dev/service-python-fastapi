@@ -478,6 +478,30 @@ async def test_a_refusal_the_service_passes_on_keeps_its_code_and_words(face):
     assert r.json() == {"code": "resource_exhausted", "message": PASSED_ON}
 
 
+async def test_a_refusal_naming_the_faces_own_bound_is_still_the_services():
+    # The face's bounds both 4 MiB, the same bound the service's client names: the
+    # face's channel refuses only past one byte more, so the number cannot be its own.
+    server = grpc.aio.server(interceptors=(Proof(),))
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(
+        0, grpc_port, host="127.0.0.1", max_response_bytes=4194304, max_json_response_bytes=4194304
+    )
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                _url(listener, "Say"),
+                json={"text": "passing-on"},
+                headers={"content-type": "application/json", **STAMP},
+            )
+        assert r.status_code == 429
+        assert r.json() == {"code": "resource_exhausted", "message": PASSED_ON}
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
 @pytest.mark.parametrize("option", ["max_response_bytes", "max_json_response_bytes"])
 @pytest.mark.parametrize("value", [0, -1])
 async def test_an_answer_bound_is_a_positive_size(option, value):
@@ -609,7 +633,7 @@ async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
     )
     try:
         reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
-        writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+        writer.write(PREFACE + SETTINGS)
         await writer.drain()
         got = read_frames(await asyncio.wait_for(reader.read(), 3))
         assert [f[3] for f in got if f[0] == 0x6] == [bytes([n]) * 8 for n in range(6)]
@@ -715,11 +739,11 @@ async def silent_upstream():
     ``state["mid_frame"]`` (an event) makes it send half a frame first and the rest when
     the event is set."""
     held, faces = [], []
-    state = {"close_after": None, "received": bytearray(), "mid_frame": None}
+    state = {"close_after": None, "received": bytearray(), "mid_frame": None, "preface": SETTINGS}
 
     async def accept(reader, writer):
         held.append(writer)
-        writer.write(SETTINGS)  # a server's connection preface
+        writer.write(state["preface"])  # a server's connection preface
         if state["mid_frame"] is not None:
             # Half a PING, the rest once the test sets the event: the server is mid-frame.
             ping = h2_frame(0x6, 0, 0, b"12345678")
@@ -890,6 +914,54 @@ async def _first_frames(upstream_preface, client_payload, monkeypatch=None):
     finally:
         await listener.stop()
         upstream.close()
+
+
+async def test_a_server_that_waits_for_the_clients_settings_is_not_stalled():
+    # A server may send its SETTINGS only once it has the client's: the face forwards
+    # the client's first, so the two prefaces cross.
+    async def accept(reader, writer):
+        await reader.readexactly(len(PREFACE) + len(SETTINGS))
+        writer.write(h2_frame(0x4, 0, 0, struct.pack(">HI", 0x3, 7)))
+        await writer.drain()
+        while await reader.read(65536):
+            pass
+
+    upstream = await asyncio.start_server(accept, "127.0.0.1", 0)
+    listener = await connect_gen.serve(
+        0, upstream.sockets[0].getsockname()[1], host="127.0.0.1", read_timeout=5
+    )
+    try:
+        _, got = await exchange(listener, PREFACE + SETTINGS, 1)
+        assert [_settings(f) for f in read_frames(got) if f[0] == 0x4] == [[(0x3, 7)]]
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_a_server_that_sends_no_settings_gets_the_client_a_goaway(silent_upstream):
+    face, state = silent_upstream
+    state["preface"] = b""  # a server that never sends its SETTINGS
+    closed, got = await exchange(await face(read_timeout=0.5), PREFACE + SETTINGS, 2)
+    assert closed
+    ((kind, _, _, payload),) = read_frames(got)
+    last, code = struct.unpack_from(">II", payload)
+    assert (kind, last, code) == (0x7, 0, 0x2)
+    assert payload[8:] == b"the gRPC server sent no SETTINGS within 0.5 s"
+
+
+async def test_the_servers_limit_is_found_anywhere_in_its_settings():
+    # Past the first 256 bytes, and in a frame split across reads.
+    entries = b"".join(struct.pack(">HI", 0xF000 + n, n) for n in range(60))
+    server_settings = h2_frame(0x4, 0, 0, entries + struct.pack(">HI", 0x3, 7))
+    to_client, _ = await _first_frames(server_settings, PREFACE + SETTINGS)
+    assert _settings(to_client[0])[-1] == (0x3, 7)
+    assert (0x3, connect_gen.DEFAULT_MAX_OPEN_CALLS) not in _settings(to_client[0])
+
+    seen = []
+    frames = connect_gen._Frames(lambda kind, flags, stream, payload: seen.append(payload))
+    for at in range(len(server_settings)):
+        frames.feed(server_settings[at : at + 1])
+    assert seen == [struct.pack(">HI", 0x3, 7)] and frames.at_boundary
 
 
 async def test_a_server_advertising_no_limit_is_given_the_faces():
