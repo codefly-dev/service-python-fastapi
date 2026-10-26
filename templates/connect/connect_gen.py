@@ -96,9 +96,14 @@ _DATA, _HEADERS, _RST_STREAM, _SETTINGS, _GOAWAY, _CONTINUATION = 0x0, 0x1, 0x3,
 _END_STREAM_FLAG, _ACK_FLAG, _END_HEADERS_FLAG = 0x1, 0x1, 0x4
 _MAX_CONCURRENT_STREAMS = 0x3
 _PUSH_PROMISE = 0x5
-_PROTOCOL_ERROR, _INTERNAL_ERROR, _CANCEL, _ENHANCE_YOUR_CALM = 0x1, 0x2, 0x8, 0xB
-# The largest frame a peer may send before it has the other's SETTINGS (RFC 9113 4.2).
+_PROTOCOL_ERROR, _INTERNAL_ERROR, _FRAME_SIZE_ERROR = 0x1, 0x2, 0x6
+_CANCEL, _ENHANCE_YOUR_CALM = 0x8, 0xB
+# The largest frame a client may send before it has the server's SETTINGS (RFC 9113
+# 4.2); the face holds the server's first frame to it too, though the client's SETTINGS
+# could allow more (a SETTINGS frame that size would carry over 2,700 entries).
 _INITIAL_MAX_FRAME = 16384
+# gRPC's channel arguments are C ints.
+_GRPC_MAX_INT = 2**31 - 1
 # Calls one relayed connection may hold open when the gRPC server advertises no
 # SETTINGS_MAX_CONCURRENT_STREAMS (grpcio advertises none unless the service sets
 # grpc.max_concurrent_streams, as the scaffold's server does). The face advertises it to
@@ -294,11 +299,12 @@ class _AnswerBounds:
     them as they are, ``json`` for one that converts them, checked before converting.
     ``received`` is the channel's own receive bound: one byte past both, so the face
     checks every bound itself, and the number grpcio names when it refuses past it is
-    one no service's client has by chance with the same text."""
+    one no service's client has by chance with the same text. A bound at gRPC's largest
+    (2**31 - 1, its "unlimited") keeps the channel there."""
 
     def __init__(self, proto: int, json: int):
         self.proto, self.json = proto, json
-        self.received = max(proto, json) + 1
+        self.received = min(max(proto, json) + 1, _GRPC_MAX_INT)
 
     def of(self, codec: _Codec) -> tuple[int, str]:
         if codec.name == "proto":
@@ -344,13 +350,15 @@ class _Frames:
     where frames end in the data, each with the bytes ``on_frame`` returned, to be written
     right after that frame in this direction. The payload passed is, for a SETTINGS
     frame, its last SETTINGS_MAX_CONCURRENT_STREAMS entry if it has one (the frame is
-    scanned whole as it streams, holding one entry), for a GOAWAY its first
+    scanned whole as it streams, holding one entry, when ``scan_settings``: the server's
+    direction only, since only the server's limit matters), for a GOAWAY its first
     ``_CONTROL_PAYLOAD`` bytes, and empty otherwise. A
     ``_ProtocolError`` from ``on_frame`` stops the feed; it is kept in ``error`` and the
     ends before the offending frame are returned."""
 
-    def __init__(self, on_frame):
+    def __init__(self, on_frame, *, scan_settings: bool = False):
         self._on_frame = on_frame
+        self._scan_settings_frames = scan_settings
         self._header = bytearray()
         self._frame = None  # (type, flags, stream) while its payload is read
         self._after = b""  # what on_frame returned for it
@@ -429,7 +437,7 @@ class _Frames:
         if kind in (_HEADERS, _PUSH_PROMISE, _CONTINUATION):
             self._in_block = not flags & _END_HEADERS_FLAG
         self._keep = min(length, _CONTROL_PAYLOAD) if kind == _GOAWAY else 0
-        self._scan = length if kind == _SETTINGS else 0
+        self._scan = length if kind == _SETTINGS and self._scan_settings_frames else 0
         self._skip = length - self._keep - self._scan
         if not (self._keep or self._scan):
             self._emit()
@@ -450,15 +458,41 @@ class _Frames:
         self._after = self._on_frame(*self._frame, payload) or b""
 
 
+class _FrameSizeError(_ProtocolError):
+    """A first frame past ``_INITIAL_MAX_FRAME``."""
+
+
 async def _first_frame(reader) -> bytes:
-    """A peer's first frame, whole: its SETTINGS (RFC 9113 section 3.4), within the frame
-    size any peer may send before it has the other's."""
+    """A peer's first frame, whole, which RFC 9113 section 3.4 makes its SETTINGS: a
+    SETTINGS frame on stream 0, not an acknowledgement, within ``_INITIAL_MAX_FRAME``."""
     header = await reader.readexactly(_FRAME.size)
-    high, low, *_ = _FRAME.unpack(header)
+    high, low, kind, flags, stream = _FRAME.unpack(header)
     length = high << 16 | low
     if length > _INITIAL_MAX_FRAME:
-        raise _ProtocolError(f"a first frame of {length} bytes")
+        raise _FrameSizeError(
+            f"a first frame of {length} bytes, past the {_INITIAL_MAX_FRAME} "
+            "allowed before SETTINGS"
+        )
+    if kind != _SETTINGS or flags & _ACK_FLAG or stream:
+        raise _ProtocolError(
+            f"a first frame of type {kind} (flags {flags}, stream {stream}), not SETTINGS"
+        )
     return header + await reader.readexactly(length)
+
+
+def _opening_refusal(exc: BaseException, peer: str, timeout: float) -> str:
+    """Why a peer's opening failed, in words an operator can act on."""
+    if isinstance(exc, TimeoutError):
+        return f"the {peer} sent no SETTINGS within {timeout:g} s"
+    if isinstance(exc, _ProtocolError):
+        return f"the {peer} sent {exc}"
+    return f"the {peer} closed the connection before its SETTINGS"
+
+
+def _refuse_opening(writer, code: int, reason: str) -> None:
+    """Tell the client why its connection ends, as a server's first frames must: SETTINGS
+    first (RFC 9113 section 3.4: a client discards anything else), then the GOAWAY."""
+    writer.write(_h2_frame(_SETTINGS, 0, 0) + _goaway(0, code, reason))
 
 
 def _with_max_streams(frame: bytes, limit: int) -> bytes:
@@ -560,7 +594,7 @@ class _Connection:
                 calls.difference_update({call for call in calls if call > last_stream})
             return None
 
-        client, server = _Frames(from_client), _Frames(from_server)
+        client, server = _Frames(from_client), _Frames(from_server, scan_settings=True)
 
         def tell_client(frame):
             nonlocal told
@@ -648,7 +682,11 @@ class _Connection:
             async with asyncio.timeout(self.read_timeout):
                 opening = await _first_frame(reader)
         except opening_errors as exc:
-            _log.info("connect face: the client sent no SETTINGS: %r", exc)
+            reason = _opening_refusal(exc, "client", self.read_timeout)
+            _log.info("connect face: %s", reason)
+            if isinstance(exc, (TimeoutError, _ProtocolError)):
+                code = _FRAME_SIZE_ERROR if isinstance(exc, _FrameSizeError) else _PROTOCOL_ERROR
+                _refuse_opening(writer, code, reason)
             upstream_writer.close()
             return
         client.feed(opening)
@@ -660,9 +698,9 @@ class _Connection:
             async with asyncio.timeout(self.read_timeout):
                 preface = await _first_frame(upstream_reader)
         except opening_errors as exc:
-            reason = f"the gRPC server sent no SETTINGS within {self.read_timeout:g} s"
-            _log.warning("connect face: %s: %r", reason, exc)
-            writer.write(_goaway(0, _INTERNAL_ERROR, reason))
+            reason = _opening_refusal(exc, "gRPC server", self.read_timeout)
+            _log.warning("connect face: %s", reason)
+            _refuse_opening(writer, _INTERNAL_ERROR, reason)
             upstream_writer.close()
             return
         server.feed(preface)
