@@ -3,6 +3,7 @@ server: every protocol it serves answers through that server, interceptors inclu
 
 import asyncio
 import base64
+import collections
 import json
 import struct
 
@@ -437,18 +438,31 @@ def opens(stream):
 async def silent_upstream():
     """A gRPC address that accepts, reads everything and never answers, so only the face's
     own rules end a connection relayed to it, and ``face(**options)`` serving over it.
-    ``state["close_after"]`` makes it hang up after that many seconds instead."""
+    ``state["close_after"]`` makes it hang up after that many seconds instead, and
+    ``state["mid_frame"]`` (an event) makes it send half a frame first and the rest when
+    the event is set."""
     held, faces = [], []
-    state = {"close_after": None}
+    state = {"close_after": None, "received": bytearray(), "mid_frame": None}
 
     async def accept(reader, writer):
         held.append(writer)
+        if state["mid_frame"] is not None:
+            # Half a PING, the rest once the test sets the event: the server is mid-frame.
+            ping = h2_frame(0x6, 0, 0, b"12345678")
+            writer.write(ping[:13])
+            await writer.drain()
+
+            async def finish():
+                await state["mid_frame"].wait()
+                writer.write(ping[13:])
+
+            asyncio.ensure_future(finish())
         if state["close_after"] is not None:
             await asyncio.sleep(state["close_after"])
             writer.close()
             return
-        while await reader.read(65536):
-            pass
+        while chunk := await reader.read(65536):
+            state["received"] += chunk
 
     upstream = await asyncio.start_server(accept, "127.0.0.1", 0)
     port = upstream.sockets[0].getsockname()[1]
@@ -483,22 +497,262 @@ async def closed_within(listener, payload, seconds):
         writer.close()
 
 
-async def test_a_client_opening_an_even_stream_is_closed(silent_upstream):
+def read_frames(data):
+    """(type, flags, stream, payload) for each whole HTTP/2 frame in ``data``."""
+    out = []
+    while len(data) >= 9:
+        high, low, kind, flags, stream = struct.unpack_from(">BHBBI", data)
+        size = high << 16 | low
+        out.append((kind, flags, stream & 0x7FFFFFFF, bytes(data[9 : 9 + size])))
+        data = data[9 + size :]
+    return out
+
+
+async def exchange(listener, payload, seconds):
+    """Send ``payload``; return whether the face closed within ``seconds``, and what it sent."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    writer.write(payload)
+    await writer.drain()
+    got = bytearray()
+    try:
+        async with asyncio.timeout(seconds):
+            while chunk := await reader.read(65536):
+                got += chunk
+        return True, got
+    except TimeoutError:
+        return False, got
+    finally:
+        writer.close()
+
+
+async def test_a_client_opening_an_even_stream_gets_a_goaway(silent_upstream):
     # A client never opens an even stream; grpcio ignores one silently, so a face that
-    # recorded it as a call would hold the connection, and its memory, forever.
+    # recorded it as a call would hold the connection, and its memory, forever. The
+    # client learns why, and which calls the server has (1).
     face, _ = silent_upstream
-    payload = PREFACE + SETTINGS + b"".join(opens(2 * n) for n in range(1, 1000))
-    assert await closed_within(await face(), payload, 2)
+    payload = PREFACE + SETTINGS + opens(1) + b"".join(opens(2 * n) for n in range(1, 1000))
+    closed, got = await exchange(await face(), payload, 2)
+    assert closed
+    (goaway,) = [f for f in read_frames(got) if f[0] == 0x7]
+    last, code = struct.unpack_from(">II", goaway[3])
+    assert (last, code) == (1, 0x1) and b"stream 2" in goaway[3][8:]
 
 
-async def test_open_calls_on_one_connection_are_bounded(silent_upstream):
-    face, _ = silent_upstream
-    listener = await face()
+async def test_a_call_past_the_limit_is_refused_alone(silent_upstream):
+    # The server advertises no limit, so the face holds DEFAULT_MAX_OPEN_CALLS: the next
+    # call gets ENHANCE_YOUR_CALM (not REFUSED_STREAM: the server receives its header
+    # block, so it may start it), the server that block and CANCEL, and the connection
+    # and its calls stay.
+    face, state = silent_upstream
     calls = connect_gen.DEFAULT_MAX_OPEN_CALLS
-    within = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls))
-    assert not await closed_within(listener, within, 1)
-    beyond = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls + 1))
-    assert await closed_within(listener, beyond, 2)
+    past = 2 * calls + 1
+    payload = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls + 1))
+    closed, got = await exchange(await face(), payload, 1)
+    assert not closed
+    assert read_frames(got) == [(0x3, 0, past, struct.pack(">I", 0xB))]
+    upstream = read_frames(bytes(state["received"])[len(PREFACE) :])
+    assert upstream[-2:] == [(0x1, 0x4, past, b"\x82"), (0x3, 0, past, struct.pack(">I", 0x8))]
+    assert sum(1 for f in upstream if f[0] == 0x1) == calls + 1
+
+
+async def test_a_refused_call_waits_for_the_end_of_its_header_block(silent_upstream):
+    # A header block split into HEADERS and CONTINUATION is one unit: the reset follows
+    # the CONTINUATION that ends it, never comes between.
+    face, state = silent_upstream
+    calls = connect_gen.DEFAULT_MAX_OPEN_CALLS
+    past = 2 * calls + 1
+    split = h2_frame(0x1, 0, past, b"") + h2_frame(0x9, 0x4, past, b"\x82")
+    payload = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls)) + split
+    closed, _ = await exchange(await face(), payload, 1)
+    assert not closed
+    upstream = read_frames(bytes(state["received"])[len(PREFACE) :])
+    assert [f[0] for f in upstream[-3:]] == [0x1, 0x9, 0x3]
+
+
+async def test_a_burst_past_the_limit_loses_no_call(short_idle):
+    # 1100 concurrent calls on one channel to a server advertising no limit: the face
+    # resets only the calls past 1000, each with ENHANCE_YOUR_CALM (never REFUSED_STREAM,
+    # which a client would retry on its own); every call it let through is answered.
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
+        say_call = channel.unary_unary(
+            "/echo.v1.Echo/Say",
+            request_serializer=Msg.SerializeToString,
+            response_deserializer=Msg.FromString,
+        )
+        answers = await asyncio.gather(
+            *[
+                say_call(Msg(text="slow"), metadata=tuple(STAMP.items()), timeout=30)
+                for _ in range(1100)
+            ],
+            return_exceptions=True,
+        )
+    answered = [a for a in answers if not isinstance(a, Exception)]
+    refused = [a for a in answers if isinstance(a, Exception)]
+    assert all(a.text == "slow|maya" for a in answered)
+    assert len(answered) == connect_gen.DEFAULT_MAX_OPEN_CALLS
+    assert all(
+        a.code() == grpc.StatusCode.RESOURCE_EXHAUSTED and "error code 11" in a.details()
+        for a in refused
+    ), {a.details() for a in refused}
+
+
+def _literal_headers(headers):
+    """An HPACK header block of literal fields without indexing (RFC 7541 6.2.2)."""
+    block = bytearray()
+    for name, value in headers:
+        block += b"\x00" + bytes([len(name)]) + name.encode() + bytes([len(value)]) + value.encode()
+    return bytes(block)
+
+
+def _opens_chat(stream, n):
+    """HEADERS opening an echo.v1.Echo/Chat call (bidi) numbered ``n``, body to come."""
+    block = _literal_headers(
+        [
+            (":method", "POST"),
+            (":scheme", "http"),
+            (":path", "/echo.v1.Echo/Chat"),
+            (":authority", "x"),
+            ("content-type", "application/grpc"),
+            ("te", "trailers"),
+            ("x-n", str(n)),
+        ]
+    )
+    return h2_frame(0x1, 0x4, stream, block)
+
+
+async def _chat_server(entered, options=()):
+    async def chat(requests, context):
+        entered.add(int(dict(context.invocation_metadata())["x-n"]))
+        await asyncio.sleep(30)
+        yield Msg()
+
+    codec = {"request_deserializer": Msg.FromString, "response_serializer": Msg.SerializeToString}
+    server = grpc.aio.server(options=list(options))
+    server.add_generic_rpc_handlers(
+        (
+            grpc.method_handlers_generic_handler(
+                "echo.v1.Echo", {"Chat": grpc.stream_stream_rpc_method_handler(chat, **codec)}
+            ),
+        )
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    return server, port
+
+
+async def _past_the_limit(port, held, past):
+    """Open ``held`` bidi calls, then ``past`` more; return the frames the client got."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    frames = FrameReader(reader, writer)
+    try:
+        writer.write(PREFACE + SETTINGS + b"".join(_opens_chat(2 * n + 1, n) for n in range(held)))
+        await writer.drain()
+        await asyncio.sleep(0.5)
+        writer.write(b"".join(_opens_chat(2 * n + 1, n) for n in range(held, held + past)))
+        await writer.drain()
+        await asyncio.sleep(1)
+        return frames.resets
+    finally:
+        frames.close()
+        writer.close()
+
+
+async def test_past_an_advertised_limit_only_the_server_refuses():
+    # The server advertises 5: the sixth to eighth calls reach it and it refuses them
+    # itself (REFUSED_STREAM, truthfully: their handlers never run). The face adds no
+    # reset of its own.
+    entered = set()
+    server, port = await _chat_server(entered, [("grpc.max_concurrent_streams", 5)])
+    listener = await connect_gen.serve(0, port, host="127.0.0.1")
+    try:
+        resets = await _past_the_limit(listener.port, 5, 3)
+        assert entered == set(range(5))
+        assert sorted(resets) == [(11, 0x7), (13, 0x7), (15, 0x7)]
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_past_the_faces_own_limit_a_call_is_never_said_unprocessed(monkeypatch):
+    # The server advertises none, so the face holds DEFAULT_MAX_OPEN_CALLS (5 here). The
+    # server receives a call past it (header compression needs the block) and may start
+    # it, so the client is told ENHANCE_YOUR_CALM, never REFUSED_STREAM, which a gRPC
+    # client retries on its own as "not processed".
+    monkeypatch.setattr(connect_gen, "DEFAULT_MAX_OPEN_CALLS", 5)
+    entered = set()
+    server, port = await _chat_server(entered)
+    listener = await connect_gen.serve(0, port, host="127.0.0.1")
+    try:
+        resets = await _past_the_limit(listener.port, 5, 3)
+        assert {code for _, code in resets} == {0xB}, resets
+        assert sorted(stream for stream, _ in resets) == [11, 13, 15]
+        assert set(range(5)) <= entered
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_no_frame_is_written_inside_a_servers_header_block(monkeypatch):
+    # The server's HEADERS without END_HEADERS, then a pause, then its CONTINUATION: a
+    # reset for a call past the limit waits for the block's end (RFC 9113 6.10).
+    monkeypatch.setattr(connect_gen, "DEFAULT_MAX_OPEN_CALLS", 2)
+    go = asyncio.Event()
+
+    async def accept(reader, writer):
+        await reader.readexactly(len(PREFACE))
+        writer.write(SETTINGS + h2_frame(0x1, 0, 1, b"\x88"))  # :status 200, block open
+        await writer.drain()
+        await go.wait()
+        writer.write(h2_frame(0x9, 0x4, 1, b""))  # CONTINUATION ends the block
+        await writer.drain()
+        while await reader.read(65536):
+            pass
+
+    upstream = await asyncio.start_server(accept, "127.0.0.1", 0)
+    listener = await connect_gen.serve(0, upstream.sockets[0].getsockname()[1], host="127.0.0.1")
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    frames = FrameReader(reader)
+    try:
+        writer.write(PREFACE + SETTINGS + opens(1) + opens(3))
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        writer.write(opens(5))
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        assert frames.kinds[0x3] == 0, "a reset went out inside the header block"
+        go.set()
+        await frames.until(lambda: frames.kinds[0x3] == 1, 2)
+        kinds = [f[0] for f in frames.frames] + [0x3]
+        assert kinds == [0x4, 0x1, 0x9, 0x3]
+    finally:
+        frames.close()
+        writer.close()
+        await listener.stop()
+        upstream.close()
+
+
+async def test_a_server_limit_makes_a_burst_queue():
+    # The scaffold's server advertises its limit; clients queue a burst behind it.
+    server = grpc.aio.server(options=[("grpc.max_concurrent_streams", 10)])
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(0, grpc_port, host="127.0.0.1")
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{listener.port}") as channel:
+            say_call = channel.unary_unary(
+                "/echo.v1.Echo/Say",
+                request_serializer=Msg.SerializeToString,
+                response_deserializer=Msg.FromString,
+            )
+            answers = await asyncio.gather(
+                *[say_call(Msg(text=str(n)), timeout=30) for n in range(50)],
+                return_exceptions=True,
+            )
+        assert [a.text for a in answers] == [f"{n}|" for n in range(50)]
+    finally:
+        await listener.stop()
+        await server.stop(None)
 
 
 async def test_a_stream_id_below_the_highest_opens_no_call(silent_upstream):
@@ -531,3 +785,149 @@ async def test_the_relay_ends_when_the_grpc_server_hangs_up(silent_upstream):
         assert await asyncio.wait_for(reader.read(), 1) == b""
     finally:
         writer.close()
+
+
+class FrameReader:
+    """Reads a connection's frames as they come, counting each type; with ``writer``, it
+    acknowledges the peer's SETTINGS as a client does."""
+
+    def __init__(self, reader, writer=None):
+        self._writer = writer
+        self.kinds = collections.Counter()
+        self.frames = []
+        self.resets = []
+        self.eof = False
+        self._task = asyncio.ensure_future(self._read(reader))
+
+    async def _read(self, reader):
+        buffer = bytearray()
+        while chunk := await reader.read(65536):
+            buffer += chunk
+            while len(buffer) >= 9:
+                high, low, kind, flags, stream = struct.unpack_from(">BHBBI", buffer)
+                size = high << 16 | low
+                if len(buffer) < 9 + size:
+                    break
+                self.kinds[kind] += 1
+                if kind == 0x4 and not flags & 0x1 and self._writer is not None:
+                    self._writer.write(h2_frame(0x4, 0x1, 0))
+                if kind == 0x3:
+                    (code,) = struct.unpack_from(">I", buffer, 9)
+                    self.resets.append((stream & 0x7FFFFFFF, code))
+                else:
+                    self.frames.append((kind, flags, stream, bytes(buffer[9 : 9 + size])))
+                del buffer[: 9 + size]
+        self.eof = True
+
+    async def until(self, condition, seconds):
+        async with asyncio.timeout(seconds):
+            while not condition():
+                await asyncio.sleep(0.02)
+
+    def close(self):
+        self._task.cancel()
+
+
+async def test_a_reading_client_past_the_limit_keeps_its_calls(silent_upstream):
+    # The server is mid-frame, so every refusal waits for that frame's end: far more of
+    # them than the face holds. A client that reads keeps its connection and its calls,
+    # and gets every refusal once the frame completes.
+    face, state = silent_upstream
+    state["mid_frame"] = asyncio.Event()
+    listener = await face()
+    calls, past = connect_gen.DEFAULT_MAX_OPEN_CALLS, 3000
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    frames = FrameReader(reader)
+    try:
+        writer.write(PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls)))
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        writer.write(b"".join(opens(2 * n + 1) for n in range(calls, calls + past)))
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        assert not frames.eof and listener._connections
+        state["mid_frame"].set()
+        await frames.until(lambda: frames.kinds[0x3] == past, 5)
+        assert not frames.eof and listener._connections
+        upstream = read_frames(bytes(state["received"])[len(PREFACE) :])
+        assert sum(1 for f in upstream if f[0] == 0x1) == calls + past
+    finally:
+        frames.close()
+        writer.close()
+
+
+async def test_a_client_that_reads_nothing_is_not_read(silent_upstream):
+    # The refusals cannot be written (the server stays mid-frame): past what the face
+    # holds it stops reading the client, so the client's own writes back up and the
+    # face's memory does not grow with them.
+    face, state = silent_upstream
+    state["mid_frame"] = asyncio.Event()
+    listener = await face()
+    calls = connect_gen.DEFAULT_MAX_OPEN_CALLS
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    try:
+        writer.write(PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls)))
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        flood = b"".join(opens(2 * n + 1) for n in range(calls, calls + 1_000_000))
+        writer.write(flood)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(writer.drain(), 2)
+        forwarded = read_frames(bytes(state["received"])[len(PREFACE) :])
+        assert sum(1 for f in forwarded if f[0] == 0x1) < calls + 20_000
+        assert listener._connections
+    finally:
+        writer.transport.abort()
+
+
+async def test_the_even_stream_goaway_waits_for_the_servers_frame(silent_upstream):
+    face, state = silent_upstream
+    state["mid_frame"] = asyncio.Event()
+    listener = await face()
+    reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
+    frames = FrameReader(reader)
+    try:
+        writer.write(PREFACE + SETTINGS + opens(1))
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        writer.write(opens(2))
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        state["mid_frame"].set()
+        await frames.until(lambda: frames.eof, 3)
+        kinds = [f[0] for f in frames.frames]
+        assert kinds == [0x6, 0x7]  # the server's frame whole, then the GOAWAY
+        last, code = struct.unpack_from(">II", frames.frames[-1][3])
+        assert (last, code) == (1, 0x1)
+    finally:
+        frames.close()
+        writer.close()
+
+
+async def test_at_the_scaffolds_limit_a_burst_fails_only_retry_safely():
+    # The scaffold advertises 1000: most of a 1200-call burst queues in the client, and
+    # any call grpcio refuses comes back REFUSED_STREAM, never processed.
+    server = grpc.aio.server(options=[("grpc.max_concurrent_streams", 1000)])
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(0, grpc_port, host="127.0.0.1")
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{listener.port}") as channel:
+            say_call = channel.unary_unary(
+                "/echo.v1.Echo/Say",
+                request_serializer=Msg.SerializeToString,
+                response_deserializer=Msg.FromString,
+            )
+            answers = await asyncio.gather(
+                *[say_call(Msg(text=str(n)), timeout=30) for n in range(1200)],
+                return_exceptions=True,
+            )
+        refused = [a for a in answers if isinstance(a, Exception)]
+        assert all("error code 7" in a.details() for a in refused), {
+            a.details() for a in refused
+        }
+        assert len(refused) < 600
+    finally:
+        await listener.stop()
+        await server.stop(None)
