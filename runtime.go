@@ -568,25 +568,47 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 	s.Wool.Debug("successful init of runner")
 
+	if err := s.initOpenAPI(ctx, env, cacheLocation); err != nil {
+		return s.Base.Runtime.InitErrorf(err, "cannot generate Open API document")
+	}
+	return s.Base.Runtime.InitResponse()
+}
+
+// openAPIScript is the project's OpenAPI generator, relative to its source
+// location: the scaffold ships it, and it dumps the schema of the app's REST
+// routes to openapi/api.swagger.json.
+const openAPIScript = "src/openapi.py"
+
+// initOpenAPI regenerates the OpenAPI document when the project ships the
+// generator and src/main.py changed since the last run. A project without the
+// generator publishes no OpenAPI document: its HTTP endpoint serves the probes
+// and its API is on another face (gRPC, Connect), so there is nothing to
+// generate and nothing is run.
+func (s *Runtime) initOpenAPI(ctx context.Context, env runners.RunnerEnvironment, cacheLocation string) error {
+	script := path.Join(s.Service.SourceLocation, openAPIScript)
+	hasScript, err := shared.FileExists(ctx, script)
+	if err != nil {
+		return err
+	}
+	if !hasScript {
+		s.Wool.Debug("no OpenAPI generator: the HTTP endpoint publishes no OpenAPI document", wool.Field("path", script))
+		return nil
+	}
 	openAPI := builders.NewDependencies("api",
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(cacheLocation)
-	openApiUpdate, err := openAPI.Updated(ctx)
-	if err != nil {
-		return s.Base.Runtime.InitError(err)
+	openAPIUpdate, err := openAPI.Updated(ctx)
+	if err != nil || !openAPIUpdate {
+		return err
 	}
-
-	if openApiUpdate {
-		s.Infof("generating Open API document")
-		if err := s.GenerateOpenAPI(ctx, env); err != nil {
-			return s.Base.Runtime.InitErrorf(err, "cannot generate Open API document")
-		}
-		if err := openAPI.UpdateCache(ctx); err != nil {
-			s.Wool.Warn("cannot update openapi cache", wool.ErrField(err))
-		}
-		s.Wool.Debug("generate Open API done")
+	s.Infof("generating Open API document")
+	if err := s.GenerateOpenAPI(ctx, env); err != nil {
+		return err
 	}
-
-	return s.Base.Runtime.InitResponse()
+	if err := openAPI.UpdateCache(ctx); err != nil {
+		s.Wool.Warn("cannot update openapi cache", wool.ErrField(err))
+	}
+	s.Wool.Debug("generate Open API done")
+	return nil
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
@@ -1358,7 +1380,7 @@ func (s *Runtime) EventHandler(event code.Change) error {
 // the OpenAPI spec. Convention: the project ships a small openapi.py that
 // imports src.main and dumps the schema. See templates/factory.
 func (s *Runtime) GenerateOpenAPI(ctx context.Context, env runners.RunnerEnvironment) error {
-	proc, err := env.NewProcess("uv", "run", "python", "src/openapi.py")
+	proc, err := env.NewProcess("uv", "run", "python", openAPIScript)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}
