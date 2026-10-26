@@ -370,21 +370,115 @@ async def test_max_response_bytes_bounds_answers_when_set(media):
                     )
                     assert text == "x" * size
                 elif "grpc-web" in media:
-                    assert "grpc-status: 8" in frames(r.content)[-1][1].decode()
-                    assert "larger than max" in frames(r.content)[-1][1].decode()
+                    trailers = frames(r.content)[-1][1].decode()
+                    assert "grpc-status: 9" in trailers  # FAILED_PRECONDITION
+                    assert "max_response_bytes" in trailers
                 else:
                     if streaming:
                         assert r.status_code == 200
                         assert len(frames(r.content)) == 1
                         error = json.loads(frames(r.content)[0][1])["error"]
                     else:
-                        assert r.status_code == 429
+                        # Not 429: the same call is refused the same way when retried.
+                        assert r.status_code == 400
                         error = r.json()
-                    assert error["code"] == "resource_exhausted"
-                    assert "larger than max" in error["message"], error
+                    assert error["code"] == "failed_precondition"
+                    assert error["message"] == (
+                        "the answer (4099 bytes) exceeds the Connect face's "
+                        "max_response_bytes (2048)"
+                    ), error
     finally:
         if listener is not None:
             await listener.stop()
+        await server.stop(None)
+
+
+@pytest.mark.parametrize("media", ["application/json", "application/connect+json"])
+async def test_max_response_bytes_counts_the_json_the_face_sends(media):
+    # 2040 characters: 2043 bytes as proto, within 2048, and 2051 as JSON, past it.
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(
+        0, grpc_port, host="127.0.0.1", max_message_bytes=1024, max_response_bytes=2048
+    )
+    try:
+        streaming = media.startswith("application/connect+")
+        body = json.dumps({"text": "big", "count": 2040}).encode()
+        async with httpx.AsyncClient() as client:
+            proto = await client.post(
+                _url(listener, "Say"),
+                content=Msg(text="big", count=2040).SerializeToString(),
+                headers={"content-type": "application/proto"},
+            )
+            r = await client.post(
+                _url(listener, "Count" if streaming else "Say"),
+                content=envelope(body) if streaming else body,
+                headers={"content-type": media},
+            )
+        assert proto.status_code == 200 and len(proto.content) == 2043
+        error = json.loads(frames(r.content)[-1][1])["error"] if streaming else r.json()
+        assert r.status_code == (200 if streaming else 400)
+        assert error == {
+            "code": "failed_precondition",
+            "message": (
+                "the answer (2051 bytes) exceeds the Connect face's max_response_bytes (2048)"
+            ),
+        }
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_a_raised_message_bound_raises_the_answer_bound():
+    # max_response_bytes defaults to the larger of DEFAULT_MAX_RESPONSE_BYTES and
+    # max_message_bytes: a service that raised its bound to 100 MiB answers 70 MiB.
+    server = grpc.aio.server(options=[("grpc.max_send_message_length", 100 * 2**20)])
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(
+        0, grpc_port, host="127.0.0.1", max_message_bytes=100 * 2**20
+    )
+    try:
+        size = 70 * 2**20
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                _url(listener, "Say"),
+                content=Msg(text="big", count=size).SerializeToString(),
+                headers={"content-type": "application/proto"},
+            )
+        assert r.status_code == 200, r.text[:200]
+        assert len(Msg.FromString(r.content).text) == size
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def test_the_default_answer_bound_is_16_mib():
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((_handler(),))
+    grpc_port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(0, grpc_port, host="127.0.0.1")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            within = await client.post(
+                _url(listener, "Say"),
+                content=Msg(text="big", count=16 * 2**20 - 8).SerializeToString(),
+                headers={"content-type": "application/proto"},
+            )
+            past = await client.post(
+                _url(listener, "Say"),
+                content=Msg(text="big", count=16 * 2**20).SerializeToString(),
+                headers={"content-type": "application/proto"},
+            )
+        assert within.status_code == 200
+        assert past.status_code == 400
+        assert "max_response_bytes (16777216)" in past.json()["message"]
+    finally:
+        await listener.stop()
         await server.stop(None)
 
 
