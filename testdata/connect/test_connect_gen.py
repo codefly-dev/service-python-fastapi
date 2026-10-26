@@ -325,8 +325,9 @@ async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
     # Bytes in either direction keep the relay open: a server stream whose client sends
     # nothing is not idle.
     async def drip(reader, writer):
-        for _ in range(6):
-            writer.write(b".")
+        writer.write(SETTINGS)
+        for n in range(6):
+            writer.write(h2_frame(0x6, 0, 0, bytes([n]) * 8))
             await writer.drain()
             await asyncio.sleep(0.2)
         writer.close()
@@ -339,7 +340,8 @@ async def test_a_grpc_connection_carrying_traffic_outlives_the_idle_bound():
         reader, writer = await asyncio.open_connection("127.0.0.1", listener.port)
         writer.write(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
         await writer.drain()
-        assert await asyncio.wait_for(reader.read(), 3) == b"......"
+        got = read_frames(await asyncio.wait_for(reader.read(), 3))
+        assert [f[3] for f in got if f[0] == 0x6] == [bytes([n]) * 8 for n in range(6)]
         writer.close()
     finally:
         await listener.stop()
@@ -446,6 +448,7 @@ async def silent_upstream():
 
     async def accept(reader, writer):
         held.append(writer)
+        writer.write(SETTINGS)  # a server's connection preface
         if state["mid_frame"] is not None:
             # Half a PING, the rest once the test sets the event: the server is mid-frame.
             ping = h2_frame(0x6, 0, 0, b"12345678")
@@ -549,7 +552,7 @@ async def test_a_call_past_the_limit_is_refused_alone(silent_upstream):
     payload = PREFACE + SETTINGS + b"".join(opens(2 * n + 1) for n in range(calls + 1))
     closed, got = await exchange(await face(), payload, 1)
     assert not closed
-    assert read_frames(got) == [(0x3, 0, past, struct.pack(">I", 0xB))]
+    assert [f for f in read_frames(got) if f[0] == 0x3] == [(0x3, 0, past, struct.pack(">I", 0xB))]
     upstream = read_frames(bytes(state["received"])[len(PREFACE) :])
     assert upstream[-2:] == [(0x1, 0x4, past, b"\x82"), (0x3, 0, past, struct.pack(">I", 0x8))]
     assert sum(1 for f in upstream if f[0] == 0x1) == calls + 1
@@ -569,10 +572,9 @@ async def test_a_refused_call_waits_for_the_end_of_its_header_block(silent_upstr
     assert [f[0] for f in upstream[-3:]] == [0x1, 0x9, 0x3]
 
 
-async def test_a_burst_past_the_limit_loses_no_call(short_idle):
+async def test_a_burst_past_the_limit_queues_and_loses_no_call(short_idle):
     # 1100 concurrent calls on one channel to a server advertising no limit: the face
-    # resets only the calls past 1000, each with ENHANCE_YOUR_CALM (never REFUSED_STREAM,
-    # which a client would retry on its own); every call it let through is answered.
+    # advertises its own 1000, so the client queues the rest, and every call is answered.
     async with grpc.aio.insecure_channel(f"127.0.0.1:{short_idle.port}") as channel:
         say_call = channel.unary_unary(
             "/echo.v1.Echo/Say",
@@ -586,14 +588,65 @@ async def test_a_burst_past_the_limit_loses_no_call(short_idle):
             ],
             return_exceptions=True,
         )
-    answered = [a for a in answers if not isinstance(a, Exception)]
-    refused = [a for a in answers if isinstance(a, Exception)]
-    assert all(a.text == "slow|maya" for a in answered)
-    assert len(answered) == connect_gen.DEFAULT_MAX_OPEN_CALLS
-    assert all(
-        a.code() == grpc.StatusCode.RESOURCE_EXHAUSTED and "error code 11" in a.details()
-        for a in refused
-    ), {a.details() for a in refused}
+    failed = {str(a)[:200] for a in answers if isinstance(a, Exception)}
+    assert not failed, failed
+    assert all(a.text == "slow|maya" for a in answers)
+
+
+def _settings(frame):
+    """The (id, value) entries of a SETTINGS frame."""
+    payload = frame[3]
+    return [struct.unpack_from(">HI", payload, at) for at in range(0, len(payload), 6)]
+
+
+async def _first_frames(upstream_preface, client_payload, monkeypatch=None):
+    """What the client receives, and what the server receives, when a fake gRPC server
+    sends ``upstream_preface`` 0.3 s after the connection and reads everything after."""
+    received = bytearray()
+
+    async def accept(reader, writer):
+        await asyncio.sleep(0.3)
+        writer.write(upstream_preface)
+        await writer.drain()
+        while chunk := await reader.read(65536):
+            received.extend(chunk)
+
+    upstream = await asyncio.start_server(accept, "127.0.0.1", 0)
+    listener = await connect_gen.serve(0, upstream.sockets[0].getsockname()[1], host="127.0.0.1")
+    try:
+        closed, got = await exchange(listener, client_payload, 1)
+        return read_frames(got), read_frames(bytes(received)[len(PREFACE) :])
+    finally:
+        await listener.stop()
+        upstream.close()
+
+
+async def test_a_server_advertising_no_limit_is_given_the_faces():
+    # grpcio advertises no SETTINGS_MAX_CONCURRENT_STREAMS: the client is told the face's
+    # DEFAULT_MAX_OPEN_CALLS in the server's own SETTINGS, so it queues within it.
+    server_settings = h2_frame(0x4, 0, 0, struct.pack(">HI", 0x4, 65535))
+    to_client, _ = await _first_frames(server_settings, PREFACE + SETTINGS)
+    assert to_client[0][0] == 0x4
+    assert _settings(to_client[0]) == [(0x4, 65535), (0x3, connect_gen.DEFAULT_MAX_OPEN_CALLS)]
+
+
+async def test_a_server_limit_reaches_the_client_untouched():
+    server_settings = h2_frame(0x4, 0, 0, struct.pack(">HI", 0x3, 7))
+    to_client, _ = await _first_frames(server_settings, PREFACE + SETTINGS)
+    assert _settings(to_client[0]) == [(0x3, 7)]
+
+
+async def test_the_client_is_read_once_the_servers_limit_is_known(monkeypatch):
+    # The client opens three calls at once; the server's SETTINGS (limit 2) arrives 0.3 s
+    # later. The face waits for it, so the third call goes to the server, which refuses it
+    # itself (retry-safe), rather than being reset by the face as past its own default.
+    monkeypatch.setattr(connect_gen, "DEFAULT_MAX_OPEN_CALLS", 2)
+    server_settings = h2_frame(0x4, 0, 0, struct.pack(">HI", 0x3, 2))
+    to_client, to_server = await _first_frames(
+        server_settings, PREFACE + SETTINGS + opens(1) + opens(3) + opens(5)
+    )
+    assert [f for f in to_client if f[0] == 0x3] == []
+    assert [f[0] for f in to_server] == [0x4, 0x1, 0x1, 0x1]
 
 
 def _literal_headers(headers):
@@ -782,7 +835,8 @@ async def test_the_relay_ends_when_the_grpc_server_hangs_up(silent_upstream):
                 break
             await asyncio.sleep(0.1)
         assert not listener._connections, "the face still holds the client's connection"
-        assert await asyncio.wait_for(reader.read(), 1) == b""
+        # The server's SETTINGS, then the end.
+        assert [f[0] for f in read_frames(await asyncio.wait_for(reader.read(), 1))] == [0x4]
     finally:
         writer.close()
 
@@ -896,7 +950,7 @@ async def test_the_even_stream_goaway_waits_for_the_servers_frame(silent_upstrea
         state["mid_frame"].set()
         await frames.until(lambda: frames.eof, 3)
         kinds = [f[0] for f in frames.frames]
-        assert kinds == [0x6, 0x7]  # the server's frame whole, then the GOAWAY
+        assert kinds == [0x4, 0x6, 0x7]  # the server's frame whole, then the GOAWAY
         last, code = struct.unpack_from(">II", frames.frames[-1][3])
         assert (last, code) == (1, 0x1)
     finally:
