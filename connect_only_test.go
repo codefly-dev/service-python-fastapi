@@ -142,6 +142,7 @@ func TestConnectOnlyServiceSyncs(t *testing.T) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skipf("docker is not available, Buf cannot run: %v", err)
 	}
+	ownTestContainers(t)
 	ctx := context.Background()
 	created, root := createConnectOnlyService(t)
 	identity, err := created.Identity.Proto()
