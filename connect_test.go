@@ -185,16 +185,7 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 		GRPCServer:     confirmAnswer(true),
 	})
 	code := filepath.Join(root, "code")
-	// The stubs Sync generates with Buf, generated the way the scaffold's own
-	// tests/rpc/conftest.py does when run directly: same plugins, no network
-	// plugin registry.
-	generated := filepath.Join(code, "src", "rpc", "_generated")
-	require.NoError(t, os.MkdirAll(generated, 0o755))
-	protoc := exec.Command("uv", "run", "python", "-m", "grpc_tools.protoc",
-		"-I../proto", "--python_out=src/rpc/_generated", "--grpc_python_out=src/rpc/_generated", "../proto/api.proto")
-	protoc.Dir = code
-	out, err := protoc.CombinedOutput()
-	require.NoError(t, err, "%s", out)
+	generateScaffoldStubs(t, code)
 
 	builder.FastAPI.Settings.ConnectEndpoint = true
 	require.NoError(t, builder.syncConnectFace())

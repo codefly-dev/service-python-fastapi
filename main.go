@@ -9,6 +9,8 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/contract"
@@ -56,8 +58,8 @@ const (
 const defaultProtoPath = standards.ProtoPath
 
 // GRPCServerSettings configures the optional service-owned grpc.aio listener.
-// Disabled by default: an unset grpc-server block leaves the service REST-only
-// and its generated layout unchanged.
+// Disabled by default: an unset grpc-server block leaves the service with no
+// gRPC listener and its generated layout unchanged.
 type GRPCServerSettings struct {
 	Enabled bool `yaml:"enabled"`
 
@@ -155,7 +157,7 @@ const uvImage = "ghcr.io/astral-sh/uv:" + uvVersion
 // *services.Base: Wool, Logger, Location, Identity, …) are promoted.
 //
 // FastAPI-specific: a richer Settings (with HotReload / PublicEndpoint)
-// and the REST endpoint handle. FastAPI source lives under ./code — the
+// and the endpoint handles. FastAPI source lives under ./code — the
 // Builder/Runtime set Service.SourceLocation to s.Local("code") during
 // Load.
 type Service struct {
@@ -166,15 +168,40 @@ type Service struct {
 	// the FastAPI settings; `s.Service.Settings` is the generic view.
 	Settings *Settings
 
-	RestEndpoint *v0.Endpoint
+	// HTTPEndpoint is the endpoint the app's HTTP listener (uvicorn) serves:
+	// the service's REST endpoint, whose routes src/openapi.py documents, or a
+	// plain HTTP one, which carries no API document (probes, a solution's own
+	// routes). Nil for a service whose faces are gRPC and Connect alone.
+	HTTPEndpoint *v0.Endpoint
 
 	// GRPCEndpoint is the service-owned gRPC endpoint, present only when
-	// Settings.GRPCServer.Enabled. Nil keeps the REST-only path untouched.
+	// Settings.GRPCServer.Enabled.
 	GRPCEndpoint *v0.Endpoint
 
 	// ConnectEndpoint is the Connect-family endpoint, present only when
 	// Settings.ConnectEndpoint.
 	ConnectEndpoint *v0.Endpoint
+}
+
+// findHTTPEndpoint returns the one endpoint the app's HTTP listener serves: a
+// REST or a plain HTTP endpoint. None is not an error — a service whose faces
+// are gRPC and Connect alone declares no HTTP endpoint — but two are, because
+// the process has one HTTP listener and could serve only one of them.
+func findHTTPEndpoint(ctx context.Context, endpoints []*v0.Endpoint) (*v0.Endpoint, error) {
+	found := resources.FindEndpointsByAPI(ctx, standards.REST, endpoints)
+	found = append(found, resources.FindEndpointsByAPI(ctx, standards.HTTP, endpoints)...)
+	switch len(found) {
+	case 0:
+		return nil, nil
+	case 1:
+		return found[0], nil
+	}
+	names := make([]string, 0, len(found))
+	for _, endpoint := range found {
+		names = append(names, endpoint.GetName())
+	}
+	sort.Strings(names)
+	return nil, fmt.Errorf("the app serves one HTTP listener, and the service declares %d HTTP endpoints (%s): keep one with api: rest or api: http", len(found), strings.Join(names, ", "))
 }
 
 // connectSettingError refuses a Connect face with no gRPC server to transcode
@@ -206,9 +233,10 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_PYTHON},
 		HotReload:  true,
 		Languages:  []agentv0.Language_Type{agentv0.Language_PYTHON},
-		// The agent can serve HTTP always and gRPC when a service opts in via
-		// grpc-server (and Connect beside it, over HTTP); advertising both
-		// declares the capability, not that every service exposes both.
+		// The agent serves HTTP when a service declares a REST or HTTP endpoint
+		// and gRPC when it opts in via grpc-server (and Connect beside it, over
+		// HTTP); advertising both declares the capability, not that every
+		// service exposes both.
 		Protocols: []agentv0.Protocol_Type{agentv0.Protocol_HTTP, agentv0.Protocol_GRPC},
 		ReadMe:    readme,
 	}.Build()

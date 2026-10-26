@@ -138,7 +138,7 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 	// confusing empty-network-mappings error further down.
 	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.FastAPI.HTTPEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})

@@ -37,11 +37,11 @@ import (
 //	                          plus the services.Base chain via
 //	                          *pythonservice.Service.
 //	FastAPI *Service        — fastapi-specific state: richer Settings
-//	                          and the REST endpoint.
+//	                          and the endpoint handles.
 //
 // Inherited: Init.
-// Overridden: Load (fastapi puts source under ./code, discovers REST
-// endpoint), Update (applies builder templates), Sync (gRPC codegen for
+// Overridden: Load (fastapi puts source under ./code, finds the HTTP
+// endpoint, if any), Update (applies builder templates), Sync (gRPC codegen for
 // declared dependencies and the optional service-owned gRPC server), Build
 // (Dockerfile and build plan preparation),
 // Deploy (k8s), Create (two-question Communicate + REST endpoint).
@@ -61,8 +61,9 @@ func NewBuilder(svc *Service) *Builder {
 	}
 }
 
-// Load overrides generic to place source under <service>/code and to
-// discover the REST endpoint.
+// Load overrides generic to place source under <service>/code and to find
+// the endpoint the app's HTTP listener serves, which a service whose faces are
+// gRPC and Connect alone does not declare.
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
@@ -71,9 +72,8 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	// spec into its own half of the settings alone, leaving grpc-server and
 	// connect-endpoint unset on every loaded service, so Sync generated no
 	// server code and Deploy rendered no gRPC or Connect port. It reports a
-	// failure in the response's state, not the error: stop there, or the
-	// endpoint lookup below replaces the real cause with "no rest endpoint
-	// found".
+	// failure in the response's state, not the error: stop there, so the
+	// response carries that cause.
 	resp, err := s.Base.Builder.LoadService(ctx, req, services.BuilderLoad{Settings: s.FastAPI.Settings})
 	s.Service.SourceLocation = s.Service.ResolveSourceLocation()
 	if err != nil || resp.GetState().GetState() == builderv0.LoadStatus_ERROR {
@@ -96,7 +96,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Base.Builder.LoadResponse()
 	}
 
-	s.FastAPI.RestEndpoint, err = resources.FindRestEndpoint(ctx, s.Endpoints)
+	s.FastAPI.HTTPEndpoint, err = findHTTPEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Base.Builder.LoadError(err)
 	}
@@ -552,20 +552,27 @@ func preparePodOverlay(overlay *services.PodTemplateOverlay) error {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
+	// The rendered pod is probed on the app's HTTP listener, the container's
+	// port 8080, which a service with no HTTP endpoint does not publish: say so
+	// rather than report the missing endpoint as missing health.
+	listener := s.FastAPI.HTTPEndpoint
+	if listener == nil {
+		return nil, fmt.Errorf("the deployment probes the HTTP endpoint (api: rest or api: http), and the service declares none: declare the endpoint its probes answer on")
+	}
 	// The current Core manifest profile requires all three intents. Require
 	// an authored startup/restart policy instead of inventing one from readiness.
-	plan := resources.PlanEndpointProbes(s.FastAPI.RestEndpoint)
+	plan := resources.PlanEndpointProbes(listener)
 	if plan.Startup == nil || plan.Liveness == nil {
 		return nil, fmt.Errorf("the Kubernetes manifest profile requires explicit endpoint health.startup and health.liveness; readiness is not a restart policy")
 	}
 	// A restricted render is what a cell runs, and a cell's execution
 	// admission refuses an exec probe: probe natively there.
-	probes, err := deploymentProbesFor(s.FastAPI.RestEndpoint, req.GetDeployment().GetKubernetes().GetProfile())
+	probes, err := deploymentProbesFor(listener, req.GetDeployment().GetKubernetes().GetProfile())
 	if err != nil {
 		return nil, err
 	}
 	for _, endpoint := range s.Endpoints {
-		if endpoint.GetName() != s.FastAPI.RestEndpoint.GetName() && endpoint.GetHealth() != nil {
+		if endpoint.GetName() != listener.GetName() && endpoint.GetHealth() != nil {
 			return nil, fmt.Errorf("declared health on additional endpoint %q requires a combined deployment probe; refusing to ignore it", endpoint.GetName())
 		}
 	}
@@ -665,12 +672,9 @@ func (s *Builder) Create(ctx context.Context, _ *builderv0.CreateRequest) (*buil
 	return s.Base.Builder.CreateResponse(ctx, s.FastAPI.Settings)
 }
 
-// CreateEndpoints materializes the REST endpoint.
-//
-// openapi/api.swagger.json is generated at Runtime time by src/openapi.py
-// (uv run python src/openapi.py). At Create time it doesn't exist yet —
-// that specific error is expected and swallowed with a debug log. Any
-// other LoadRestAPI failure (malformed JSON, permission, …) propagates.
+// CreateEndpoints materializes the REST endpoint from the OpenAPI document
+// the factory templates have just written (openapi/api.swagger.json); Init
+// regenerates it with src/openapi.py from then on.
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.swagger.json")
 	endpoint := s.Base.BaseEndpoint(standards.REST)
@@ -694,13 +698,9 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 		endpoint.Exposure = resources.ExposurePublic
 	}
 
-	rest, loadErr := resources.LoadRestAPI(ctx, shared.Pointer(openapiFile))
-	if loadErr != nil {
-		if !errors.Is(loadErr, os.ErrNotExist) && !isFileNotExistErr(loadErr) {
-			return s.Wool.Wrapf(loadErr, "cannot load rest api")
-		}
-		s.Wool.Debug("openapi spec not generated yet (expected at Create time)",
-			wool.Field("path", openapiFile))
+	rest, err := resources.LoadRestAPI(ctx, shared.Pointer(openapiFile))
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot load rest api")
 	}
 
 	api, err := resources.NewAPI(ctx, endpoint, resources.ToRestAPI(rest))
@@ -711,8 +711,8 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot declare scaffold health")
 	}
-	s.FastAPI.RestEndpoint = api
-	s.Endpoints = []*basev0.Endpoint{s.FastAPI.RestEndpoint}
+	s.FastAPI.HTTPEndpoint = api
+	s.Endpoints = []*basev0.Endpoint{api}
 
 	if s.FastAPI.Settings.GRPCServer.Enabled {
 		grpcEndpoint, grpcErr := s.grpcEndpoint(ctx)
@@ -753,13 +753,6 @@ func (s *Builder) grpcEndpoint(ctx context.Context) (*basev0.Endpoint, error) {
 		return nil, s.Wool.Wrapf(err, "cannot create grpc api")
 	}
 	return api, nil
-}
-
-// isFileNotExistErr matches the bespoke "file does not exist" error string
-// that resources.LoadRestAPI returns for missing files — it doesn't wrap
-// os.ErrNotExist, so errors.Is can't catch it directly.
-func isFileNotExistErr(err error) bool {
-	return err != nil && err.Error() == "file does not exist"
 }
 
 func (s *Builder) populateSettingsFromAnswers() error {
