@@ -112,5 +112,11 @@ WORKDIR /app/code
 # writes it. The builder writes both into the project before the build.
 COPY --chown=appuser {{.ServicePrefix}}code/uvicorn-log-config.json {{.ServicePrefix}}code/codefly_uvicorn_logging.py ./
 
+{{if .NoHTTPEndpoint -}}
+# No HTTP endpoint: the app runs under uvicorn for its lifespan (the gRPC
+# server, the Connect face) on a loopback port the system picks.
+CMD ["uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]
+{{- else -}}
 # Default REST port (overridden by codefly at runtime).
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
+{{- end}}
