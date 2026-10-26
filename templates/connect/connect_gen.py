@@ -66,12 +66,17 @@ _FRAME = struct.Struct(">BHBBI")
 _DATA, _HEADERS, _RST_STREAM, _SETTINGS, _GOAWAY, _CONTINUATION = 0x0, 0x1, 0x3, 0x4, 0x7, 0x9
 _END_STREAM_FLAG, _ACK_FLAG, _END_HEADERS_FLAG = 0x1, 0x1, 0x4
 _MAX_CONCURRENT_STREAMS = 0x3
-_PROTOCOL_ERROR, _REFUSED_STREAM = 0x1, 0x7
+_PUSH_PROMISE = 0x5
+_PROTOCOL_ERROR, _CANCEL, _ENHANCE_YOUR_CALM = 0x1, 0x8, 0xB
 # Calls one relayed connection may hold open when the gRPC server advertises no
 # SETTINGS_MAX_CONCURRENT_STREAMS (grpcio advertises none unless the service sets
-# grpc.max_concurrent_streams, as the scaffold's server does). A call past the limit is
-# refused alone, with REFUSED_STREAM, which a client retries safely: the server never
-# processed it. What the face tracks per connection is bounded by it.
+# grpc.max_concurrent_streams, as the scaffold's server does). Past it the face resets
+# the call alone: ENHANCE_YOUR_CALM to the client (gRPC's RESOURCE_EXHAUSTED, which a
+# client does not retry on its own), and CANCEL to the server. The server still receives
+# the call's header block, which keeps the connection's header compression in step, so it
+# may have started the call before the cancel: the face never promises it did not. What
+# the face tracks per connection is bounded by it. When the server advertises a limit the
+# face enforces nothing: the server refuses what is past it (REFUSED_STREAM), truthfully.
 DEFAULT_MAX_OPEN_CALLS = 1000
 # Bytes of frames for the client (refusals, a GOAWAY) the relay holds while the server's
 # frame in flight completes; past it the relay reads nothing more from the client until
@@ -265,48 +270,71 @@ class _Frames:
         self._payload = bytearray()
         self._keep = 0  # payload bytes still to read
         self._skip = 0  # payload bytes still to skip
+        self._in_block = False  # inside a header block: HEADERS ... CONTINUATION
         self.error: _ProtocolError | None = None
 
     @property
     def at_boundary(self) -> bool:
-        return not self._header and not self._keep and not self._skip
+        """Between two frames, and outside a header block: where another frame may go
+        (RFC 9113 section 6.10: nothing comes between a HEADERS and its CONTINUATION)."""
+        return not self._header and not self._keep and not self._skip and not self._in_block
 
-    def feed(self, data: bytes) -> list[tuple[int, bytes]]:
+    def feed(self, data: bytes, every_end: bool = False) -> list[tuple[int, bytes]]:
+        """Where frames end in ``data``: each end where ``on_frame`` returned bytes to
+        write after the frame, and, with ``every_end``, each end where another frame may
+        go. After a ``_ProtocolError``, the last end is the last place another frame
+        may go before the offending frame."""
         ends: list[tuple[int, bytes]] = []
-        at = 0
+        at, size = 0, len(data)
+        clear = 0 if self.at_boundary else -1  # the last such place in ``data``
         try:
-            while at < len(data):
+            while at < size:
                 if self._keep:
-                    step = min(self._keep, len(data) - at)
+                    step = min(self._keep, size - at)
                     self._payload += data[at : at + step]
                     self._keep -= step
                     at += step
-                    if not self._keep:
-                        self._emit()
+                    if self._keep:
+                        break
+                    self._emit()
                 elif self._skip:
-                    step = min(self._skip, len(data) - at)
+                    step = min(self._skip, size - at)
                     self._skip -= step
                     at += step
-                else:
-                    step = min(_FRAME.size - len(self._header), len(data) - at)
+                    if self._skip:
+                        break
+                elif self._header or size - at < _FRAME.size:
+                    step = min(_FRAME.size - len(self._header), size - at)
                     self._header += data[at : at + step]
                     at += step
                     if len(self._header) < _FRAME.size:
-                        continue
-                    high, low, kind, flags, stream = _FRAME.unpack(self._header)
+                        break
+                    self._start(*_FRAME.unpack(self._header))
                     self._header.clear()
-                    length = high << 16 | low
-                    self._frame = (kind, flags, stream & 0x7FFFFFFF)
-                    self._keep = min(length, _CONTROL_PAYLOAD) if kind in (_SETTINGS, _GOAWAY) else 0
-                    self._skip = length - self._keep
-                    if not self._keep:
-                        self._emit()
-                if self.at_boundary:
-                    ends.append((at, self._after))
-                    self._after = b""
+                else:  # a whole frame header in this chunk: read it in place
+                    self._start(*_FRAME.unpack_from(data, at))
+                    at += _FRAME.size
+                if not (self._keep or self._skip or self._in_block):
+                    clear = at
+                    if every_end or self._after:
+                        ends.append((at, self._after))
+                        self._after = b""
         except _ProtocolError as refusal:
             self.error = refusal
+            if clear > (ends[-1][0] if ends else 0):
+                ends.append((clear, b""))
         return ends
+
+    def _start(self, high, low, kind, flags, stream):
+        """A frame header read: what of its payload to keep, and its frame if none."""
+        length = high << 16 | low
+        self._frame = (kind, flags, stream & 0x7FFFFFFF)
+        if kind in (_HEADERS, _PUSH_PROMISE, _CONTINUATION):
+            self._in_block = not flags & _END_HEADERS_FLAG
+        self._keep = min(length, _CONTROL_PAYLOAD) if kind in (_SETTINGS, _GOAWAY) else 0
+        self._skip = length - self._keep
+        if not self._keep:
+            self._emit()
 
     def _emit(self):
         payload = bytes(self._payload)
@@ -339,14 +367,13 @@ class _Connection:
         The frame headers say which calls are open: a client HEADERS on a new stream (odd,
         above every stream before it) opens one, and the server's END_STREAM, either
         side's RST_STREAM, or the server's GOAWAY above the stream ends it. A call past
-        what the server allows at once (SETTINGS_MAX_CONCURRENT_STREAMS,
-        ``DEFAULT_MAX_OPEN_CALLS`` when it advertises none) is refused alone: the client
-        gets RST_STREAM REFUSED_STREAM, and the server its header block, which keeps the
-        connection's header compression in step, then the same reset. A refusal is
-        written between two of the server's frames; while more than
-        ``_MAX_QUEUED_FOR_CLIENT`` bytes of them wait, the client is not read. A client
-        that opens an even stream, which no HTTP/2 client does, gets a GOAWAY naming why,
-        and the connection is closed."""
+        the server's own SETTINGS_MAX_CONCURRENT_STREAMS is relayed as it came, for the
+        server to refuse. When the server advertises none, a call past
+        ``DEFAULT_MAX_OPEN_CALLS`` is reset alone (see there). The face's frames for the
+        client are written only between two of the server's frames and outside a header
+        block; while more than ``_MAX_QUEUED_FOR_CLIENT`` bytes of them wait, the client
+        is not read. A client that opens an even stream, which no HTTP/2 client does, gets
+        a GOAWAY naming why, and the connection is closed."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
         loop = asyncio.get_running_loop()
@@ -355,6 +382,7 @@ class _Connection:
         highest = accepted = 0
         refusing = 0  # the refused stream whose header block is still arriving
         max_calls = DEFAULT_MAX_OPEN_CALLS
+        advertised = False  # the server sent SETTINGS_MAX_CONCURRENT_STREAMS
         to_client = bytearray()  # frames for the client, written at a frame boundary
         flushed = asyncio.Event()  # set when the server pump wrote them
         told = False  # the face wrote to the client since the client pump last drained
@@ -368,9 +396,10 @@ class _Connection:
                 if len(calls) < max_calls:
                     calls.add(stream)
                     accepted = stream
-                else:
+                elif not advertised:
                     refusing = stream
-                    tell_client(_rst_stream(stream, _REFUSED_STREAM))
+                    tell_client(_rst_stream(stream, _ENHANCE_YOUR_CALM))
+                # Past an advertised limit the server refuses the call itself.
             elif kind == _HEADERS and stream % 2 == 0:
                 raise _ProtocolError(f"HEADERS on stream {stream}, which a server opens")
             elif kind == _RST_STREAM:
@@ -380,18 +409,18 @@ class _Connection:
             if refusing and stream == refusing and kind in (_HEADERS, _CONTINUATION):
                 if flags & _END_HEADERS_FLAG:
                     refusing = 0
-                    return _rst_stream(stream, _REFUSED_STREAM)  # after its header block
+                    return _rst_stream(stream, _CANCEL)  # after its header block
             return None
 
         def from_server(kind, flags, stream, payload):
-            nonlocal max_calls
+            nonlocal max_calls, advertised
             if kind == _RST_STREAM or (kind in (_DATA, _HEADERS) and flags & _END_STREAM_FLAG):
                 calls.discard(stream)
             elif kind == _SETTINGS and not flags & _ACK_FLAG:
                 for at in range(0, len(payload) - 5, 6):
                     key, value = struct.unpack_from(">HI", payload, at)
                     if key == _MAX_CONCURRENT_STREAMS:
-                        max_calls = value
+                        max_calls, advertised = value, True
             elif kind == _GOAWAY and len(payload) >= 4:
                 # Streams above the last one the server processes are never answered.
                 last_stream = struct.unpack_from(">I", payload)[0] & 0x7FFFFFFF
@@ -403,7 +432,9 @@ class _Connection:
         def tell_client(frame):
             nonlocal told
             # Only between two of the server's frames: queued while one is half relayed,
-            # and written by the server pump at that frame's end.
+            # and written by the server pump at that frame's end. Nothing to a client gone.
+            if writer.is_closing():
+                return
             if server.at_boundary and not to_client:
                 writer.write(frame)
                 told = True
@@ -417,30 +448,40 @@ class _Connection:
                 await flushed.wait()
 
         def relay(chunk, sink, frames, ends, queued):
+            # As few writes as the frames to insert allow: one per insertion point.
             at = 0
             for end, after in ends:
+                if not after and not queued:
+                    continue
                 sink.write(chunk[at:end] + after)
                 at = end
                 if queued:
                     sink.write(bytes(queued))
                     queued.clear()
                     flushed.set()
-            if frames.error is None:
-                sink.write(chunk[at:])
+            stop = len(chunk) if frames.error is None else (ends[-1][0] if ends else at)
+            if stop > at:
+                sink.write(chunk[at:stop])
 
         async def pump(source, sink, frames, queued):
             nonlocal last, told
             try:
                 while chunk := await source.read(65536):
+                    if writer.is_closing():
+                        return  # the client is gone: nothing left to relay
                     last = loop.time()
-                    relay(chunk, sink, frames, frames.feed(chunk), queued)
+                    relay(chunk, sink, frames, frames.feed(chunk, bool(queued)), queued)
                     if frames.error is not None:
                         _log.info("connect face: closing a gRPC connection: %s", frames.error)
                         tell_client(_goaway(accepted, _PROTOCOL_ERROR, str(frames.error)))
                         try:
                             await asyncio.wait_for(written(), _GOAWAY_GRACE_S)
                         except TimeoutError:
-                            pass
+                            _log.warning(
+                                "connect face: the GOAWAY was not delivered: the server's "
+                                "frame in flight did not complete within %s s",
+                                _GOAWAY_GRACE_S,
+                            )
                         return
                     await sink.drain()
                     if sink is not writer:

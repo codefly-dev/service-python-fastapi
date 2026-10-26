@@ -34,7 +34,7 @@ def register(server: grpc.aio.Server) -> None:
 # (SETTINGS_MAX_CONCURRENT_STREAMS) so most of a burst queues in the client. The rest
 # come back REFUSED_STREAM (grpcio counts a stream a little longer than the client
 # does), which the server never processed and a client may safely retry. The Connect
-# face reads the same setting and enforces it.
+# face relays a call past it as it came, for this server to refuse.
 MAX_CONCURRENT_STREAMS = 1000
 
 
