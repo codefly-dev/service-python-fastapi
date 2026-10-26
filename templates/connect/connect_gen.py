@@ -18,24 +18,29 @@ metadata come back as headers and trailers. Client and bidirectional streams nee
 end to end, so they are served on the gRPC protocol only.
 
 Request bodies are bounded by ``max_message_bytes`` (gRPC's 4 MiB unless the service
-raises it) before they are read. An answer the face transcodes is bounded apart, by
-``max_response_bytes``: by default the larger of ``DEFAULT_MAX_RESPONSE_BYTES`` (16 MiB)
-and ``max_message_bytes``, so a service that keeps its requests small still answers
-with what its handler returns, and one that raised its message bound keeps answers that
-large. The bound counts the bytes the face sends: the answer as the service encoded it
-for proto, the converted document for JSON. Past it the call ends ``failed_precondition``
-naming ``max_response_bytes``: the answer is too large for this face's configuration, and
-asking again does not change it. Within the bound, Connect and gRPC-Web return what the
-gRPC server returns. Both bounds are keyword options to ``serve`` and ``start``; a relayed
-gRPC call keeps the service's and the caller's own bounds.
+raises it) before they are read. Answers are bounded apart, on the proto the service
+returns, by the codec the caller asked for:
 
-What a transcoded answer costs the face: while a call is in flight it holds the answer as
-received and its encoding, each at most ``max_response_bytes``, until the client reads
-it. Converting to JSON holds more while it runs, about 13 times the proto size for a list
-of floats (protobuf 6.33), so about 210 MiB at the default bound; conversions run on the
-face's event loop, one at a time, so that peak does not add up across calls. A proto
-answer is not converted. The face does not bound how many calls are in flight, as the
-gRPC server does not.
+- ``max_response_bytes`` for an answer relayed as proto (Connect and gRPC-Web proto): by
+  default the larger of ``DEFAULT_MAX_RESPONSE_BYTES`` (16 MiB) and ``max_message_bytes``.
+  The face holds such an answer about twice over while it writes it, beyond the
+  service's own copy: measured, 33 MiB for a 16 MiB answer.
+- ``max_json_response_bytes`` for an answer converted to JSON: by default the larger of
+  ``DEFAULT_MAX_JSON_RESPONSE_BYTES`` (4 MiB, the bound every answer had before the two
+  were apart) and ``max_message_bytes``. It is checked before the conversion, because the
+  conversion is what costs: measured as process memory (protobuf 6.33, one 4 MiB answer),
+  a packed list of floats peaks at 18 times the proto, nested messages at 62 times, and a
+  list of enums at 130 times (its JSON alone is 25 times the proto). So up to about
+  520 MiB at the default, for one conversion; conversions run on the face's event loop
+  one at a time, so that peak does not add up across calls.
+
+Past its bound a call ends ``failed_precondition`` naming the bound: the answer is too
+large for this face's configuration, and asking again does not change it. Within it,
+Connect and gRPC-Web return what the gRPC server returns, and a refusal the service sends
+keeps its code and words. Both bounds are positive numbers of bytes, keyword options to
+``serve`` and ``start``; a relayed gRPC call keeps the service's and the caller's own
+bounds. The face does not bound how many calls are in flight, as the gRPC server does
+not: each holds its answer until its client reads it.
 
 Every read is bounded in time: an HTTP/1.1 read by ``read_timeout`` (``idle_timeout``
 between requests), and a relayed gRPC connection is closed once it has had no open call
@@ -77,6 +82,7 @@ PORT_ENV = "CODEFLY_CONNECT_PORT"
 DEFAULT_PORT = 8081
 DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 DEFAULT_READ_TIMEOUT_S = 30.0
 DEFAULT_IDLE_TIMEOUT_S = 120.0
 
@@ -132,7 +138,9 @@ _TRANSPORT = frozenset(
 _TRANSPORT_PREFIXES = ("connect-", "grpc-", "x-grpc-web", ":")
 _GRPC_TIMEOUT = re.compile(r"^(\d{1,8})([HMSmun])$")
 # grpcio's refusal of an answer past the face's own receive bound (its channel is the client).
-_ANSWER_PAST_BOUND = re.compile(r"CLIENT: Received message larger than max \((\d+) vs\. (\d+)\)")
+_ANSWER_PAST_BOUND = re.compile(
+    r"Stream removed \(CLIENT: Received message larger than max \((\d+) vs\. (\d+)\)\)"
+)
 _GRPC_UNITS = {"H": 3600.0, "M": 60.0, "S": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9}
 _CODES = {
     grpc.StatusCode.CANCELLED: ("canceled", 499),
@@ -166,18 +174,12 @@ class CallError(Exception):
 
     @classmethod
     def of(cls, error: grpc.aio.AioRpcError) -> CallError:
-        code, details = error.code(), error.details() or ""
-        past = _ANSWER_PAST_BOUND.search(details)
-        if code is grpc.StatusCode.RESOURCE_EXHAUSTED and past:
-            code, details = _answer_past_bound(int(past.group(1)), int(past.group(2)))
-        return cls(code, details, error.initial_metadata() or (), error.trailing_metadata() or ())
-
-
-def _answer_past_bound(size: int, bound: int) -> tuple[grpc.StatusCode, str]:
-    return (
-        grpc.StatusCode.FAILED_PRECONDITION,
-        f"the answer ({size} bytes) exceeds the Connect face's max_response_bytes ({bound})",
-    )
+        return cls(
+            error.code(),
+            error.details() or "",
+            error.initial_metadata() or (),
+            error.trailing_metadata() or (),
+        )
 
 
 class _Plain(Exception):
@@ -212,20 +214,32 @@ async def serve(
     grpc_host: str = "127.0.0.1",
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
     max_response_bytes: int | None = None,
+    max_json_response_bytes: int | None = None,
     read_timeout: float = DEFAULT_READ_TIMEOUT_S,
     idle_timeout: float = DEFAULT_IDLE_TIMEOUT_S,
 ) -> ConnectFace:
     """Start the Connect face on ``host``:``port`` (0 for an ephemeral one) over the
     grpc.aio server listening on ``grpc_host``:``grpc_port``, and return it started.
     Call it on the loop that serves the gRPC server, once that server listens."""
-    if max_response_bytes is None:
-        max_response_bytes = max(DEFAULT_MAX_RESPONSE_BYTES, max_message_bytes)
+    bounds = _AnswerBounds(
+        _positive(
+            "max_response_bytes", max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES, max_message_bytes
+        ),
+        _positive(
+            "max_json_response_bytes",
+            max_json_response_bytes,
+            DEFAULT_MAX_JSON_RESPONSE_BYTES,
+            max_message_bytes,
+        ),
+    )
     target = f"{grpc_host}:{grpc_port}"
     channel = grpc.aio.insecure_channel(
         target,
         options=[
-            # The face receives the service's answers and sends it the requests.
-            ("grpc.max_receive_message_length", max_response_bytes),
+            # The face receives the service's answers and sends it the requests. The
+            # channel stops an answer past both bounds before it is buffered; the face
+            # checks the bound of the call's codec itself.
+            ("grpc.max_receive_message_length", bounds.received),
             ("grpc.max_send_message_length", max_message_bytes),
         ],
     )
@@ -233,7 +247,7 @@ async def serve(
         channel,
         (grpc_host, grpc_port),
         max_message_bytes,
-        max_response_bytes,
+        bounds,
         read_timeout,
         idle_timeout,
     )
@@ -256,6 +270,29 @@ async def serve(
     bound = server.sockets[0].getsockname()[1]
     face = ConnectFace(server, channel, bound)
     return face
+
+
+def _positive(name: str, value: int | None, default: int, message_bound: int) -> int:
+    """A bound as given, or by default the larger of ``default`` and the message bound."""
+    if value is None:
+        return max(default, message_bound)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number of bytes, not {value}")
+    return value
+
+
+class _AnswerBounds:
+    """The answers the face takes from the service: ``proto`` for a codec that relays
+    them as they are, ``json`` for one that converts them, checked before converting."""
+
+    def __init__(self, proto: int, json: int):
+        self.proto, self.json = proto, json
+        self.received = max(proto, json)
+
+    def of(self, codec: _Codec) -> tuple[int, str]:
+        if codec.name == "proto":
+            return self.proto, "max_response_bytes"
+        return self.json, "max_json_response_bytes"
 
 
 async def start(grpc_port: int, **options) -> ConnectFace | None:
@@ -380,9 +417,9 @@ class _Frames:
 
 
 class _Connection:
-    def __init__(self, channel, grpc_address, limit, answer_limit, read_timeout, idle_timeout):
+    def __init__(self, channel, grpc_address, limit, answer_bounds, read_timeout, idle_timeout):
         self.channel, self.grpc_address, self.limit = channel, grpc_address, limit
-        self.answer_limit = answer_limit
+        self.answer_bounds = answer_bounds
         self.read_timeout, self.idle_timeout = read_timeout, idle_timeout
 
     async def serve(self, reader, writer):
@@ -644,7 +681,7 @@ class _Connection:
             request.headers,
             headers,
             self.limit,
-            self.answer_limit,
+            self.answer_bounds,
         )
         await protocol.answer(exchange, call, body, headers)
 
@@ -675,15 +712,11 @@ class _Codec:
         except (json_format.ParseError, UnicodeDecodeError, ValueError) as exc:
             raise CallError(grpc.StatusCode.INVALID_ARGUMENT, f"unmarshal JSON: {exc}") from exc
 
-    def response(self, cls, data: bytes, limit: int) -> bytes:
-        """The answer in this codec; the proto as received is within ``limit`` already."""
+    def response(self, cls, data: bytes) -> bytes:
         if self.name == "proto":
             return data
         document = json_format.MessageToDict(cls.FromString(data))
-        encoded = json.dumps(document, separators=(",", ":")).encode()
-        if len(encoded) > limit:
-            raise CallError(*_answer_past_bound(len(encoded), limit))
-        return encoded
+        return json.dumps(document, separators=(",", ":")).encode()
 
 
 def _codec(name):
@@ -694,9 +727,11 @@ class _Call:
     """One call dispatched through the gRPC server: request bytes in the protocol's
     codec, answers out in it."""
 
-    def __init__(self, channel, path, method, codec, raw_headers, headers, limit, answer_limit):
+    def __init__(self, channel, path, method, codec, raw_headers, headers, limit, answer_bounds):
         self.channel, self.path, self.method, self.codec = channel, path, method, codec
-        self.limit, self.answer_limit = limit, answer_limit
+        self.limit = limit
+        self.answer_bound, self.answer_bound_name = answer_bounds.of(codec)
+        self.received_bound = answer_bounds.received
         self.input = message_factory.GetMessageClass(method.input_type)
         self.output = message_factory.GetMessageClass(method.output_type)
         self.metadata = _metadata(raw_headers)
@@ -729,6 +764,32 @@ class _Call:
             )
         return payload
 
+    def answer(self, data: bytes) -> bytes:
+        """An answer in the call's codec, within the bound of that codec, checked before it
+        is converted: the conversion is what costs (see the module's docstring)."""
+        if len(data) > self.answer_bound:
+            raise self._too_large(len(data))
+        return self.codec.response(self.output, data)
+
+    def failed(self, error: grpc.aio.AioRpcError) -> CallError:
+        """The call's status. An answer past the channel's own receive bound (one past
+        every bound of the face) is refused by grpcio before it is buffered, with only its
+        text to say so: it is the face's refusal when that text is grpcio's own and names
+        exactly the bound the face set. A service passing on a refusal from its own client
+        names that client's bound, and keeps its code and words."""
+        past = _ANSWER_PAST_BOUND.fullmatch(error.details() or "")
+        own = past is not None and int(past.group(2)) == self.received_bound
+        if error.code() is grpc.StatusCode.RESOURCE_EXHAUSTED and own:
+            return self._too_large(int(past.group(1)))
+        return CallError.of(error)
+
+    def _too_large(self, size: int) -> CallError:
+        return CallError(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            f"the answer ({size} bytes) exceeds the Connect face's {self.answer_bound_name} "
+            f"({self.answer_bound})",
+        )
+
     async def unary(self, message: bytes):
         """The answer and the header and trailer metadata of a unary call."""
         request = self.codec.request(self.input, message)
@@ -738,12 +799,12 @@ class _Call:
         try:
             answer = await call
             return (
-                self.codec.response(self.output, answer, self.answer_limit),
+                self.answer(answer),
                 tuple(await call.initial_metadata() or ()),
                 tuple(await call.trailing_metadata() or ()),
             )
         except grpc.aio.AioRpcError as exc:
-            raise CallError.of(exc) from None
+            raise self.failed(exc) from None
 
     def stream(self, message: bytes):
         request = self.codec.request(self.input, message)
@@ -903,11 +964,11 @@ async def _relay(exchange, call, stream):
         return stream.trailer
     try:
         async for answer in stream:
-            data = call.codec.response(call.output, answer, call.answer_limit)
+            data = call.answer(answer)
             await exchange.send(h11.Data(data=_ENVELOPE.pack(0, len(data)) + data))
         return tuple(await stream.trailing_metadata() or ())
     except grpc.aio.AioRpcError as exc:
-        return CallError.of(exc)
+        return call.failed(exc)
     except CallError as error:
         return error
     finally:
