@@ -259,6 +259,12 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	// requires the live advertisement, not the linked core version.
 	advertisement.Contract = contract.Current()
 	advertisement.Contract.Capabilities = append(advertisement.Contract.Capabilities, contract.DeploymentCompositionProvenance)
+	// The Runtime names what a native start ran on its StartStatus
+	// (startedartifact.go), so a consumer pinning the build a process runs
+	// reads it here instead of deriving a path from the python layout. The
+	// capability is advertised because this agent calls
+	// ReportStartedArtifact; an agent that does not must not advertise it.
+	advertisement.Contract.Capabilities = append(advertisement.Contract.Capabilities, contract.RuntimeStartedArtifact)
 	return advertisement, nil
 }
 

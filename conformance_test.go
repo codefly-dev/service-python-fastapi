@@ -420,3 +420,68 @@ func TestNixBackendIsAssertedInCI(t *testing.T) {
 			"so a runner that lost nix skips instead of failing")
 	}
 }
+
+// TestEveryStartResponseNamesWhatItRan protects the trap in
+// runtime-started-artifact/v1: core CONSUMES the report at each
+// `StartResponse`, so a Start path that answers STARTED without going through
+// `started()` stamps no artifact, and a native run then refuses a service that
+// is up (cli#993). The failure is silent here — the agent builds, the suite
+// passes, the service serves — and only shows up as a refused delivery, so the
+// invariant is asserted on the source rather than left to review.
+//
+// `started()` is the one legal caller. A new path that needs its own response
+// calls it too; a path that must NOT report is a failure, and failures go
+// through StartError, which discards the report by contract.
+func TestEveryStartResponseNamesWhatItRan(t *testing.T) {
+	files, err := runtimeGoFiles(".")
+	if err != nil {
+		t.Fatalf("enumerate runtime source: %v", err)
+	}
+	sites := 0
+	reported := false
+	for _, name := range files {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		content := string(src)
+		sites += strings.Count(content, "Runtime.StartResponse()")
+
+		// The one legal call site, and the report that must precede it in the
+		// same body.
+		body := startedBody(content)
+		if body == "" {
+			continue
+		}
+		if !strings.Contains(body, "Runtime.StartResponse()") {
+			t.Errorf("%s: started() does not answer STARTED", name)
+		}
+		if index := strings.Index(body, "ReportStartedArtifact("); index >= 0 && index < strings.Index(body, "Runtime.StartResponse()") {
+			reported = true
+		} else {
+			t.Errorf("%s: started() answers STARTED without naming what it ran first; StartResponse consumes the report, so the order is the behaviour", name)
+		}
+	}
+	if sites != 1 {
+		t.Errorf("found %d StartResponse call sites, want exactly 1 (started()); a second one is a start that names no build", sites)
+	}
+	if !reported {
+		t.Error("no started() reporting the artifact was found in the runtime source")
+	}
+}
+
+// startedBody is the source of `func (s *Runtime) started()`, from its opening
+// brace to the first line that closes it at column zero. Crude, and enough: it
+// is one short function whose body is what the assertion above is about.
+func startedBody(content string) string {
+	const signature = "func (s *Runtime) started() "
+	start := strings.Index(content, signature)
+	if start < 0 {
+		return ""
+	}
+	rest := content[start:]
+	if end := strings.Index(rest, "\n}\n"); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}
