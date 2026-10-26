@@ -96,13 +96,15 @@ _PUSH_PROMISE = 0x5
 _PROTOCOL_ERROR, _CANCEL, _ENHANCE_YOUR_CALM = 0x1, 0x8, 0xB
 # Calls one relayed connection may hold open when the gRPC server advertises no
 # SETTINGS_MAX_CONCURRENT_STREAMS (grpcio advertises none unless the service sets
-# grpc.max_concurrent_streams, as the scaffold's server does). Past it the face resets
-# the call alone: ENHANCE_YOUR_CALM to the client (gRPC's RESOURCE_EXHAUSTED, which a
-# client does not retry on its own), and CANCEL to the server. The server still receives
-# the call's header block, which keeps the connection's header compression in step, so it
-# may have started the call before the cancel: the face never promises it did not. What
-# the face tracks per connection is bounded by it. When the server advertises a limit the
-# face enforces nothing: the server refuses what is past it (REFUSED_STREAM), truthfully.
+# grpc.max_concurrent_streams, as the scaffold's server does). The face advertises it to
+# the client in the server's first SETTINGS, so a client that keeps to HTTP/2 queues its
+# calls within it. Past it (a client that does not) the face resets the call alone:
+# ENHANCE_YOUR_CALM to the client (gRPC's RESOURCE_EXHAUSTED, which a client does not
+# retry on its own), and CANCEL to the server. The server still receives the call's
+# header block, which keeps the connection's header compression in step, so it may have
+# started the call before the cancel: the face never promises it did not. What the face
+# tracks per connection is bounded by it. When the server advertises a limit the face
+# enforces nothing: the server refuses what is past it (REFUSED_STREAM), truthfully.
 DEFAULT_MAX_OPEN_CALLS = 1000
 # Bytes of frames for the client (refusals, a GOAWAY) the relay holds while the server's
 # frame in flight completes; past it the relay reads nothing more from the client until
@@ -416,6 +418,24 @@ class _Frames:
         self._after = self._on_frame(*self._frame, payload) or b""
 
 
+async def _server_preface(reader) -> bytes:
+    """The server's first frame, whole (RFC 9113 section 3.4: a SETTINGS frame)."""
+    header = await reader.readexactly(_FRAME.size)
+    high, low, *_ = _FRAME.unpack(header)
+    return header + await reader.readexactly(high << 16 | low)
+
+
+def _with_max_streams(frame: bytes, limit: int) -> bytes:
+    """A server SETTINGS frame that advertises no SETTINGS_MAX_CONCURRENT_STREAMS, with
+    ``limit`` added: the client then holds its calls within what the face enforces. The
+    client acknowledges it as the server's one frame, so the server sees what it expects."""
+    _, _, kind, flags, stream = _FRAME.unpack_from(frame)
+    if kind != _SETTINGS or flags & _ACK_FLAG:
+        return frame
+    payload = frame[_FRAME.size :] + struct.pack(">HI", _MAX_CONCURRENT_STREAMS, limit)
+    return _h2_frame(_SETTINGS, flags, stream, payload)
+
+
 class _Connection:
     def __init__(self, channel, grpc_address, limit, answer_bounds, read_timeout, idle_timeout):
         self.channel, self.grpc_address, self.limit = channel, grpc_address, limit
@@ -439,16 +459,18 @@ class _Connection:
         """gRPC over HTTP/2: the bytes go to the gRPC server as they came, until either
         side closes, or the connection has had no open call for ``idle_timeout``.
 
-        The frame headers say which calls are open: a client HEADERS on a new stream (odd,
-        above every stream before it) opens one, and the server's END_STREAM, either
-        side's RST_STREAM, or the server's GOAWAY above the stream ends it. A call past
-        the server's own SETTINGS_MAX_CONCURRENT_STREAMS is relayed as it came, for the
-        server to refuse. When the server advertises none, a call past
-        ``DEFAULT_MAX_OPEN_CALLS`` is reset alone (see there). The face's frames for the
-        client are written only between two of the server's frames and outside a header
-        block; while more than ``_MAX_QUEUED_FOR_CLIENT`` bytes of them wait, the client
-        is not read. A client that opens an even stream, which no HTTP/2 client does, gets
-        a GOAWAY naming why, and the connection is closed."""
+        The frame headers say which calls are open: a client HEADERS on a new stream
+        (odd, above every stream before it) opens one, and the server's END_STREAM,
+        either side's RST_STREAM, or the server's GOAWAY above the stream ends it. A
+        call past the server's own SETTINGS_MAX_CONCURRENT_STREAMS is relayed as it
+        came, for the server to refuse. When the server advertises none, the face
+        advertises ``DEFAULT_MAX_OPEN_CALLS`` in the server's first SETTINGS, and a call
+        past it is reset alone (see there). The client is read only once that first
+        SETTINGS is. The face's frames for the client are written only between two of
+        the server's frames and outside a header block; while more than
+        ``_MAX_QUEUED_FOR_CLIENT`` bytes of them wait, the client is not read. A client
+        that opens an even stream, which no HTTP/2 client does, gets a GOAWAY naming
+        why, and the connection is closed."""
         upstream_reader, upstream_writer = await asyncio.open_connection(*self.grpc_address)
         upstream_writer.write(head)
         loop = asyncio.get_running_loop()
@@ -577,6 +599,19 @@ class _Connection:
                 if remaining <= 0 and not calls:
                     return
                 await asyncio.sleep(remaining if remaining > 0 else self.idle_timeout)
+
+        # The server's connection preface, a SETTINGS frame, before the client is read: so
+        # the face knows the server's limit before the client's first call, and a client
+        # of a server that advertises none learns the face's.
+        try:
+            async with asyncio.timeout(self.read_timeout):
+                preface = await _server_preface(upstream_reader)
+        except (TimeoutError, asyncio.IncompleteReadError, ConnectionError) as exc:
+            _log.info("connect face: the gRPC server sent no SETTINGS: %r", exc)
+            upstream_writer.close()
+            return
+        server.feed(preface)
+        writer.write(preface if advertised else _with_max_streams(preface, max_calls))
 
         tasks = (
             asyncio.ensure_future(pump(reader, upstream_writer, client, bytearray())),
