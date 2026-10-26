@@ -28,6 +28,10 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	pythonruntime "github.com/codefly-dev/service-python/pkg/runtime"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Runtime is the FastAPI specialization of the generic Python Runtime.
@@ -37,7 +41,7 @@ import (
 //	*pythonruntime.Runtime — inherits Test (uv run pytest), Lint (uv run ruff),
 //	                         Build (no-op), Information, and the services.Base
 //	                         chain via *pythonservice.Service promotion.
-//	FastAPI               — fastapi-specific state (RestEndpoint, HotReload
+//	FastAPI               — fastapi-specific state (endpoint handles, HotReload
 //	                         setting) accessed explicitly as s.FastAPI.X.
 //
 // Overridden methods: Load, Init, Start, Stop, Destroy — fastapi adds Docker
@@ -141,11 +145,15 @@ type Runtime struct {
 	// filtered back out of the process environment.
 	appliedOverrides map[string]int
 
+	// port is the mapped port of the HTTP endpoint, which uvicorn binds. Zero
+	// when the service declares none: uvicorn then binds a loopback port the
+	// system picks, which no endpoint publishes (uvicornArgs).
 	port uint16
 
 	// serveAddress is the address Init resolved for the HTTP endpoint, as the
 	// host reaches it. Start answers STARTED only once an HTTP request to it gets
-	// a response. Empty (no Init) skips the wait.
+	// a response. Empty when the service declares no HTTP endpoint, and then
+	// Start waits on the Connect face, else on the gRPC server (awaitServing).
 	serveAddress string
 
 	// serveTimeout bounds that wait; zero means defaultServeTimeout.
@@ -158,6 +166,17 @@ type Runtime struct {
 	// grpcPort is the mapped port for the service-owned gRPC listener, passed
 	// to the Python process as CODEFLY_GRPC_PORT. Zero when gRPC is disabled.
 	grpcPort uint16
+	// grpcAddress is the address Init resolved for the gRPC server, which Start
+	// waits on when the service declares neither an HTTP endpoint nor a Connect
+	// face. Empty when gRPC is disabled.
+	grpcAddress string
+
+	// connectPort is the mapped port for the Connect face, passed to the
+	// Python process as CODEFLY_CONNECT_PORT. Zero when Connect is disabled.
+	connectPort uint16
+	// connectAddress is the address Init resolved for the Connect face, which
+	// Start requires to answer. Empty when Connect is disabled.
+	connectAddress string
 
 	cacheLocation string
 
@@ -199,8 +218,11 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	}
 	s.Endpoints = endpoints
 
-	s.FastAPI.RestEndpoint, err = resources.FindRestEndpoint(ctx, s.Endpoints)
+	s.FastAPI.HTTPEndpoint, err = findHTTPEndpoint(ctx, s.Endpoints)
 	if err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
+	if err := s.FastAPI.unservedError(ctx, s.Endpoints); err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
 
@@ -208,6 +230,19 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		s.FastAPI.GRPCEndpoint, err = resources.FindGRPCEndpoint(ctx, s.Endpoints)
 		if err != nil {
 			return s.Base.Runtime.LoadError(err)
+		}
+	}
+
+	if err := s.FastAPI.Settings.connectSettingError(); err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
+	if s.FastAPI.Settings.ConnectEndpoint {
+		s.FastAPI.ConnectEndpoint, err = resources.FindConnectEndpoint(ctx, s.Endpoints)
+		if err != nil {
+			return s.Base.Runtime.LoadError(err)
+		}
+		if s.FastAPI.ConnectEndpoint == nil {
+			return s.Base.Runtime.LoadError(fmt.Errorf("%s is on but the service declares no endpoint with api: connect", ConnectEndpointSetting))
 		}
 	}
 
@@ -284,11 +319,13 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 		// host where the user isn't root (e.g. Linux CI).
 		dockerEnv.WithUser(fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 
-		instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
-		if err != nil {
-			return nil, "", s.Wool.Wrapf(err, "cannot find network instance")
+		if s.FastAPI.HTTPEndpoint != nil {
+			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.HTTPEndpoint, resources.NewNativeNetworkAccess())
+			if err != nil {
+				return nil, "", s.Wool.Wrapf(err, "cannot find network instance")
+			}
+			dockerEnv.WithPort(ctx, uint16(instance.Port))
 		}
-		dockerEnv.WithPort(ctx, uint16(instance.Port))
 
 		if s.FastAPI.GRPCEndpoint != nil {
 			grpcInstance, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
@@ -296,6 +333,14 @@ func (s *Runtime) CreateRunnerEnvironment(ctx context.Context) (runners.RunnerEn
 				return nil, "", s.Wool.Wrapf(grpcErr, "cannot find grpc network instance")
 			}
 			dockerEnv.WithPort(ctx, uint16(grpcInstance.Port))
+		}
+
+		if s.FastAPI.ConnectEndpoint != nil {
+			connectInstance, connectErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.ConnectEndpoint, resources.NewNativeNetworkAccess())
+			if connectErr != nil {
+				return nil, "", s.Wool.Wrapf(connectErr, "cannot find connect network instance")
+			}
+			dockerEnv.WithPort(ctx, uint16(connectInstance.Port))
 		}
 
 		envPath := s.DockerEnvPath()
@@ -466,14 +511,20 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitError(err)
 	}
 
-	net, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.RestEndpoint, resources.NewNativeNetworkAccess())
-	if err != nil {
-		return s.Base.Runtime.InitError(err)
+	// Every listener Init publishes is reset first: a reload that dropped an
+	// endpoint must not leave Start binding or waiting on the old one.
+	s.port, s.serveAddress = 0, ""
+	s.grpcPort, s.grpcAddress = 0, ""
+	s.connectPort, s.connectAddress = 0, ""
+	if s.FastAPI.HTTPEndpoint != nil {
+		net, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.HTTPEndpoint, resources.NewNativeNetworkAccess())
+		if err != nil {
+			return s.Base.Runtime.InitError(err)
+		}
+		s.Infof("will run on %s", net.Address)
+		s.port = uint16(net.Port)
+		s.serveAddress = net.Address
 	}
-
-	s.Infof("will run on %s", net.Address)
-	s.port = uint16(net.Port)
-	s.serveAddress = net.Address
 
 	if s.FastAPI.GRPCEndpoint != nil {
 		grpcNet, grpcErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.GRPCEndpoint, resources.NewNativeNetworkAccess())
@@ -481,7 +532,18 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			return s.Base.Runtime.InitError(grpcErr)
 		}
 		s.grpcPort = uint16(grpcNet.Port)
+		s.grpcAddress = grpcNet.Address
 		s.Infof("grpc will run on %s", grpcNet.Address)
+	}
+
+	if s.FastAPI.ConnectEndpoint != nil {
+		connectNet, connectErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.FastAPI.ConnectEndpoint, resources.NewNativeNetworkAccess())
+		if connectErr != nil {
+			return s.Base.Runtime.InitError(connectErr)
+		}
+		s.connectPort = uint16(connectNet.Port)
+		s.connectAddress = connectNet.Address
+		s.Infof("connect will run on %s", connectNet.Address)
 	}
 
 	hasPyProject, err := shared.FileExists(ctx, path.Join(s.Service.SourceLocation, "pyproject.toml"))
@@ -522,25 +584,47 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 	s.Wool.Debug("successful init of runner")
 
+	if err := s.initOpenAPI(ctx, env, cacheLocation); err != nil {
+		return s.Base.Runtime.InitErrorf(err, "cannot generate Open API document")
+	}
+	return s.Base.Runtime.InitResponse()
+}
+
+// openAPIScript is the project's OpenAPI generator, relative to its source
+// location: the scaffold ships it, and it dumps the schema of the app's REST
+// routes to openapi/api.swagger.json.
+const openAPIScript = "src/openapi.py"
+
+// initOpenAPI regenerates the OpenAPI document when the project ships the
+// generator and src/main.py changed since the last run. A project without the
+// generator publishes no OpenAPI document: its HTTP endpoint serves the probes
+// and its API is on another face (gRPC, Connect), so there is nothing to
+// generate and nothing is run.
+func (s *Runtime) initOpenAPI(ctx context.Context, env runners.RunnerEnvironment, cacheLocation string) error {
+	script := path.Join(s.Service.SourceLocation, openAPIScript)
+	hasScript, err := shared.FileExists(ctx, script)
+	if err != nil {
+		return err
+	}
+	if !hasScript {
+		s.Wool.Debug("no OpenAPI generator: the HTTP endpoint publishes no OpenAPI document", wool.Field("path", script))
+		return nil
+	}
 	openAPI := builders.NewDependencies("api",
 		builders.NewDependency(path.Join(s.Service.SourceLocation, "src/main.py"))).WithCache(cacheLocation)
-	openApiUpdate, err := openAPI.Updated(ctx)
-	if err != nil {
-		return s.Base.Runtime.InitError(err)
+	openAPIUpdate, err := openAPI.Updated(ctx)
+	if err != nil || !openAPIUpdate {
+		return err
 	}
-
-	if openApiUpdate {
-		s.Infof("generating Open API document")
-		if err := s.GenerateOpenAPI(ctx, env); err != nil {
-			return s.Base.Runtime.InitErrorf(err, "cannot generate Open API document")
-		}
-		if err := openAPI.UpdateCache(ctx); err != nil {
-			s.Wool.Warn("cannot update openapi cache", wool.ErrField(err))
-		}
-		s.Wool.Debug("generate Open API done")
+	s.Infof("generating Open API document")
+	if err := s.GenerateOpenAPI(ctx, env); err != nil {
+		return err
 	}
-
-	return s.Base.Runtime.InitResponse()
+	if err := openAPI.UpdateCache(ctx); err != nil {
+		s.Wool.Warn("cannot update openapi cache", wool.ErrField(err))
+	}
+	s.Wool.Debug("generate Open API done")
+	return nil
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
@@ -568,7 +652,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	inputs := startInputs(req)
-	launch := launchInputs(inputs, s.port, s.grpcPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
+	launch := launchInputs(inputs, s.port, s.grpcPort, s.connectPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
 
 	if s.runner != nil {
 		switch {
@@ -610,6 +694,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("runner environment not initialized (Init must run before Start)"))
 	}
 
+	// The logging configuration uvicorn is started with (uvicorn_logging.go),
+	// written beside the project so the filter module is importable from the
+	// working directory uvicorn puts on sys.path.
+	if err := writeUvicornLogging(s.Service.SourceLocation); err != nil {
+		return s.Base.Runtime.StartError(err)
+	}
 	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(s.port, s.FastAPI.Settings.HotReload)...)
 	if err != nil {
 		return s.Base.Runtime.StartError(err)
@@ -638,6 +728,12 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		// mapped port, so it is applied after the overrides and wins over a
 		// `--set` naming the same key.
 		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_GRPC_PORT", s.grpcPort))
+	}
+	if s.connectPort != 0 {
+		// The same for the Connect face (src/rpc/connect_gen.py), which the
+		// app starts over the gRPC server on this variable alone: unset, it
+		// serves no face.
+		proc.WithEnvironmentVariables(ctx, resources.Env("CODEFLY_CONNECT_PORT", s.connectPort))
 	}
 
 	// What this launch runs, asked of uv in the environment this process is
@@ -713,36 +809,50 @@ func (s *Runtime) started() (*runtimev0.StartResponse, error) {
 	return s.Base.Runtime.StartResponse()
 }
 
-// defaultServeTimeout bounds how long Start waits for the HTTP endpoint to
-// answer. It covers `uv run` resolving the environment, the app import and its
+// defaultServeTimeout bounds how long Start waits for the service to answer.
+// It covers `uv run` resolving the environment, the app import and its
 // lifespan startup; a service that has not answered by then is not coming up.
 const defaultServeTimeout = 3 * time.Minute
 
 // servePollInterval is the pause between two attempts to reach the endpoint.
 const servePollInterval = 250 * time.Millisecond
 
-// awaitServing returns once an HTTP request to the service's endpoint gets a
-// response — any status: readiness here means the endpoint accepts and serves
-// connections, and what the app answers on "/" is its own business. A bare TCP
-// accept is not enough: in a container runtime the published port is accepted
-// by the engine's proxy before anything listens behind it. It fails when the
-// process exits first, when ctx ends, or after the serve timeout.
+// serveTarget is the listener Start waits on before it answers STARTED, and
+// how one attempt reaches it: the HTTP endpoint when the service declares one,
+// else the Connect face, else the gRPC server. Empty when there is none (no
+// Init), which skips the wait.
+func (s *Runtime) serveTarget() (name, target string, answers func(context.Context, string) error) {
+	switch {
+	case s.serveAddress != "":
+		name, target, answers = "HTTP endpoint", httpTarget(s.serveAddress), httpAnswers
+	case s.connectAddress != "":
+		name, target, answers = "Connect face", httpTarget(s.connectAddress), httpAnswers
+	case s.grpcAddress != "":
+		name, target, answers = "gRPC server", s.grpcAddress, grpcAnswers
+	default:
+		return "", "", nil
+	}
+	if s.answers != nil {
+		answers = s.answers
+	}
+	return name, target, answers
+}
+
+// awaitServing returns once the service's listener answers (serveTarget). An
+// HTTP listener answers with any status: readiness here means the endpoint
+// accepts and serves connections, and what the app answers on "/" is its own
+// business. A bare TCP accept is not enough: in a container runtime the
+// published port is accepted by the engine's proxy before anything listens
+// behind it. It fails when the process exits first, when ctx ends, or after the
+// serve timeout.
 func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error {
-	if s.serveAddress == "" {
+	name, target, answers := s.serveTarget()
+	if target == "" {
 		return nil
 	}
-	target := s.serveAddress
-	if !strings.Contains(target, "://") {
-		target = "http://" + target
-	}
-	target = strings.TrimRight(target, "/") + "/"
 	timeout := s.serveTimeout
 	if timeout <= 0 {
 		timeout = defaultServeTimeout
-	}
-	answers := s.answers
-	if answers == nil {
-		answers = httpAnswers
 	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -751,21 +861,65 @@ func (s *Runtime) awaitServing(ctx context.Context, handle *runnerHandle) error 
 	for {
 		err := answers(ctx, target)
 		if err == nil {
-			s.Infof("fastapi app serving on %s after %s", s.serveAddress, time.Since(started).Round(100*time.Millisecond))
-			return nil
+			s.Infof("fastapi app serving its %s at %s after %s", name, target, time.Since(started).Round(100*time.Millisecond))
+			if s.serveAddress == "" {
+				return nil
+			}
+			return s.awaitConnect(ctx, answers)
 		}
 		last = err
 		if !s.runnerAlive(ctx, handle) {
-			return fmt.Errorf("fastapi app exited before its HTTP endpoint at %s answered", s.serveAddress)
+			return fmt.Errorf("fastapi app exited before its %s at %s answered", name, target)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("start abandoned before the HTTP endpoint at %s answered: %w", s.serveAddress, ctx.Err())
+			return fmt.Errorf("start abandoned before the %s at %s answered: %w", name, target, ctx.Err())
 		case <-deadline.C:
-			return fmt.Errorf("the HTTP endpoint at %s did not answer within %s: %v", s.serveAddress, timeout, last)
+			return fmt.Errorf("the %s at %s did not answer within %s: %v", name, target, timeout, last)
 		case <-time.After(servePollInterval):
 		}
 	}
+}
+
+// connectGrace is how long the Connect face may lag the HTTP endpoint. The
+// scaffold's main starts it in the startup uvicorn finishes before it listens,
+// so it normally answers at once; the grace covers an app that starts it from
+// its own lifespan a moment later.
+const connectGrace = 5 * time.Second
+
+// awaitConnect requires the Connect face to answer once the HTTP endpoint
+// does. connect-endpoint advertises the port to every consumer, so a process
+// that never serves it (a main.py scaffolded before the generated main started
+// the face) is refused by name rather than left STARTED with a port that
+// refuses connections. The face answers any HTTP request, a GET with 405.
+func (s *Runtime) awaitConnect(ctx context.Context, answers func(context.Context, string) error) error {
+	if s.connectAddress == "" {
+		return nil
+	}
+	target := httpTarget(s.connectAddress)
+	deadline := time.Now().Add(connectGrace)
+	for {
+		err := answers(ctx, target)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return fmt.Errorf("%s is on but nothing serves the Connect face at %s: the app must start it once its gRPC server listens, as the scaffold's src/main.py does (connect_gen.start(grpc_port) from src/rpc/connect_gen.py): %v", ConnectEndpointSetting, s.connectAddress, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(servePollInterval):
+		}
+	}
+}
+
+// httpTarget is address as the URL of its root, whether or not it carries a
+// scheme.
+func httpTarget(address string) string {
+	if !strings.Contains(address, "://") {
+		address = "http://" + address
+	}
+	return strings.TrimRight(address, "/") + "/"
 }
 
 // serveClient is what httpAnswers probes with: one bounded attempt, and a
@@ -789,11 +943,47 @@ func httpAnswers(ctx context.Context, target string) error {
 	return response.Body.Close()
 }
 
+// grpcAnswers reports whether a gRPC server at address completes the HTTP/2
+// handshake within one bounded attempt. The connection is ready only once the
+// server's own SETTINGS frame arrives, which an engine's proxy accepting the
+// port on the server's behalf cannot send.
+func grpcAnswers(ctx context.Context, address string) error {
+	if _, hostPort, found := strings.Cut(address, "://"); found {
+		address = hostPort
+	}
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	conn.Connect()
+	for {
+		state := conn.GetState()
+		if state == connectivity.Ready {
+			return nil
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			return fmt.Errorf("no gRPC handshake at %s (%s)", address, state)
+		}
+	}
+}
+
 // uvicornArgs renders the `uv run` invocation. --reload is conditional: it
 // makes uvicorn fork a supervisor that re-executes the app on source edits,
 // which is not what a service configured without hot reload asked for.
+//
+// Port zero is a service with no HTTP endpoint. Its app still runs under
+// uvicorn, because the app's lifespan is what starts its gRPC server and
+// Connect face, but its HTTP listener is no endpoint: it binds a loopback port
+// the system picks and no one is told.
 func uvicornArgs(port uint16, hotReload bool) []string {
-	args := []string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", fmt.Sprintf("%d", port)}
+	host := "0.0.0.0"
+	if port == 0 {
+		host = "127.0.0.1"
+	}
+	args := []string{"run", "uvicorn", "src.main:app", "--host", host, "--port", fmt.Sprintf("%d", port), "--log-config", uvicornLogConfigFile}
 	if hotReload {
 		args = append(args, "--reload")
 	}
@@ -967,8 +1157,8 @@ func startInputs(req *runtimev0.StartRequest) string {
 // It is deliberately separate from startInputs: that one gates applyStartInputs,
 // which must fire only when the request itself changed, because the environment
 // manager appends overrides and endpoints without ever removing any.
-func launchInputs(requestInputs string, port uint16, grpcPort uint16, hotReload bool) string {
-	return fmt.Sprintf("%s\nport %d\ngrpc-port %d\nhot-reload %t", requestInputs, port, grpcPort, hotReload)
+func launchInputs(requestInputs string, port uint16, grpcPort uint16, connectPort uint16, hotReload bool) string {
+	return fmt.Sprintf("%s\nport %d\ngrpc-port %d\nconnect-port %d\nhot-reload %t", requestInputs, port, grpcPort, connectPort, hotReload)
 }
 
 // applyStartInputs folds the StartRequest into the environment manager. Callers
@@ -1221,9 +1411,6 @@ func (s *Runtime) destroyContainerByIdentity(ctx context.Context) error {
 }
 
 func (s *Runtime) EventHandler(event code.Change) error {
-	if strings.Contains(event.Path, "api.json") {
-		return nil
-	}
 	if strings.HasSuffix(event.Path, ".py") {
 		// uvicorn --reload picks these up; no action needed here.
 		return nil
@@ -1236,7 +1423,7 @@ func (s *Runtime) EventHandler(event code.Change) error {
 // the OpenAPI spec. Convention: the project ships a small openapi.py that
 // imports src.main and dumps the schema. See templates/factory.
 func (s *Runtime) GenerateOpenAPI(ctx context.Context, env runners.RunnerEnvironment) error {
-	proc, err := env.NewProcess("uv", "run", "python", "src/openapi.py")
+	proc, err := env.NewProcess("uv", "run", "python", openAPIScript)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create openapi runner")
 	}

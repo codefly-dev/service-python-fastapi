@@ -508,10 +508,10 @@ func startStatus(t *testing.T, runtime *Runtime) *runtimev0.StartStatus {
 // service configured without hot reload never asked for.
 func TestUvicornArgsReloadIsConditional(t *testing.T) {
 	require.Equal(t,
-		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"},
+		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"},
 		uvicornArgs(8080, false))
 	require.Equal(t,
-		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"},
+		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json", "--reload"},
 		uvicornArgs(8080, true))
 }
 

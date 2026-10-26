@@ -1,3 +1,13 @@
+{{if .GitSources -}}
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+# The git commits uv.lock pins (git_source_downloads in the recipe), fetched by
+# the caller on its own machine, with its own credentials, before any image
+# build, and supplied here as the build context of this name: one bare mirror
+# per repository. Without a caller supplying it, the stage is empty and uv
+# fetches them from the network as it always did.
+FROM scratch AS uvsources
+
+{{end -}}
 # The builder image — installs the venv via uv, then we copy it into the runtime.
 FROM {{.Builder}} as builder
 
@@ -43,7 +53,30 @@ COPY {{.Context}} {{.Image}}
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
+{{- if .GitSources}}
+#
+# With the caller's mirrors, git reads each locked repository from its mirror
+# instead of the URL the lock records (uv hands git that URL unchanged), so no
+# credential is needed, and a commit missing from the mirror fails here rather
+# than prompting for one. The mappings are appended after the git configuration
+# the environment already carries, when its GIT_CONFIG_COUNT is a plain count;
+# otherwise the configuration is left alone and the sources are fetched as
+# without a mirror. An image whose own git configuration (system, global or
+# environment) already rewrites a declared repository's URL keeps its rewrite:
+# git prefers it, and the build fetches that source as it does without a mirror.
+RUN --mount=type=bind,from=uvsources,target=/uvsources \
+    if [ -n "$(ls -A /uvsources)" ]; then \
+      n=${GIT_CONFIG_COUNT:-0}; n=${n#+}; \
+      case $n in ''|*[!0-9]*) n= ;; *) while [ "${n#0}" != "$n" ] && [ -n "${n#0}" ]; do n=${n#0}; done; [ ${#n} -le 4 ] || n= ;; esac; \
+      if [ -z "$n" ]; then echo "inherited GIT_CONFIG_COUNT is not a plain count; git sources are fetched without the mirror"; \
+      else export GIT_TERMINAL_PROMPT=0{{range $i, $source := .GitSources}} \
+        "GIT_CONFIG_KEY_$((n+{{$i}}))=url.file:///uvsources/{{$source.Path}}.insteadOf" "GIT_CONFIG_VALUE_$((n+{{$i}}))="'{{$source.Repository}}'{{end}} \
+        GIT_CONFIG_COUNT=$((n+{{len .GitSources}})); fi; \
+    fi && \
+    mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
+{{- else}}
 RUN mkdir -p /opt/uv/python && uv sync --frozen --no-dev --no-install-project --no-editable
+{{- end}}
 
 
 # Runtime
@@ -74,5 +107,16 @@ ENV {{.Key}} {{.Value}}
 
 WORKDIR /app/code
 
+# uvicorn's logging configuration and the filter it names (uvicorn_logging.go):
+# health probes are dropped from the access log, everything else is as uvicorn
+# writes it. The builder writes both into the project before the build.
+COPY --chown=appuser {{.ServicePrefix}}code/uvicorn-log-config.json {{.ServicePrefix}}code/codefly_uvicorn_logging.py ./
+
+{{if .NoHTTPEndpoint -}}
+# No HTTP endpoint: the app runs under uvicorn for its lifespan (the gRPC
+# server, the Connect face) on a loopback port the system picks.
+CMD ["uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]
+{{- else -}}
 # Default REST port (overridden by codefly at runtime).
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
+{{- end}}

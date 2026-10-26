@@ -40,7 +40,7 @@ approves its image digest instead.
 
 ## Declared container health
 
-Kubernetes probes follow the authored REST endpoint's health predicates and transport. HTTP checks preserve accepted statuses and bounded body containment; redirects are not followed. Secured container-local checks authenticate the listener against the exact certificate mounted at `UVICORN_SSL_CERTFILE` before sending HTTP data. The isolated Python probe imports no application code and emits no response content or certificate material.
+Kubernetes probes follow the health predicates of the authored HTTP endpoint (`api: rest` or `api: http`) and transport. HTTP checks preserve accepted statuses and bounded body containment; redirects are not followed. Secured container-local checks authenticate the listener against the exact certificate mounted at `UVICORN_SSL_CERTFILE` before sending HTTP data. The isolated Python probe imports no application code and emits no response content or certificate material.
 
 Startup, readiness and liveness are separate policies. The current Core Kubernetes manifest profile requires all three, so deployment refuses absent startup/liveness declarations instead of copying readiness into a restart policy. New scaffolds explicitly declare `/version` readiness and transport startup/liveness. Existing services must author their own policies. Whole-second timing is required by Kubernetes; predicates or additional listener health that this agent cannot preserve are refused rather than silently omitted.
 
