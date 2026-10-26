@@ -57,7 +57,7 @@ func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
 	runtime.Service.SourceLocation = source
 
 	endpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "rest", Api: standards.REST}
-	runtime.FastAPI.RestEndpoint = endpoint
+	runtime.FastAPI.HTTPEndpoint = endpoint
 	t.Cleanup(runtime.Base.StopWatcher)
 
 	return runtime, &runtimev0.InitRequest{
