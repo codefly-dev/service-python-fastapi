@@ -23,16 +23,19 @@ returns, by the codec the caller asked for:
 
 - ``max_response_bytes`` for an answer relayed as proto (Connect and gRPC-Web proto): by
   default the larger of ``DEFAULT_MAX_RESPONSE_BYTES`` (16 MiB) and ``max_message_bytes``.
-  The face holds such an answer about twice over while it writes it, beyond the
-  service's own copy: measured, 33 MiB for a 16 MiB answer.
+  The face holds such an answer more than once while it writes it: measured as process
+  memory, 54 to 98 MiB for a 15 MiB answer, by protocol.
 - ``max_json_response_bytes`` for an answer converted to JSON: by default the larger of
   ``DEFAULT_MAX_JSON_RESPONSE_BYTES`` (4 MiB, the bound every answer had before the two
   were apart) and ``max_message_bytes``. It is checked before the conversion, because the
   conversion is what costs: measured as process memory (protobuf 6.33, one 4 MiB answer),
-  a packed list of floats peaks at 18 times the proto, nested messages at 62 times, and a
-  list of enums at 130 times (its JSON alone is 25 times the proto). So up to about
-  520 MiB at the default, for one conversion; conversions run on the face's event loop
-  one at a time, so that peak does not add up across calls.
+  a packed list of floats peaks at 18 times the proto and nested messages at 62 times. A
+  list of enums costs with the length of their names, since each one-byte value becomes
+  its name in JSON: 130 times with 22-character names, 373 times with 100, 687 times with
+  200. So the worst case at the default depends on the service's enum names: about
+  520 MiB for one answer with names of about 20 characters, 2.7 GiB with 200.
+  Conversions run on the face's event loop one at a time, so that peak does not add up
+  across calls; a service with long enum names in large lists lowers the bound.
 
 Past its bound a call ends ``failed_precondition`` naming the bound: the answer is too
 large for this face's configuration, and asking again does not change it. Within it,
@@ -93,7 +96,14 @@ _DATA, _HEADERS, _RST_STREAM, _SETTINGS, _GOAWAY, _CONTINUATION = 0x0, 0x1, 0x3,
 _END_STREAM_FLAG, _ACK_FLAG, _END_HEADERS_FLAG = 0x1, 0x1, 0x4
 _MAX_CONCURRENT_STREAMS = 0x3
 _PUSH_PROMISE = 0x5
-_PROTOCOL_ERROR, _CANCEL, _ENHANCE_YOUR_CALM = 0x1, 0x8, 0xB
+_PROTOCOL_ERROR, _INTERNAL_ERROR, _FRAME_SIZE_ERROR = 0x1, 0x2, 0x6
+_CANCEL, _ENHANCE_YOUR_CALM = 0x8, 0xB
+# The largest frame a client may send before it has the server's SETTINGS (RFC 9113
+# 4.2); the face holds the server's first frame to it too, though the client's SETTINGS
+# could allow more (a SETTINGS frame that size would carry over 2,700 entries).
+_INITIAL_MAX_FRAME = 16384
+# gRPC's channel arguments are C ints.
+_GRPC_MAX_INT = 2**31 - 1
 # Calls one relayed connection may hold open when the gRPC server advertises no
 # SETTINGS_MAX_CONCURRENT_STREAMS (grpcio advertises none unless the service sets
 # grpc.max_concurrent_streams, as the scaffold's server does). The face advertises it to
@@ -113,7 +123,8 @@ _MAX_QUEUED_FOR_CLIENT = 16 * 1024
 # How long a closing relay waits for the server's frame in flight to complete, so the
 # client's GOAWAY lands between two frames.
 _GOAWAY_GRACE_S = 5.0
-# The most of a SETTINGS or GOAWAY payload the relay reads; the rest is skipped.
+# The most of a GOAWAY payload the relay reads (the last stream, the code, the start of
+# the reason); the rest is skipped. A SETTINGS frame is scanned whole, keeping nothing.
 _CONTROL_PAYLOAD = 256
 _ENVELOPE = struct.Struct(">BI")
 _COMPRESSED, _END_STREAM, _TRAILERS = 0x01, 0x02, 0x80
@@ -285,11 +296,15 @@ def _positive(name: str, value: int | None, default: int, message_bound: int) ->
 
 class _AnswerBounds:
     """The answers the face takes from the service: ``proto`` for a codec that relays
-    them as they are, ``json`` for one that converts them, checked before converting."""
+    them as they are, ``json`` for one that converts them, checked before converting.
+    ``received`` is the channel's own receive bound: one byte past both, so the face
+    checks every bound itself, and the number grpcio names when it refuses past it is
+    one no service's client has by chance with the same text. A bound at gRPC's largest
+    (2**31 - 1, its "unlimited") keeps the channel there."""
 
     def __init__(self, proto: int, json: int):
         self.proto, self.json = proto, json
-        self.received = max(proto, json)
+        self.received = min(max(proto, json) + 1, _GRPC_MAX_INT)
 
     def of(self, codec: _Codec) -> tuple[int, str]:
         if codec.name == "proto":
@@ -333,19 +348,25 @@ class _Frames:
 
     ``feed`` calls ``on_frame(type, flags, stream, payload)`` for each frame and returns
     where frames end in the data, each with the bytes ``on_frame`` returned, to be written
-    right after that frame in this direction. The payload is read for SETTINGS and GOAWAY
-    only (at most ``_CONTROL_PAYLOAD`` bytes of it) and skipped otherwise. A
+    right after that frame in this direction. The payload passed is, for a SETTINGS
+    frame, its last SETTINGS_MAX_CONCURRENT_STREAMS entry if it has one (the frame is
+    scanned whole as it streams, holding one entry, when ``scan_settings``: the server's
+    direction only, since only the server's limit matters), for a GOAWAY its first
+    ``_CONTROL_PAYLOAD`` bytes, and empty otherwise. A
     ``_ProtocolError`` from ``on_frame`` stops the feed; it is kept in ``error`` and the
     ends before the offending frame are returned."""
 
-    def __init__(self, on_frame):
+    def __init__(self, on_frame, *, scan_settings: bool = False):
         self._on_frame = on_frame
+        self._scan_settings_frames = scan_settings
         self._header = bytearray()
         self._frame = None  # (type, flags, stream) while its payload is read
         self._after = b""  # what on_frame returned for it
         self._payload = bytearray()
         self._keep = 0  # payload bytes still to read
         self._skip = 0  # payload bytes still to skip
+        self._scan = 0  # SETTINGS payload bytes still to scan
+        self._entry = bytearray()  # a SETTINGS entry split across reads
         self._in_block = False  # inside a header block: HEADERS ... CONTINUATION
         self.error: _ProtocolError | None = None
 
@@ -353,7 +374,7 @@ class _Frames:
     def at_boundary(self) -> bool:
         """Between two frames, and outside a header block: where another frame may go
         (RFC 9113 section 6.10: nothing comes between a HEADERS and its CONTINUATION)."""
-        return not self._header and not self._keep and not self._skip and not self._in_block
+        return not (self._header or self._keep or self._skip or self._scan or self._in_block)
 
     def feed(self, data: bytes, every_end: bool = False) -> list[tuple[int, bytes]]:
         """Where frames end in ``data``: each end where ``on_frame`` returned bytes to
@@ -379,6 +400,14 @@ class _Frames:
                     at += step
                     if self._skip:
                         break
+                elif self._scan:
+                    step = min(self._scan, size - at)
+                    self._scan_settings(data[at : at + step])
+                    at += step
+                    if self._scan:
+                        break
+                    self._entry.clear()
+                    self._emit()
                 elif self._header or size - at < _FRAME.size:
                     step = min(_FRAME.size - len(self._header), size - at)
                     self._header += data[at : at + step]
@@ -390,7 +419,7 @@ class _Frames:
                 else:  # a whole frame header in this chunk: read it in place
                     self._start(*_FRAME.unpack_from(data, at))
                     at += _FRAME.size
-                if not (self._keep or self._skip or self._in_block):
+                if not (self._keep or self._skip or self._scan or self._in_block):
                     clear = at
                     if every_end or self._after:
                         ends.append((at, self._after))
@@ -407,10 +436,21 @@ class _Frames:
         self._frame = (kind, flags, stream & 0x7FFFFFFF)
         if kind in (_HEADERS, _PUSH_PROMISE, _CONTINUATION):
             self._in_block = not flags & _END_HEADERS_FLAG
-        self._keep = min(length, _CONTROL_PAYLOAD) if kind in (_SETTINGS, _GOAWAY) else 0
-        self._skip = length - self._keep
-        if not self._keep:
+        self._keep = min(length, _CONTROL_PAYLOAD) if kind == _GOAWAY else 0
+        self._scan = length if kind == _SETTINGS and self._scan_settings_frames else 0
+        self._skip = length - self._keep - self._scan
+        if not (self._keep or self._scan):
             self._emit()
+
+    def _scan_settings(self, data: bytes) -> None:
+        """Read SETTINGS entries as they stream; keep the last MAX_CONCURRENT_STREAMS."""
+        self._scan -= len(data)
+        self._entry += data
+        whole = len(self._entry) - len(self._entry) % 6
+        for at in range(0, whole, 6):
+            if self._entry[at : at + 2] == b"\x00\x03":
+                self._payload[:] = self._entry[at : at + 6]
+        del self._entry[:whole]
 
     def _emit(self):
         payload = bytes(self._payload)
@@ -418,11 +458,41 @@ class _Frames:
         self._after = self._on_frame(*self._frame, payload) or b""
 
 
-async def _server_preface(reader) -> bytes:
-    """The server's first frame, whole (RFC 9113 section 3.4: a SETTINGS frame)."""
+class _FrameSizeError(_ProtocolError):
+    """A first frame past ``_INITIAL_MAX_FRAME``."""
+
+
+async def _first_frame(reader) -> bytes:
+    """A peer's first frame, whole, which RFC 9113 section 3.4 makes its SETTINGS: a
+    SETTINGS frame on stream 0, not an acknowledgement, within ``_INITIAL_MAX_FRAME``."""
     header = await reader.readexactly(_FRAME.size)
-    high, low, *_ = _FRAME.unpack(header)
-    return header + await reader.readexactly(high << 16 | low)
+    high, low, kind, flags, stream = _FRAME.unpack(header)
+    length = high << 16 | low
+    if length > _INITIAL_MAX_FRAME:
+        raise _FrameSizeError(
+            f"a first frame of {length} bytes, past the {_INITIAL_MAX_FRAME} "
+            "allowed before SETTINGS"
+        )
+    if kind != _SETTINGS or flags & _ACK_FLAG or stream:
+        raise _ProtocolError(
+            f"a first frame of type {kind} (flags {flags}, stream {stream}), not SETTINGS"
+        )
+    return header + await reader.readexactly(length)
+
+
+def _opening_refusal(exc: BaseException, peer: str, timeout: float) -> str:
+    """Why a peer's opening failed, in words an operator can act on."""
+    if isinstance(exc, TimeoutError):
+        return f"the {peer} sent no SETTINGS within {timeout:g} s"
+    if isinstance(exc, _ProtocolError):
+        return f"the {peer} sent {exc}"
+    return f"the {peer} closed the connection before its SETTINGS"
+
+
+def _refuse_opening(writer, code: int, reason: str) -> None:
+    """Tell the client why its connection ends, as a server's first frames must: SETTINGS
+    first (RFC 9113 section 3.4: a client discards anything else), then the GOAWAY."""
+    writer.write(_h2_frame(_SETTINGS, 0, 0) + _goaway(0, code, reason))
 
 
 def _with_max_streams(frame: bytes, limit: int) -> bytes:
@@ -524,7 +594,7 @@ class _Connection:
                 calls.difference_update({call for call in calls if call > last_stream})
             return None
 
-        client, server = _Frames(from_client), _Frames(from_server)
+        client, server = _Frames(from_client), _Frames(from_server, scan_settings=True)
 
         def tell_client(frame):
             nonlocal told
@@ -600,14 +670,37 @@ class _Connection:
                     return
                 await asyncio.sleep(remaining if remaining > 0 else self.idle_timeout)
 
-        # The server's connection preface, a SETTINGS frame, before the client is read: so
+        # The client's SETTINGS, which completes its preface, goes to the server first: a
+        # server may wait for it before it sends its own.
+        opening_errors = (
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            _ProtocolError,
+        )
+        try:
+            async with asyncio.timeout(self.read_timeout):
+                opening = await _first_frame(reader)
+        except opening_errors as exc:
+            reason = _opening_refusal(exc, "client", self.read_timeout)
+            _log.info("connect face: %s", reason)
+            if isinstance(exc, (TimeoutError, _ProtocolError)):
+                code = _FRAME_SIZE_ERROR if isinstance(exc, _FrameSizeError) else _PROTOCOL_ERROR
+                _refuse_opening(writer, code, reason)
+            upstream_writer.close()
+            return
+        client.feed(opening)
+        upstream_writer.write(opening)
+        # Then the server's preface, its SETTINGS, before the client is read further: so
         # the face knows the server's limit before the client's first call, and a client
         # of a server that advertises none learns the face's.
         try:
             async with asyncio.timeout(self.read_timeout):
-                preface = await _server_preface(upstream_reader)
-        except (TimeoutError, asyncio.IncompleteReadError, ConnectionError) as exc:
-            _log.info("connect face: the gRPC server sent no SETTINGS: %r", exc)
+                preface = await _first_frame(upstream_reader)
+        except opening_errors as exc:
+            reason = _opening_refusal(exc, "gRPC server", self.read_timeout)
+            _log.warning("connect face: %s", reason)
+            _refuse_opening(writer, _INTERNAL_ERROR, reason)
             upstream_writer.close()
             return
         server.feed(preface)
