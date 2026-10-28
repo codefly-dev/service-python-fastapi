@@ -60,7 +60,7 @@ func TestContainerEnvironmentCarriesAProjectOutsideTheWorkspace(t *testing.T) {
 	runtime.Service.SourceLocation = source
 
 	endpoint := &basev0.Endpoint{Module: "mod", Service: runtime.Identity.Name, Name: "rest", Api: standards.REST}
-	runtime.FastAPI.RestEndpoint = endpoint
+	runtime.FastAPI.HTTPEndpoint = endpoint
 	runtime.NetworkMappings = []*basev0.NetworkMapping{{
 		Endpoint: endpoint,
 		Instances: []*basev0.NetworkInstance{{

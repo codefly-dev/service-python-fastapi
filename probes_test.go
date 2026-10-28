@@ -183,7 +183,7 @@ func TestBuilderLoadsAuthoredTLSAndHealthBeforeProjection(t *testing.T) {
 	loaded := NewBuilder(NewService())
 	_, err = loaded.Load(t.Context(), &builderv0.LoadRequest{Identity: identity})
 	require.NoError(t, err)
-	endpoint := loaded.FastAPI.RestEndpoint
+	endpoint := loaded.FastAPI.HTTPEndpoint
 	require.True(t, resources.EndpointSecured(endpoint))
 	require.Equal(t, "/readyz", endpoint.GetHealth().GetReadiness().GetHttp().GetPath())
 	probes, err := deploymentProbes(endpoint, false)

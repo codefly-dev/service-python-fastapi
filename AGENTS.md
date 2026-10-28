@@ -3,8 +3,8 @@
 This repo is one codefly agent binary: the **FastAPI specialization** of the
 generic Python agent. It composes `github.com/codefly-dev/service-python`'s
 `pkg/*` types and adds what FastAPI needs — uvicorn supervision and hot reload,
-OpenAPI-derived REST endpoints, an opt-in `grpc.aio` listener, the Dockerfile
-and kustomize recipes, and the scaffold a new FastAPI service is created from.
+OpenAPI-derived REST endpoints, an opt-in `grpc.aio` listener and Connect face,
+the Dockerfile and kustomize recipes, and the scaffold a new FastAPI service is created from.
 Dependency management is `uv`; poetry is not supported.
 
 It does **not** own:
@@ -127,6 +127,7 @@ anything from it.
 | `builder.go` | `Create` scaffolding, OpenAPI endpoint loading, Docker + kustomize recipes |
 | `uvsources.go` | the assembled build context: `[tool.uv.sources]` paths leaving the project |
 | `uvgitsources.go` | the git commits `uv.lock` pins, declared for the caller to mirror into the build |
+| `startedartifact.go` | what a native start ran, reported before *every* `StartResponse` (`runtime-started-artifact/v1`) |
 | `probes.go`, `probe.py` | endpoint health translated to Kubernetes probes / a local probe |
 | `templates/` | **what ships** — embedded via `go:embed`, rendered on `Create` |
 | `base/` | a checked-in sample service, embedded nowhere |
@@ -195,6 +196,5 @@ carried here:
   `AGENTS.md` beside what it describes, or into `.claude/skills/`. The cap and
   each skill's frontmatter are asserted in `conformance_test.go`, so `go test
   ./...` enforces them with no workflow change.
-- There is no `CLAUDE.md`. If one is added, it is a one-line `@AGENTS.md`
-  pointer — one canonical source, never a second copy to drift.
+- There is no `CLAUDE.md`; if one is added, it is a one-line `@AGENTS.md` pointer.
 - Treat this file as code: the PR that changes a process updates it.

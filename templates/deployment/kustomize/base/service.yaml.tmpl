@@ -17,3 +17,14 @@ spec:
       port: {{ .Deployment.Parameters.GRPCPort }}
       targetPort: {{ .Deployment.Parameters.GRPCPort }}
 {{- end }}
+{{- if .Deployment.Parameters.ConnectEnabled }}
+    - protocol: TCP
+      name: connect-port
+      # Connect and gRPC-Web are HTTP/1.1 on this listener (gRPC is HTTP/2 with
+      # prior knowledge, relayed to the gRPC port). An L7 hop that upgraded a
+      # Connect call to HTTP/2 would reach the relay, which answers gRPC only,
+      # so the port declares http.
+      appProtocol: http
+      port: {{ .Deployment.Parameters.ConnectPort }}
+      targetPort: {{ .Deployment.Parameters.ConnectPort }}
+{{- end }}
