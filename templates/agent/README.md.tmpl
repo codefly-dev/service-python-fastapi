@@ -14,6 +14,19 @@ Some of the things this agent provides for you:
 - Dockerfile and verifiable build plan generation (requires `output_directory`); the CLI owns image builds, builder selection, caching, and publishing
 - Kubernetes deployment
 
+## Container runtime updates
+
+The default runtime is the Core Python companion, pinned to its multi-platform
+index digest. This agent selects Python companion 0.0.7, built with Python
+3.14.10 on Alpine 3.24, and links Core 0.19.13. The companion is published
+separately from the agent; a new release does not change existing service images.
+
+Use `codefly update workspace` to adopt released agents, then rebuild and
+publish the affected services with the CLI. A `docker-image` override keeps
+its explicit selection and must be refreshed by its owner. Re-scan the resulting
+service images: a fresh base does not remove vulnerabilities in application
+dependencies or prove acceptance by a deployment's vulnerability and secret policies.
+
 ## What a native run approves
 
 A native `codefly run` delivers your service to the host as the build it is

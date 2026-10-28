@@ -99,8 +99,8 @@ type Settings struct {
 	// RuntimeImage overrides the default codefly-built runtime image.
 	// Format: "name:tag". Plain "name" and ":latest" are rejected —
 	// pinning is enforced. Leave empty to use ghcr.io/codefly-dev/python:<ver>
-	// (recommended; companion is rebuilt + pinned on every codefly
-	// release). Field named RuntimeImage (not DockerImage) to avoid
+	// (recommended; companion releases are published separately, then
+	// pinned by this agent). Field named RuntimeImage (not DockerImage) to avoid
 	// colliding with services.Base.DockerImage(req).
 	RuntimeImage string `yaml:"docker-image"`
 }
@@ -128,8 +128,8 @@ type Settings struct {
 var runtimeImage = &resources.DockerImage{
 	Repository: resources.ImageRegistry,
 	Name:       "python",
-	Tag:        "0.0.5",
-	Digest:     "sha256:67d6fe825765fc30f94131ee551e3800f5b6fa4e07094b47d036904387cb75a7",
+	Tag:        "0.0.7",
+	Digest:     "sha256:3b2a8f8d7854809212410db93d178d0fc5ce7b44e80ce334df0328cd6b0d156d",
 }
 
 // uvVersion is the uv the emitted build recipe resolves its lockfile with.

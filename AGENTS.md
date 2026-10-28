@@ -67,7 +67,7 @@ within reach.
 ## Build and test
 
 Derived from `.github/workflows/ci.yml`, which delegates to core's shared
-`go-service-ci.yml`, pinned to the linked core's tag (`@v0.19.10`; move it with
+`go-service-ci.yml`, pinned to the linked core's tag (`@v0.19.13`; move it with
 the core bump), and adds a `race` job of its own. Go comes from `go.mod`
 (1.27.3). All of it runs locally:
 
