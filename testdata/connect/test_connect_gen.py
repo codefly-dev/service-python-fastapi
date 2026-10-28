@@ -11,6 +11,7 @@ import struct
 
 import connect_gen
 import grpc
+import h11
 import httpx
 import pytest
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
@@ -30,6 +31,7 @@ def _register():
         ("Say", False, False),
         ("Count", False, True),
         ("Collect", True, False),
+        ("Converse", True, True),
     ):
         service.method.add(
             name=name,
@@ -1460,4 +1462,334 @@ async def test_at_the_scaffolds_limit_a_burst_fails_only_retry_safely():
         assert len(refused) < 600
     finally:
         await listener.stop()
+        await server.stop(None)
+
+
+class Arrival(grpc.aio.ServerInterceptor):
+    """Observe the existing interceptor seam before it reads or decodes a request."""
+
+    def __init__(self):
+        self.arrived, self.finished, self.running = {}, {}, {}
+        self.active, self.seen = set(), set()
+        self.now, self.expires = 29, 32
+        self.slot = asyncio.Semaphore(1)
+        self.release = asyncio.Event()
+
+    async def intercept_service(self, continuation, details):
+        handler = await continuation(details)
+        key = dict(details.invocation_metadata)["x-call"]
+
+        async def admitted(messages, context):
+            if self.now > self.expires:
+                await context.abort(grpc.StatusCode.UNAUTHENTICATED, "expired")
+            if key in self.seen:
+                await context.abort(grpc.StatusCode.UNAUTHENTICATED, "replayed")
+            self.seen.add(key)
+            self.active.add(key)
+            self.arrived.setdefault(key, asyncio.Event()).set()
+            try:
+                raw = await anext(messages)
+                request = handler.request_deserializer(raw)
+                assert await anext(messages, None) is None
+                async with self.slot:
+                    self.running.setdefault(key, asyncio.Event()).set()
+                    if request.text == "hold":
+                        await self.release.wait()
+                    return await handler.unary_unary(request, context)
+            finally:
+                self.active.remove(key)
+                self.finished.setdefault(key, asyncio.Event()).set()
+
+        return grpc.stream_unary_rpc_method_handler(
+            admitted, request_deserializer=None, response_serializer=handler.response_serializer
+        )
+
+
+@pytest.fixture
+async def arrival_face():
+    arrival = Arrival()
+    server = grpc.aio.server(interceptors=(arrival,))
+    server.add_generic_rpc_handlers((_handler(),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    listener = await connect_gen.serve(0, port, host="127.0.0.1", read_timeout=0.3)
+    try:
+        yield listener, arrival
+    finally:
+        await listener.stop()
+        await server.stop(None)
+
+
+async def _arriving(face, key, body=b'{"text":"hi"}', *, media="application/json"):
+    reader, writer = await asyncio.open_connection("127.0.0.1", face.port)
+    writer.write(
+        f"POST /echo.v1.Echo/Say HTTP/1.1\r\nHost: localhost\r\n"
+        f"Content-Type: {media}\r\nContent-Length: {len(body)}\r\n"
+        f"X-Call: {key}\r\nConnection: close\r\n\r\n".encode()
+    )
+    await writer.drain()
+    return reader, writer, body
+
+
+async def _observed(events, key):
+    async with asyncio.timeout(2):
+        await events.setdefault(key, asyncio.Event()).wait()
+
+
+@pytest.mark.parametrize("media", ["application/json", "application/proto", "application/grpc-web+proto"])
+async def test_headers_start_one_admitted_call_before_body(arrival_face, media):
+    face, state = arrival_face
+    body = b'{"text":"hi"}' if media == "application/json" else Msg(text="hi").SerializeToString()
+    if media.startswith("application/grpc-web"):
+        body = envelope(body)
+    reader, writer, body = await _arriving(face, "first", body, media=media)
+    try:
+        await _observed(state.arrived, "first")
+        assert state.active == {"first"}
+        # The original call remains held across the admission window. A second
+        # delivery cannot enter while its body is withheld.
+        async with httpx.AsyncClient() as client:
+            replay = await client.post(_url(face, "Say"), json={}, headers={"x-call": "first"})
+        assert replay.status_code == 401
+        state.now = 33
+        writer.write(body)
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), 2)
+        assert response.startswith(b"HTTP/1.1 200"), response
+        await _observed(state.finished, "first")
+        assert not state.active
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_body_budget_is_total_not_reset_by_dripping_bytes(arrival_face):
+    face, state = arrival_face
+    reader, writer, body = await _arriving(face, "drip")
+    try:
+        await _observed(state.arrived, "drip")
+        # Both reads arrive inside the per-read budget, but the body never ends.
+        writer.write(body[:1])
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        writer.write(body[1:2])
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), 0.2) == b""
+        await _observed(state.finished, "drip")
+        assert not state.active
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize("phase", ["body", "queued", "running"])
+async def test_disconnect_cancels_admitted_work_at_every_phase(arrival_face, phase, caplog):
+    face, state = arrival_face
+    if phase == "queued":
+        await state.slot.acquire()
+    reader, writer, body = await _arriving(face, phase, b'{"text":"hold"}')
+    await _observed(state.arrived, phase)
+    if phase != "body":
+        writer.write(body)
+        await writer.drain()
+        if phase == "running":
+            await _observed(state.running, phase)
+        else:
+            await asyncio.sleep(0.03)
+    writer.close()
+    await writer.wait_closed()
+    await _observed(state.finished, phase)
+    # Wait for the listener callback too: it owns unexpected-failure logging.
+    await asyncio.wait_for(asyncio.gather(*tuple(face._connections)), 2)
+    assert "connect face: connection failed" not in caplog.text
+    assert not state.active
+    if phase == "queued":
+        state.slot.release()
+        assert phase not in state.running
+
+
+async def test_slow_call_does_not_block_another_arrival(arrival_face):
+    face, state = arrival_face
+    reader1, writer1, body1 = await _arriving(face, "slow")
+    reader2, writer2, body2 = await _arriving(face, "fast")
+    try:
+        await _observed(state.arrived, "slow")
+        await _observed(state.arrived, "fast")
+        writer2.write(body2)
+        await writer2.drain()
+        assert (await asyncio.wait_for(reader2.read(), 2)).startswith(b"HTTP/1.1 200")
+        assert state.active == {"slow"}
+        writer1.write(body1)
+        await writer1.drain()
+        assert (await asyncio.wait_for(reader1.read(), 2)).startswith(b"HTTP/1.1 200")
+    finally:
+        writer1.close()
+        writer2.close()
+        await asyncio.gather(writer1.wait_closed(), writer2.wait_closed())
+
+
+async def test_early_refusal_is_returned_without_waiting_for_body(arrival_face):
+    face, state = arrival_face
+    state.now = 33
+    reader, writer, _ = await _arriving(face, "expired")
+    try:
+        response = await asyncio.wait_for(reader.read(), 0.2)
+        assert response.startswith(b"HTTP/1.1 401"), response
+        assert b'"message": "expired"' in response
+        assert not state.active
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_invalid_json_releases_the_started_call(arrival_face):
+    face, state = arrival_face
+    reader, writer, body = await _arriving(face, "malformed", b'{"text":')
+    try:
+        await _observed(state.arrived, "malformed")
+        writer.write(body)
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), 2)
+        assert response.startswith(b"HTTP/1.1 400"), response
+        await _observed(state.finished, "malformed")
+        assert not state.active
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_deadline_while_waiting_for_body_returns_grpc_status(arrival_face):
+    face, state = arrival_face
+    reader, writer = await asyncio.open_connection("127.0.0.1", face.port)
+    try:
+        writer.write(
+            b"POST /echo.v1.Echo/Say HTTP/1.1\r\nHost: localhost\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n"
+            b"X-Call: deadline\r\nConnect-Timeout-Ms: 50\r\nConnection: close\r\n\r\n"
+        )
+        await writer.drain()
+        await _observed(state.arrived, "deadline")
+        response = await asyncio.wait_for(reader.read(), 0.2)
+        assert response.startswith(b"HTTP/1.1 504"), response
+        await _observed(state.finished, "deadline")
+        assert not state.active
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_pipelined_request_received_while_answering_is_preserved(arrival_face):
+    face, state = arrival_face
+    reader, writer = await asyncio.open_connection("127.0.0.1", face.port)
+    try:
+        body = b'{"text":"hold"}'
+        writer.write(
+            f"POST /echo.v1.Echo/Say HTTP/1.1\r\nHost: localhost\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+            f"X-Call: first\r\n\r\n".encode() + body
+        )
+        await writer.drain()
+        await _observed(state.running, "first")
+        writer.write(
+            b"POST /echo.v1.Echo/Say HTTP/1.1\r\nHost: localhost\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n"
+            b"X-Call: second\r\nConnection: close\r\n\r\n{}"
+        )
+        await writer.drain()
+        await asyncio.sleep(0.03)
+        state.release.set()
+        response = await asyncio.wait_for(reader.read(), 2)
+        assert response.count(b"HTTP/1.1 200") == 2, response
+        assert state.seen == {"first", "second"}
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+@pytest.mark.parametrize("method,media", [
+    (method, media)
+    for method in ("Collect", "Converse")
+    for media in (
+        "application/json", "application/proto",
+        "application/connect+json", "application/connect+proto",
+        "application/grpc-web+json", "application/grpc-web+proto",
+    )
+] + [("Count", media) for media in ("application/json", "application/proto")])
+async def test_http_cardinality_refusal_never_enters_backend(method, media, supplied):
+    entered, intercepted = asyncio.Event(), asyncio.Event()
+
+    class Observe(grpc.aio.ServerInterceptor):
+        async def intercept_service(self, continuation, details):
+            intercepted.set()
+            return await continuation(details)
+
+    async def receive(requests, context):
+        entered.set()
+        async for request in requests:
+            pass
+        return Msg()
+
+    async def send(request, context):
+        entered.set()
+        yield Msg()
+
+    async def exchange(requests, context):
+        entered.set()
+        async for request in requests:
+            yield request
+
+    codec = {"request_deserializer": Msg.FromString,
+             "response_serializer": Msg.SerializeToString}
+    server = grpc.aio.server(interceptors=(Observe(),))
+    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+        "echo.v1.Echo", {
+            "Collect": grpc.stream_unary_rpc_method_handler(receive, **codec),
+            "Count": grpc.unary_stream_rpc_method_handler(send, **codec),
+            "Converse": grpc.stream_stream_rpc_method_handler(exchange, **codec),
+        },
+    ),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    face = await connect_gen.serve(0, port, host="127.0.0.1")
+    reader, writer = await asyncio.open_connection("127.0.0.1", face.port)
+    conn = h11.Connection(h11.CLIENT)
+    body = b"{}" if media.endswith("json") else Msg(text="hello").SerializeToString()
+    enveloped = "connect+" in media or "grpc-web+" in media
+    if enveloped:
+        body = envelope(body)
+    try:
+        writer.write(conn.send(h11.Request(
+            method="POST", target=f"/echo.v1.Echo/{method}",
+            headers=[("host", "localhost"), ("content-type", media),
+                     ("content-length", str(len(body))), ("connection", "close")],
+        )))
+        if supplied:
+            writer.write(conn.send(h11.Data(data=body)))
+            writer.write(conn.send(h11.EndOfMessage()))
+        await writer.drain()
+        await asyncio.sleep(0.05)
+        assert not intercepted.is_set(), "unsupported HTTP request entered the interceptor at headers"
+        assert not entered.is_set(), "unsupported HTTP request entered the backend at headers"
+        conn.receive_data(await asyncio.wait_for(reader.read(), 2))
+        response = conn.next_event()
+        assert response.status_code == (200 if enveloped else 501)
+        payload = bytearray()
+        while isinstance(event := conn.next_event(), h11.Data):
+            payload.extend(event.data)
+        assert isinstance(event, h11.EndOfMessage)
+        if media.startswith("application/grpc-web"):
+            flags, trailer = frames(payload)[0]
+            assert flags == 0x80 and b"grpc-status: 12\r\n" in trailer
+        elif enveloped:
+            flags, end = frames(payload)[0]
+            assert flags == 0x02 and json.loads(end)["error"]["code"] == "unimplemented"
+        else:
+            assert json.loads(payload)["code"] == "unimplemented"
+        assert not intercepted.is_set(), "unsupported HTTP request entered the interceptor before refusal"
+        assert not entered.is_set(), "unsupported HTTP request entered the backend before refusal"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await face.stop()
         await server.stop(None)
