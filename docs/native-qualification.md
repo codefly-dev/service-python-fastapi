@@ -33,6 +33,8 @@ intact. FastAPI Stop releases its environment, so restart uses Init then Start.
 At manager load the test captures the authenticated agent-group leader identity.
 After restart it requires the current full owner identity to equal that original
 birth before Core's identity-bound signal kills only the disposable agent owner.
+A stale-birth negative must be refused by that guard, with both original owners
+and uvicorn workload births still alive, before the valid owner-death case.
 The existing CLI previews that exact authenticated-v2 orphan, then consumes its
 unchanged receipt to recover it. The sibling must still retain its exact birth
 and live owner, and its ordinary Stop must also remove its registration.

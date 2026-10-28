@@ -77,17 +77,16 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 	startNativeWorkload(t, ctx, a)
-	owner, err := runners.InspectProcess(a.owner.PID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The current PID must still be the original authenticated manager child.
-	// SignalProcess rechecks that identity at delivery; never select a new birth.
-	require.Equal(t, a.owner, owner, "agent owner birth changed before signaling")
-	t.Logf("owner pre-signal identity equals original: %+v", a.owner)
-	if err := runners.SignalProcess(ctx, a.owner, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
+	// A stale birth must be refused before SIGKILL delivery. If this guard
+	// delivered to the live PID, the exact owner and workload checks would fail.
+	stale := a.owner
+	stale.StartID++
+	require.ErrorContains(t, signalNativeOwner(ctx, stale), "owner identity changed")
+	assertNativeOwnership(t, ctx, a, true)
+	assertNativeOwnership(t, ctx, b, true)
+	t.Log("stale owner refused with original agent and uvicorn births still alive")
+	require.NoError(t, signalNativeOwner(ctx, a.owner))
+	t.Logf("signaled owner only after full identity matched original: %+v", a.owner)
 	waitNativeCondition(t, func() bool {
 		ownership, err := a.group.InspectOwnership(ctx)
 		return err == nil && ownership.Authenticated && !ownership.OwnerAlive
@@ -103,7 +102,7 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 		t.Fatalf("preview: %v", err)
 	}
 	expected, err := runners.ParseProcessGroupRecoveryExpectation(preview)
-	if err != nil || expected.Namespace != "authenticated-v2" || expected.PGID != a.group.PGID() || expected.Owner.PID != owner.PID || expected.Owner.BootID != owner.BootID || expected.Owner.StartID != owner.StartID {
+	if err != nil || expected.Namespace != "authenticated-v2" || expected.PGID != a.group.PGID() || expected.Owner.PID != a.owner.PID || expected.Owner.BootID != a.owner.BootID || expected.Owner.StartID != a.owner.StartID {
 		t.Fatalf("actual agent did not write the expected v2 registration: %+v, %v", expected, err)
 	}
 	t.Logf("orphan preview: %s", preview)
@@ -264,6 +263,19 @@ func startNativeWorkload(t *testing.T, ctx context.Context, service *ownedNative
 		_ = group.Terminate(cleanup)
 		_ = group.RemoveIfDeadContext(cleanup)
 	})
+}
+
+// signalNativeOwner is only the fixture's admission guard. Core owns delivery
+// and rechecks the current full identity at the kernel-bound signal seam.
+func signalNativeOwner(ctx context.Context, original runners.ProcessIdentity) error {
+	current, err := runners.InspectProcess(original.PID)
+	if err != nil {
+		return err
+	}
+	if current != original {
+		return fmt.Errorf("owner identity changed: original=%+v current=%+v", original, current)
+	}
+	return runners.SignalProcess(ctx, current, syscall.SIGKILL)
 }
 
 func assertNativeOwnership(t *testing.T, ctx context.Context, service *ownedNativeService, ownerAlive bool) {
