@@ -45,8 +45,9 @@ keeps its code and words. Both bounds are positive numbers of bytes, keyword opt
 bounds. The face does not bound how many calls are in flight, as the gRPC server does
 not: each holds its answer until its client reads it.
 
-Every read is bounded in time: an HTTP/1.1 read by ``read_timeout`` (``idle_timeout``
-between requests), and a relayed gRPC connection is closed once it has had no open call
+An HTTP/1.1 header read is bounded by ``read_timeout`` (``idle_timeout`` between
+requests); the entire request body has one ``read_timeout`` budget. A relayed
+gRPC connection is closed once it has had no open call
 for ``idle_timeout``, as Go's HTTP/2 server bounds an idle connection. A call in flight
 is never cut by the face, however long its handler takes to answer: its deadline and the
 gRPC server's own policy bound it.
@@ -745,12 +746,11 @@ class _Connection:
                 return
             exchange = _Exchange(conn, writer)
             try:
-                body = await self._body(conn, reader, event)
-                await self._dispatch(exchange, event, body)
+                await self._dispatch(exchange, event, conn, reader)
             except _Plain as refusal:
                 await exchange.plain(refusal)
                 return  # the body may be unread: the connection cannot be reused
-            except (TimeoutError, h11.RemoteProtocolError):
+            except (TimeoutError, h11.RemoteProtocolError, ConnectionError):
                 return
             if conn.our_state is not h11.DONE or conn.their_state is not h11.DONE:
                 return
@@ -774,7 +774,17 @@ class _Connection:
             else:
                 raise h11.RemoteProtocolError("connection closed inside a request body")
 
-    async def _dispatch(self, exchange, request, body):
+    async def _disconnected(self, conn, reader):
+        # Preserve pipelined bytes for h11's next cycle, but never buffer an unbounded
+        # pipeline while a handler is running. EOF cancels even a silent unary call.
+        buffered = 0
+        while data := await reader.read(65536):
+            buffered += len(data)
+            if buffered > self.limit + 65536:
+                raise h11.RemoteProtocolError("pipelined requests exceed the message bound")
+            conn.receive_data(data)
+
+    async def _dispatch(self, exchange, request, conn, reader):
         if request.method != b"POST":
             raise _Plain(405, "only POST is served", [(b"allow", b"POST")])
         path = request.target.split(b"?", 1)[0].decode("latin-1")
@@ -811,7 +821,42 @@ class _Connection:
             self.limit,
             self.answer_bounds,
         )
-        await protocol.answer(exchange, call, body, headers)
+        try:
+            call.refuse_streams(unary=isinstance(protocol, _ConnectUnary))
+        except CallError:
+            # Encode the same cardinality refusal without opening a backend RPC.
+            await protocol.answer(exchange, call, b"", headers)
+            return
+        tasks = []
+        try:
+            # Start metadata delivery independently of HTTP body arrival. The existing
+            # server interceptor owns admission and its hold; there is no second check.
+            call.start()
+            body_task = asyncio.create_task(self._body(conn, reader, request))
+            ended = asyncio.create_task(call.ended())
+            tasks = [body_task, ended]
+            async with asyncio.timeout(self.read_timeout):
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if ended in done:
+                    call.early_error = ended.result()
+                    body = b""
+                    body_task.cancel()
+                    await asyncio.gather(body_task, return_exceptions=True)
+                else:
+                    body = body_task.result()
+            answer = asyncio.create_task(protocol.answer(exchange, call, body, headers))
+            disconnected = asyncio.create_task(self._disconnected(conn, reader))
+            tasks += [answer, disconnected]
+            done, _ = await asyncio.wait([answer, disconnected], return_when=asyncio.FIRST_COMPLETED)
+            if disconnected in done:
+                disconnected.result()
+                raise ConnectionError("client disconnected")
+            await answer
+        finally:
+            call.cancel()
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _method(path):
@@ -864,12 +909,51 @@ class _Call:
         self.output = message_factory.GetMessageClass(method.output_type)
         self.metadata = _metadata(raw_headers)
         self.timeout = _timeout(headers)
+        self.rpc = None
+        self.early_error = None
 
-    def refuse_streams(self):
+    def start(self):
+        # The wire still carries exactly one request. Streaming writes let grpc.aio
+        # send headers without requiring that request to have arrived first.
+        factory = (
+            self.channel.stream_stream if self.method.server_streaming else self.channel.stream_unary
+        )
+        self.rpc = factory(self.path)(metadata=self.metadata, timeout=self.timeout)
+
+    def cancel(self):
+        if self.rpc is not None:
+            self.rpc.cancel()
+
+    async def ended(self):
+        code = await self.rpc.code()
+        return CallError(
+            code if code is not grpc.StatusCode.OK else grpc.StatusCode.INTERNAL,
+            await self.rpc.details() or "call ended before its request",
+            await self.rpc.initial_metadata() or (),
+            await self.rpc.trailing_metadata() or (),
+        )
+
+    async def _write(self, message):
+        request = self.codec.request(self.input, message)
+        try:
+            await self.rpc.write(request)
+            await self.rpc.done_writing()
+        except asyncio.InvalidStateError:
+            # A refusal/deadline may arrive while the HTTP body is being decoded.
+            raise await self.ended() from None
+
+    def refuse_streams(self, *, unary=False):
+        if self.early_error is not None:
+            raise self.early_error
         if self.method.client_streaming:
             raise CallError(
                 grpc.StatusCode.UNIMPLEMENTED,
                 f"{self.path} streams its requests: it is served on the gRPC protocol only",
+            )
+        if unary and self.method.server_streaming:
+            raise CallError(
+                grpc.StatusCode.UNIMPLEMENTED,
+                f"{self.path} streams its answers: call it with application/connect+",
             )
 
     def decompress(self, data: bytes, encoding: str | None) -> bytes:
@@ -920,11 +1004,9 @@ class _Call:
 
     async def unary(self, message: bytes):
         """The answer and the header and trailer metadata of a unary call."""
-        request = self.codec.request(self.input, message)
-        call = self.channel.unary_unary(self.path)(
-            request, metadata=self.metadata, timeout=self.timeout
-        )
+        call = self.rpc
         try:
+            await self._write(message)
             answer = await call
             return (
                 self.answer(answer),
@@ -934,11 +1016,12 @@ class _Call:
         except grpc.aio.AioRpcError as exc:
             raise self.failed(exc) from None
 
-    def stream(self, message: bytes):
-        request = self.codec.request(self.input, message)
-        return self.channel.unary_stream(self.path)(
-            request, metadata=self.metadata, timeout=self.timeout
-        )
+    async def stream(self, message: bytes):
+        try:
+            await self._write(message)
+            return self.rpc
+        except grpc.aio.AioRpcError as exc:
+            raise self.failed(exc) from None
 
 
 class _Exchange:
@@ -977,12 +1060,7 @@ class _ConnectUnary:
     async def answer(self, exchange, call, body, headers):
         response_type = [(b"content-type", self.media.encode())]
         try:
-            call.refuse_streams()
-            if call.method.server_streaming:
-                raise CallError(
-                    grpc.StatusCode.UNIMPLEMENTED,
-                    f"{call.path} streams its answers: call it with application/connect+",
-                )
+            call.refuse_streams(unary=True)
             message = call.decompress(body, headers.get("content-encoding"))
             answer, header, trailer = await call.unary(message)
         except CallError as error:
@@ -1073,7 +1151,7 @@ async def _open(call, body, encoding):
         payload, compressed = _one_message(body)
         message = call.decompress(payload, encoding if compressed else None)
         if call.method.server_streaming:
-            stream = call.stream(message)
+            stream = await call.stream(message)
             return stream, tuple(await stream.initial_metadata() or ())
         answer, header, trailer = await call.unary(message)
         return _Answered(answer, trailer), header
