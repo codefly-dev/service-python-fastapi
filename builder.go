@@ -504,9 +504,9 @@ func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*
 // Parameters is the template parameter set for the k8s deployment.
 type Parameters struct {
 	Probes string
-	// GRPCEnabled adds the gRPC containerPort and Service port to the rendered
-	// manifests. GRPCPort is the fixed in-cluster port the grpc.aio listener
-	// binds (the app defaults to it when CODEFLY_GRPC_PORT is unset).
+	// GRPCEnabled adds the gRPC containerPort, Service port and
+	// CODEFLY_GRPC_PORT, the variable the app binds its grpc.aio listener on.
+	// GRPCPort is the fixed in-cluster port it binds.
 	GRPCEnabled bool
 	GRPCPort    int
 	// ConnectEnabled adds the Connect face's containerPort, Service port and

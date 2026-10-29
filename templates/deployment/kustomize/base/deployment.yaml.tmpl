@@ -74,6 +74,12 @@ spec:
             # writable scratch mount so libraries that use ~/.cache still work.
             - name: HOME
               value: /tmp
+{{- if .Deployment.Parameters.GRPCEnabled }}
+            # grpc-server is on: the app binds its grpc.aio listener on this
+            # port, the one the grpc containerPort and the Service declare.
+            - name: CODEFLY_GRPC_PORT
+              value: "{{ .Deployment.Parameters.GRPCPort }}"
+{{- end }}
 {{- if .Deployment.Parameters.ConnectEnabled }}
             # connect-endpoint is on: the app serves the Connect face on this
             # port, and only when the variable is set.

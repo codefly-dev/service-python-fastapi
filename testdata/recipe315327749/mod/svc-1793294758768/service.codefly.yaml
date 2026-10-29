@@ -1,0 +1,29 @@
+name: svc-1793294758768
+version: 0.0.0
+agent: null
+endpoints:
+    - name: rest
+      visibility: public
+      exposure: public
+      health:
+        readiness:
+            kind: http
+            path: /version
+            statuses:
+                - "200"
+        liveness:
+            kind: transport
+        startup:
+            kind: transport
+            period: 2s
+            failure-threshold: 30
+spec:
+    connect-endpoint: false
+    docker-image: ""
+    grpc-server:
+        enabled: false
+        proto: ""
+    hot-reload: true
+    public-endpoint: true
+    python-version: ""
+    source-dir: ""
