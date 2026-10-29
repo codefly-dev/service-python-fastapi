@@ -1,0 +1,60 @@
+import os
+
+from codefly_sdk import codefly
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+
+def _service_manifest_reachable() -> bool:
+    # codefly.init() walks parent directories for service.codefly.yaml but does
+    # not stop at the filesystem root, so it loops forever when the manifest is
+    # absent (e.g. tests running against an isolated source snapshot). Only init
+    # when the manifest is actually reachable; runtime config is otherwise
+    # supplied through CODEFLY__* environment variables.
+    directory = os.getcwd()
+    while True:
+        if os.path.isfile(os.path.join(directory, "service.codefly.yaml")):
+            return True
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return False
+        directory = parent
+
+
+if _service_manifest_reachable():
+    codefly.init()
+
+app = FastAPI()
+
+# CORS will be done properly in next release
+origins = [
+    "*",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize configuration before importing routes or user-provided plugins.
+# Routes
+from src.admin.router import router as admin
+
+app.include_router(admin)
+
+# Plugins
+from src.plugins.registry import plugins
+
+for plugin in plugins:
+    app.include_router(plugin.router, prefix=plugin.prefix, tags=plugin.tags)
+    if plugin.startup:
+        app.add_event_handler("startup", plugin.startup)
+    if plugin.shutdown:
+        app.add_event_handler("shutdown", plugin.shutdown)
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app)

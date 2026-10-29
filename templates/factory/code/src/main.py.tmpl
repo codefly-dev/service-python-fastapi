@@ -56,8 +56,8 @@ for plugin in plugins:
 {{- if .GRPCEnabled }}
 
 # gRPC server — runs a grpc.aio listener in this process alongside FastAPI.
-# The port is provided by codefly at runtime; it falls back to the standard
-# gRPC port in container/Kubernetes where the mapping is fixed.
+# codefly hands the process its port as CODEFLY_GRPC_PORT, locally and in the
+# deployment.
 _grpc_server = None
 # The Connect face (Connect, gRPC-Web and gRPC on one listener over the gRPC
 # server): codefly hands the process CODEFLY_CONNECT_PORT exactly when the

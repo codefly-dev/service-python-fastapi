@@ -1,0 +1,28 @@
+import os
+
+# Provide the runtime configuration the app reads without depending on a
+# service.codefly.yaml on disk: the test runner executes against an isolated
+# source snapshot where the manifest isn't present, and codefly.init()'s
+# parent-directory walk would otherwise spin. setdefault preserves any real
+# values injected by the codefly runtime.
+os.environ.setdefault("CODEFLY__MODULE", "mod")
+os.environ.setdefault("CODEFLY__SERVICE", "svc")
+os.environ.setdefault("CODEFLY__SERVICE_VERSION", "0.0.0")
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from src.admin.models import Version
+from src.admin.version import get_version
+from src.main import app
+
+
+@pytest.mark.asyncio
+async def test_version():
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:8080"
+    ) as ac:
+        response = await ac.get("/version")
+    assert response.status_code == 200
+
+    assert Version.model_validate(response.json()) == get_version()

@@ -1,0 +1,41 @@
+[project]
+name = "base"
+version = "0.0.0"
+description = ""
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.25.0",
+    "codefly-sdk>=0.0.14",
+    "pydantic>=2.9.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "httpx>=0.27.0",
+    "pytest-asyncio>=0.23.6",
+    "codefly-cli>=0.0.19",
+    "ruff>=0.6.0",
+]
+
+[tool.uv]
+package = false
+# A CONSTRAINT, not a dependency: it bounds a version only if something
+# else pulls the package in. multidict 7.1.0 (PyPI, 2026-10-09) shipped
+# without manylinux wheels, so `uv sync` in the Debian runtime had nothing
+# to install and no compiler to build it -- every fresh service failed at
+# Create. Lift it once a 7.1.x with manylinux wheels exists; the durable
+# fix is a uv.lock shipped with this template so a create never resolves
+# whatever PyPI published an hour ago.
+constraint-dependencies = ["multidict<7.1"]
+
+[tool.pytest.ini_options]
+# "." — not "src" — so the `from src.X` imports in the scaffolded tests
+# resolve. src/ ships with an __init__.py making it a proper package.
+pythonpath = ["."]
+testpaths = ["tests"]
+# pytest-asyncio 1.x needs an explicit mode. "auto" picks up async def
+# tests without needing @pytest.mark.asyncio on every one; keeps the
+# boilerplate low for scaffolded services.
+asyncio_mode = "auto"

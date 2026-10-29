@@ -190,8 +190,10 @@ func TestGRPCEndpointReloadsContract(t *testing.T) {
 	require.Contains(t, names, "Echo")
 }
 
-// TestDeploymentRendersGRPCPort proves the gRPC container/service ports appear
-// only when the deployment parameters opt in.
+// TestDeploymentRendersGRPCPort proves the gRPC container/service ports, and
+// the CODEFLY_GRPC_PORT the app binds on, appear only when the deployment
+// parameters opt in: a deployed service never guesses the port the Service
+// routes to.
 func TestDeploymentRendersGRPCPort(t *testing.T) {
 	enabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{GRPCEnabled: true, GRPCPort: 9090}))
 	svc, err := os.ReadFile(filepath.Join(enabled, "base", "service.yaml"))
@@ -202,9 +204,13 @@ func TestDeploymentRendersGRPCPort(t *testing.T) {
 	deployment, err := os.ReadFile(filepath.Join(enabled, "base", "deployment.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(deployment), "containerPort: 9090")
+	require.Contains(t, string(deployment), "- name: CODEFLY_GRPC_PORT\n              value: \"9090\"")
 
 	disabled := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{}))
 	svc, err = os.ReadFile(filepath.Join(disabled, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(svc), "grpc-port")
+	deployment, err = os.ReadFile(filepath.Join(disabled, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(deployment), "CODEFLY_GRPC_PORT")
 }
