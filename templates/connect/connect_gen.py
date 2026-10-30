@@ -351,7 +351,7 @@ class _Frames:
     where frames end in the data, each with the bytes ``on_frame`` returned, to be written
     right after that frame in this direction. The payload passed is, for a SETTINGS
     frame, its last SETTINGS_MAX_CONCURRENT_STREAMS entry if it has one (the frame is
-    scanned whole as it streams, holding one entry, when ``scan_settings``: the server's
+    scanned whole as it streams, keeping one entry, when ``scan_settings``: the server's
     direction only, since only the server's limit matters), for a GOAWAY its first
     ``_CONTROL_PAYLOAD`` bytes, and empty otherwise. A
     ``_ProtocolError`` from ``on_frame`` stops the feed; it is kept in ``error`` and the
