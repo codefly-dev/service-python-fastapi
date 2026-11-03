@@ -1,0 +1,300 @@
+"""Every call this service serves is admitted by the authority's hop.
+
+The hop in front of this service checked the caller's Work Context for this
+module live, signed an admission for exactly that call, and forwarded the
+context it checked. This service re-checks no permission the hop decided, and
+believes nothing it has not authenticated: the authority's verifier
+(``codefly_hop.Verifier``) checks the admission against a hop admission key the
+authority publishes in ``Keys`` — read through ``authority/endpoint``, never
+configured — for exactly the procedure the call reached and this module's
+audience, reserves its single-use nonce, then authenticates the forwarded Work
+Context under the authority's published keys. Anything else is refused, naming
+why. Who the call is for is then read from the verified identity alone, never
+from a header.
+
+There is no switch. ``HopAdmission`` sits on the FastAPI app ahead of every
+router and ``HopInterceptor`` (``src/rpc/server.py``) on the gRPC server, so
+every path and every procedure reaches one verification point. ``/health`` and
+``/ready``, and the gRPC health service, are the only things served
+unauthenticated, because a probe is not a caller. The process refuses to start
+without the verifier's inputs (``build``) — the same refusal the hop makes.
+
+What Codefly delivers, and nothing else:
+
+- ``authority/endpoint``: the authority interface's gRPC face, where the
+  published keys are read. Dialled under the authority library's transport rule
+  (TLS; plaintext only to loopback on a local run, or to an in-cluster Service
+  under ``internal-transport/mesh-protected``).
+- ``CODEFLY__MODULE``: the audience the authority knows this module by, which
+  every admission and every Work Context must be addressed to.
+- ``hop/replay-connection``: the Postgres this service reserves each
+  admission's single-use nonce in, shared by every replica
+  (``codefly_hop.replaypg``). A developer run (``CODEFLY__ENVIRONMENT=local``)
+  reserves in this process instead. That is the only thing a local run relaxes,
+  and only because the verifier itself relaxes it there.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import threading
+import time
+from contextlib import AsyncExitStack
+
+from authority_client import host
+from authority_client._gen.host.authority.v1 import authority_pb2_grpc
+from codefly_hop import Expired, Reason, Replayed, Unauthenticated, Verifier
+from codefly_sdk import codefly
+
+_log = logging.getLogger(__name__)
+
+# Where the composition says the authority answers, and whether a mutually
+# authenticated mesh carries every in-cluster hop — the only way a plaintext
+# endpoint is dialled off a local run.
+AUTHORITY, ENDPOINT_KEY = "authority", "endpoint"
+INTERNAL_TRANSPORT, MESH_PROTECTED_KEY = "internal-transport", "mesh-protected"
+# Where each admission's single-use nonce is reserved, shared by every replica.
+HOP, REPLAY_CONNECTION_KEY = "hop", "replay-connection"
+# The resource identity Codefly injects: the audience the authority knows this
+# module by.
+MODULE_ENV = "CODEFLY__MODULE"
+ENVIRONMENT_ENV, LOCAL_ENVIRONMENT = "CODEFLY__ENVIRONMENT", "local"
+
+# The only paths served without an admission: a probe is not a caller. Adding a
+# path here publishes it to anyone who can reach the listener.
+OPEN_PATHS = ("/health", "/ready")
+# How often reservations aged past their retention are removed from the shared
+# store. The consumer schedules this; nothing else does.
+COLLECT_EVERY_S = 60.0
+
+
+def is_local() -> bool:
+    """Whether this is the run named exactly ``local``, as the authority library
+    reads it. Not ``codefly.is_local()``, which reads ``CODEFLY_ENVIRONMENT``
+    (codefly-dev/sdk-python#8) and so calls a deployed run local."""
+    return os.environ.get(ENVIRONMENT_ENV) == LOCAL_ENVIRONMENT
+
+
+class LocalReservations:
+    """Admission reservations held in this process, for a developer run only.
+
+    It declares no ``shared``, so the verifier refuses it outside the run named
+    exactly ``local`` (``replay_store_not_shared``): a captured admission would
+    otherwise replay once per replica, and a restart would forget every
+    reservation. That refusal is the verifier's own — this class does not decide
+    where it is acceptable.
+    """
+
+    def __init__(self) -> None:
+        self._held: dict[str, bool] = {}
+        self._lock = threading.Lock()
+
+    async def reserve_async(self, nonce: str, retain_until: int) -> None:
+        with self._lock:
+            if nonce in self._held:
+                raise Replayed()
+            if retain_until <= time.time():
+                raise Expired()
+            self._held[nonce] = True
+
+    async def finish_async(self, nonce: str) -> None:
+        with self._lock:
+            self._held[nonce] = False
+
+    async def consume_async(self, nonce: str, retain_until: int) -> None:
+        await self.reserve_async(nonce, retain_until)
+        await self.finish_async(nonce)
+
+
+class Admission:
+    """The one verification point every listener in this process admits with.
+
+    The verifier is built at startup (``build``) and bound here. A listener that
+    reaches for it before then refuses the call rather than serving it: there is
+    no state of this process in which a call is served unverified.
+    """
+
+    def __init__(self) -> None:
+        self._verifier: Verifier | None = None
+
+    def bind(self, verifier: Verifier) -> None:
+        self._verifier = verifier
+
+    def release(self) -> None:
+        """Forget the bound verifier; every call is then refused. Shutdown and
+        tests use it — nothing serving does."""
+        self._verifier = None
+
+    @property
+    def verifier(self) -> Verifier:
+        if self._verifier is None:
+            raise Unauthenticated(Reason.CONFIGURATION)
+        return self._verifier
+
+    def ready(self) -> bool:
+        """Whether this replica holds trusted keys, as readiness asks it. Never
+        ``keys_error``: a brief authority outage must not take a replica out of
+        rotation while the keys it holds are still trusted."""
+        return self._verifier is not None and self._verifier.ready()
+
+    def admit(self, headers, method: str):
+        """Hold the call's single-use admission while its handler runs.
+
+        ``method`` is what the hop signed for: ``"<VERB> <path>"`` for a REST
+        call, as the hop's HTTP face binds it, and the full procedure
+        (``/api.EchoService/Echo``) for a gRPC or Connect call.
+        """
+        return self.verifier.admit_async(headers, method)
+
+
+# The process's one admission. Both listeners hold it, so neither can be built
+# without the verifier the other uses.
+ADMISSION = Admission()
+
+
+async def build(admission: Admission = ADMISSION):
+    """Build the verifier from what Codefly delivered and bind it.
+
+    Raises before anything listens when an input is missing: a listener that
+    cannot verify an admission must not serve. Returns what to close when the
+    process stops; a failure part-way through closes what it already opened
+    rather than leaving a pool or a channel behind.
+    """
+    endpoint = codefly.configuration(name=AUTHORITY, key=ENDPOINT_KEY)
+    if not endpoint:
+        raise RuntimeError(
+            f"{AUTHORITY}/{ENDPOINT_KEY} is required: every call this service serves is "
+            "admitted against the authority's published keys, which are read there"
+        )
+    audience = os.environ.get(MODULE_ENV)
+    if not audience:
+        raise RuntimeError(
+            f"{MODULE_ENV} is required: it is the audience the authority knows this module "
+            "by, which every admission and every Work Context must be addressed to"
+        )
+    async with AsyncExitStack() as closing:
+        replay = await _replay_store(closing)
+        # Refused by name on an endpoint the verifier's trust root may not be
+        # read over in clear.
+        channel = host.dial(
+            endpoint,
+            local=is_local(),
+            mesh=codefly.configuration(name=INTERNAL_TRANSPORT, key=MESH_PROTECTED_KEY),
+        )
+        closing.callback(channel.close)
+        # The keys are read on the verifier's own thread, each read bounded by
+        # the library: it never fails to construct on an authority that is not
+        # serving yet, and refuses every call, naming why, until they read.
+        verifier = await asyncio.to_thread(
+            Verifier,
+            authority_pb2_grpc.AuthorityServiceStub(channel),
+            audience=audience,
+            replay=replay,
+        )
+        if verifier.keys_error is not None:
+            # Not fatal: the authority may publish its hop's key after this
+            # service starts, and the verifier reads again. Until then every
+            # call is refused as keys_unavailable, which this line explains.
+            _log.warning(
+                "no call can be admitted yet: the authority's keys are unavailable: %s",
+                verifier.keys_error,
+            )
+        admission.bind(verifier)
+        closing.callback(admission.release)
+        # Nothing failed, so the teardown is handed to the caller, which runs it
+        # at shutdown: the verifier is let go first, then the channel, then the
+        # store.
+        return closing.pop_all().aclose
+
+
+async def _replay_store(closing: AsyncExitStack):
+    """The store each admission's single-use nonce is reserved in, with its
+    closing pushed onto ``closing``."""
+    if is_local():
+        return LocalReservations()
+    connection = codefly.secret(name=HOP, key=REPLAY_CONNECTION_KEY)
+    if not connection:
+        raise RuntimeError(
+            f"{HOP}/{REPLAY_CONNECTION_KEY} is required outside a local run: an admission is "
+            "single-use, so its nonce is reserved in a durable store every replica shares"
+        )
+    import asyncpg
+
+    from codefly_hop import replaypg
+
+    pool = await asyncpg.create_pool(connection)
+    closing.push_async_callback(pool.close)
+    # The consumer owns the schema; the table and nonce namespace are the
+    # library's, shared with every other service reserving in this store.
+    await pool.execute(replaypg.MIGRATION)
+    store = replaypg.Store(pool)
+    collector = asyncio.create_task(_collect(store))
+    closing.callback(collector.cancel)
+    return store
+
+
+async def _collect(store) -> None:
+    while True:
+        await asyncio.sleep(COLLECT_EVERY_S)
+        try:
+            await store.collect()
+        except Exception as failure:  # noqa: BLE001 - an outage refuses calls on its own
+            _log.warning("hop admission reservations were not collected: %s", failure)
+
+
+class HopAdmission:
+    """ASGI middleware admitting every HTTP and WebSocket call the app serves.
+
+    Pure ASGI rather than ``BaseHTTPMiddleware``: it runs before routing, so a
+    path no router claims is refused here instead of answered, and a route added
+    later is admitted without having to opt in. The admission's single-use
+    reservation is held until the response has been sent.
+    """
+
+    def __init__(self, app, admission: Admission = ADMISSION) -> None:
+        self.app, self.admission = app, admission
+
+    async def __call__(self, scope, receive, send) -> None:
+        kind = scope.get("type")
+        if kind not in ("http", "websocket"):
+            await self.app(scope, receive, send)  # a lifespan message is not a call
+            return
+        path = scope.get("path", "")
+        if kind == "http" and path in OPEN_PATHS:
+            await self.app(scope, receive, send)
+            return
+        # A WebSocket reaches the hop as the GET that opens it.
+        verb = scope.get("method", "GET") if kind == "http" else "GET"
+        headers = [
+            (name.decode("latin-1"), value.decode("latin-1"))
+            for name, value in scope.get("headers", ())
+        ]
+        try:
+            async with self.admission.admit(headers, f"{verb} {path}") as identity:
+                scope.setdefault("state", {})["codefly_identity"] = identity
+                await self.app(scope, receive, send)
+        except Unauthenticated as refusal:
+            await _refuse(kind, send, refusal)
+
+
+async def _refuse(kind: str, send, refusal: Unauthenticated) -> None:
+    """What a refused caller is told: the verifier's fixed code and text, which
+    name no proof, token, digest, nonce or claim."""
+    if kind == "websocket":
+        await send({"type": "websocket.close", "code": 1008, "reason": refusal.code})
+        return
+    body = json.dumps({"code": refusal.code, "detail": refusal.text}).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})

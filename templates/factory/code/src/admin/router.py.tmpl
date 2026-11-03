@@ -1,9 +1,39 @@
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from src.admin.models import Version
 from src.admin.version import get_version
+from src.hop import ADMISSION
 
 router = APIRouter()
+
+
+# /health and /ready are the only paths this app serves without the hop's
+# admission (src/hop.py, OPEN_PATHS): a probe is not a caller. Neither answer
+# carries anything that is not already public. Every other route, including the
+# ones you add, is admitted.
+#
+# Out of the schema, both of them: openapi/api.swagger.json is this service's
+# API — what a dependent service generates a client from and what the hop routes
+# and decides policy for — and a probe a kubelet makes is none of that.
+@router.get("/health", include_in_schema=False)
+async def health():
+    """Liveness: this process is up and serving."""
+    return {"status": "serving"}
+
+
+@router.get("/ready", include_in_schema=False)
+async def ready():
+    """Readiness: this replica holds trusted authority keys, so it can admit the
+    calls sent to it. One that cannot withdraws from rotation rather than
+    refusing every call it is given. It never reports the read's failure: a
+    brief authority outage must not withdraw a replica whose keys still stand.
+    """
+    if not ADMISSION.ready():
+        return JSONResponse(
+            status_code=503, content={"ready": False, "reason": "keys_unavailable"}
+        )
+    return {"ready": True}
 
 
 @router.get("/version", response_model=Version)

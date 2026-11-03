@@ -1,0 +1,128 @@
+"""Every call this service serves is admitted by the authority's hop, and there
+is no way to serve one that is not.
+
+The stamp these tests present is the one the hop writes (tests/conftest.py),
+verified by the very ``codefly_hop.Verifier`` the process runs. Keep these
+tests: they are what says a route of yours cannot be reached unstamped.
+"""
+
+import pytest
+from fastapi import Request
+
+from src import hop
+from src.hop import Admission
+from src.main import app
+
+
+async def test_a_call_without_a_stamp_is_refused(client):
+    response = await client.get("/version")
+    assert response.status_code == 401
+    assert response.json()["code"] == "stamp_proof"
+
+
+async def test_a_call_the_hop_stamped_is_admitted(client, stamp):
+    response = await client.get("/version", headers=stamp("GET /version"))
+    assert response.status_code == 200
+    assert response.json()["version"]
+
+
+async def test_an_admission_is_single_use(client, stamp):
+    headers = stamp("GET /version")
+    assert (await client.get("/version", headers=headers)).status_code == 200
+    replayed = await client.get("/version", headers=headers)
+    assert replayed.status_code == 401
+    assert replayed.json()["code"] == "stamp_replayed"
+
+
+async def test_an_admission_signed_for_another_route_is_refused(client, stamp):
+    refused = await client.get("/version", headers=stamp("GET /somewhere-else"))
+    assert refused.status_code == 401
+    assert refused.json()["code"] == "stamp_method"
+
+
+async def test_an_admission_signed_for_another_module_is_refused(client, stamp):
+    refused = await client.get(
+        "/version", headers=stamp("GET /version", audience="another-module")
+    )
+    assert refused.status_code == 401
+    assert refused.json()["code"] == "stamp_audience"
+
+
+async def test_a_path_no_route_claims_is_refused_rather_than_answered(client):
+    # The admission runs before routing, so an unstamped call to a path this app
+    # does not serve never reaches the router.
+    refused = await client.get("/not-a-route")
+    assert refused.status_code == 401
+
+
+async def test_a_route_reads_who_the_call_is_for(client, stamp):
+    # The verified identity, which is the only place a route should learn who a
+    # call is for. Never a header: the hop writes those, and only the verifier
+    # has checked that they match the Work Context it authenticated.
+    @app.get("/who", include_in_schema=False)
+    async def who(request: Request):
+        return {"tenant": request.state.codefly_identity.tenant}
+
+    try:
+        response = await client.get("/who", headers=stamp("GET /who"))
+        assert response.status_code == 200
+        assert response.json()["tenant"] == "fixture-tenant"
+    finally:
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if getattr(route, "path", None) != "/who"
+        ]
+
+
+async def test_health_and_ready_are_open(client):
+    assert (await client.get("/health")).status_code == 200
+    ready = await client.get("/ready")
+    assert ready.status_code == 200
+    assert ready.json()["ready"] is True
+
+
+async def test_ready_withdraws_without_trusted_keys(client, admission):
+    admission.release()
+    withdrawn = await client.get("/ready")
+    assert withdrawn.status_code == 503
+    assert withdrawn.json()["reason"] == "keys_unavailable"
+
+
+async def test_a_call_is_refused_when_no_verifier_is_bound(client, admission, stamp):
+    headers = stamp("GET /version")
+    admission.release()
+    refused = await client.get("/version", headers=headers)
+    assert refused.status_code == 401
+    assert refused.json()["code"] == "configuration"
+
+
+async def test_the_service_refuses_to_start_without_the_authority_endpoint(monkeypatch):
+    monkeypatch.delenv(
+        "CODEFLY__WORKSPACE_CONFIGURATION__AUTHORITY__ENDPOINT", raising=False
+    )
+    with pytest.raises(RuntimeError, match="authority/endpoint"):
+        await hop.build(Admission())
+
+
+async def test_the_service_refuses_to_start_without_its_audience(monkeypatch):
+    monkeypatch.setenv(
+        "CODEFLY__WORKSPACE_CONFIGURATION__AUTHORITY__ENDPOINT", "127.0.0.1:1"
+    )
+    monkeypatch.delenv("CODEFLY__MODULE", raising=False)
+    with pytest.raises(RuntimeError, match="CODEFLY__MODULE"):
+        await hop.build(Admission())
+
+
+async def test_the_service_refuses_to_start_without_a_shared_replay_store(monkeypatch):
+    # Outside the run named exactly local, each single-use admission has to be
+    # reserved somewhere every replica shares.
+    monkeypatch.setenv(
+        "CODEFLY__WORKSPACE_CONFIGURATION__AUTHORITY__ENDPOINT", "127.0.0.1:1"
+    )
+    monkeypatch.setenv("CODEFLY__ENVIRONMENT", "production")
+    monkeypatch.delenv(
+        "CODEFLY__WORKSPACE_SECRET_CONFIGURATION__HOP__REPLAY_CONNECTION", raising=False
+    )
+    with pytest.raises(RuntimeError, match="hop/replay-connection"):
+        await hop.build(Admission())

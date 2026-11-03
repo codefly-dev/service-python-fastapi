@@ -111,13 +111,25 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.NoError(t, err)
 	require.Equal(t, 1, len(restRoutes))
 
-	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings)
+	// The scaffold refuses to start without the verifier's inputs, so the run
+	// composes an authority for it, as a workspace does. The authority library
+	// dials a plaintext keys endpoint only at loopback on a local run, and a
+	// container does not share the host's loopback, so a container run reaches
+	// this one no more than it would reach a host-served authority of its own:
+	// there the app serves, and refuses every unstamped call, on keys it never
+	// read. What an admitted call does is proved natively here, and in the
+	// generated service's own suite, which runs in BOTH contexts below
+	// (runtime.Test) against a fixture authority inside its own process.
+	authority := serveHopAuthority(t)
+	admits := runtimeContext.GetKind() == resources.RuntimeContextNative
+
+	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings, authority, admits)
 
 	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
 	require.NoError(t, err)
 
 	// Running again should work
-	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings)
+	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings, authority, admits)
 
 	// Test
 	test, err := runtime.Test(ctx, &runtimev0.TestRequest{})
@@ -126,11 +138,12 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 }
 
-func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *basev0.ServiceIdentity, runtimeContext *basev0.RuntimeContext, networkMappings []*basev0.NetworkMapping) {
+func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *basev0.ServiceIdentity, runtimeContext *basev0.RuntimeContext, networkMappings []*basev0.NetworkMapping, authority *hopAuthority, admits bool) {
 
 	init, err := runtime.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
-		ProposedNetworkMappings: networkMappings})
+		ProposedNetworkMappings: networkMappings,
+		WorkspaceConfigurations: authority.configurations()})
 	require.NoError(t, err)
 	require.NotNil(t, init)
 	// Init reports failures through the response status, not the Go error, so a
@@ -144,8 +157,16 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 
-	client := http.Client{Timeout: 200 * time.Millisecond}
-	// Loop and wait for 1 seconds up to do a HTTP request to localhost with /version path
+	client := http.Client{Timeout: 2 * time.Second}
+	// /health is one of the two paths the app serves unauthenticated, so it
+	// answers as soon as the app is up, whether or not it has read any key.
+	// Where the authority is reachable, wait for /ready too: that one answers
+	// 200 only once the replica holds the authority's published keys, so it says
+	// the app is up AND can admit a call.
+	readiness := "/health"
+	if admits {
+		readiness = "/ready"
+	}
 	tries := 0
 	for {
 		if tries > 10 {
@@ -153,27 +174,45 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 		}
 		time.Sleep(time.Second)
 
-		// HTTP
-		response, err := client.Get(fmt.Sprintf("%s/version", instance.Address))
+		response, err := client.Get(fmt.Sprintf("%s%s", instance.Address, readiness))
 		if err != nil {
 			tries++
 			continue
 		}
-
-		defer response.Body.Close()
-
-		body, err := io.ReadAll(response.Body)
-		require.NoError(t, err)
-
-		var data map[string]interface{}
-		err = json.Unmarshal(body, &data)
-		require.NoError(t, err)
-
-		version, ok := data["version"].(string)
-		require.True(t, ok)
-		require.Equal(t, identity.Version, version)
+		status := response.StatusCode
+		_ = response.Body.Close()
+		if status != http.StatusOK {
+			tries++
+			continue
+		}
 		break
 	}
+
+	// Every other route is admitted, in either context: a call the hop did not
+	// stamp is refused rather than served.
+	refused, err := client.Get(fmt.Sprintf("%s/version", instance.Address))
+	require.NoError(t, err)
+	_ = refused.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, refused.StatusCode,
+		"the generated app served a route the hop did not stamp")
+	if !admits {
+		return
+	}
+
+	response, err := authority.get(t, &client, instance.Address, "/version")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
+
+	var data map[string]interface{}
+	err = json.Unmarshal(body, &data)
+	require.NoError(t, err)
+
+	version, ok := data["version"].(string)
+	require.True(t, ok)
+	require.Equal(t, identity.Version, version)
 }
 
 // Source tests run below the agent process, so its recovery marker is not ours.

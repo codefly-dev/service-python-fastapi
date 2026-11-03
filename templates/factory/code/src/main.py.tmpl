@@ -4,6 +4,9 @@ from codefly_sdk import codefly
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src import hop
+from src.hop import HopAdmission
+
 
 def _service_manifest_reachable() -> bool:
     # codefly.init() walks parent directories for service.codefly.yaml but does
@@ -24,12 +27,26 @@ def _service_manifest_reachable() -> bool:
 if _service_manifest_reachable():
     codefly.init()
 
+# What the shutdown handler closes: the channel the verifier reads the
+# authority's keys over, and the store it reserves admissions in.
+_close_admission = None
+
 app = FastAPI()
+
+# Every call this app serves is admitted by the authority's hop (src/hop.py).
+# Added first, so it is the innermost middleware: it runs before routing, and
+# there is no switch to turn it off. /health and /ready are the only paths it
+# lets through unauthenticated.
+app.add_middleware(HopAdmission)
 
 # CORS will be done properly in next release
 origins = [
     "*",
 ]
+# Added after the admission, so it is outermost: a browser preflight (OPTIONS)
+# carries no Work Context and the hop signs no admission for one, so CORS
+# answers it rather than the admission refusing it. A preflight carries no
+# request body and is answered with headers alone.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -37,6 +54,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _build_admission():
+    # Registered before every other startup handler, so no listener in this
+    # process starts before the verifier is built. It raises, and the process
+    # refuses to start, when an input is missing.
+    global _close_admission
+
+    _close_admission = await hop.build()
+
 
 # Initialize configuration before importing routes or user-provided plugins.
 # Routes
@@ -75,7 +103,9 @@ async def _start_grpc():
     from src.rpc.server import serve as _grpc_serve
 
     port = int(os.environ.get("CODEFLY_GRPC_PORT", "9090"))
-    _grpc_server = await _grpc_serve(port)
+    # The server takes the same admission the app does: there is no way to
+    # start a listener in this process that admits what the hop did not stamp.
+    _grpc_server = await _grpc_serve(port, hop.ADMISSION)
     if os.environ.get("CODEFLY_CONNECT_PORT"):
         try:
             import src.rpc.connect_gen as connect_gen
@@ -96,6 +126,15 @@ async def _stop_grpc():
     if _grpc_server is not None:
         await _grpc_server.stop(grace=5)
 {{- end }}
+
+
+@app.on_event("shutdown")
+async def _close_admission_last():
+    # Registered after every other shutdown handler, so a listener still has its
+    # verifier while it is stopping.
+    if _close_admission is not None:
+        await _close_admission()
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,0 +1,220 @@
+"""The authority and its hop, as this service's tests run them.
+
+Behind the hop this service believes only an admission and a Work Context it
+authenticates (src/hop.py), so a test that wants to be served has to be stamped
+the way the hop stamps a call it let through. Nothing here is a stand-in for the
+verifier: ``Authority`` signs Work Contexts with a key of its own and publishes
+its hop's admission key through a ``Keys`` answer shaped exactly as the authority
+interface's generated client returns it, and the tests run the very
+``codefly_hop.Verifier`` the process runs, over this authority instead of the one
+Codefly delivers.
+
+``stamp(method)`` is the headers of one call: the Work Context this authority
+signed, the identity the hop derives from it (``codefly_hop.identity_of``), and
+an admission signed for exactly that ``method`` — ``"GET /version"`` for a REST
+call, as the hop's HTTP face binds it, and the full procedure
+(``/api.EchoService/Echo``) for a gRPC or Connect call. The wire shape is the
+hop's conformance vectors, codefly-dev/authority
+``libraries/authority-client/testdata/stamps.json``.
+
+Use it for your own routes too: a route of yours is admitted like every other.
+"""
+
+import base64
+import hashlib
+import json
+import os
+import secrets
+import time
+
+# What the codefly runtime injects, for a run that has no service.codefly.yaml
+# beside it (the test runner executes against an isolated source snapshot).
+# setdefault keeps any real value the runtime did inject.
+os.environ.setdefault("CODEFLY__MODULE", "mod")
+os.environ.setdefault("CODEFLY__SERVICE", "svc")
+os.environ.setdefault("CODEFLY__SERVICE_VERSION", "0.0.0")
+# The run named exactly local, which is the only one whose admission
+# reservations may live in a single process.
+os.environ.setdefault("CODEFLY__ENVIRONMENT", "local")
+
+import pytest
+from authority_client._gen.host.authority.v1.authority_pb2 import KeysResponse
+from authority_client._gen.host.authority.v1.work_context_pb2 import WorkContextV1
+from codefly_hop import (
+    ACTORS_KEY,
+    BINDING_KEY,
+    CONTEXT_KEY,
+    EXPIRES_KEY,
+    OWNER_KEY,
+    OWNER_KIND_KEY,
+    PROOF_KEY,
+    SCOPES_KEY,
+    TASK_KEY,
+    TENANT_KEY,
+    WORK_CONTEXT_KEY,
+    Verifier,
+    identity_of,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from httpx import ASGITransport, AsyncClient
+
+from src.hop import ADMISSION, LocalReservations
+from src.main import app
+
+AUDIENCE = os.environ["CODEFLY__MODULE"]
+ISSUER = "fixture-authority"
+# The lifetime the hop signs an admission for, and the scopes a fixture caller
+# holds: codefly_hop's own LIFETIME, and one kind-wide grant.
+LIFETIME_S = 30
+RESOURCE_KIND, ACTIONS = "fixture.resource", ("read", "write")
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _raw(key: Ed25519PrivateKey) -> bytes:
+    return key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+class Hop:
+    """The authority's hop: an admission signing key of its own, distinct from
+    the key Work Contexts are signed with, whose public half the authority
+    publishes in ``Keys`` (``admission_keys``)."""
+
+    def __init__(self):
+        self._key = Ed25519PrivateKey.generate()
+
+    def published(self) -> bytes:
+        return _raw(self._key)
+
+    def admission(self, token: str, method: str, *, audience: str = AUDIENCE) -> str:
+        """The ``x-codefly-hop-proof`` admitting one call to ``method`` carrying
+        ``token``: the procedure, the audience, the token's digest and a fresh
+        single-use nonce, signed as the hop signs every call it lets through."""
+        issued = int(time.time())
+        payload = json.dumps(
+            [
+                "codefly-hop-v1",
+                method,
+                audience,
+                hashlib.sha256(token.encode()).hexdigest(),
+                secrets.token_hex(32),
+                issued,
+                issued + LIFETIME_S,
+            ],
+            separators=(",", ":"),
+        ).encode()
+        return _b64(payload) + "." + _b64(self._key.sign(payload))
+
+
+class Authority:
+    """An issuer, one published Work Context signing key, and the admission key
+    of the hop that registered with it."""
+
+    def __init__(self, issuer: str = ISSUER, key_id: str = "fixture-key"):
+        self.issuer, self.key_id, self.hop = issuer, key_id, Hop()
+        self._key = Ed25519PrivateKey.generate()
+
+    def keys(self) -> KeysResponse:
+        response = KeysResponse(issuer=self.issuer)
+        response.keys.add(
+            key_id=self.key_id,
+            algorithm="Ed25519",
+            public_key=_raw(self._key),
+            purpose="work-context",
+        )
+        response.admission_keys.add(
+            key_id="fixture-hop",
+            algorithm="Ed25519",
+            public_key=self.hop.published(),
+            purpose="hop-admission",
+        )
+        return response
+
+    def Keys(self, _request, timeout=None):  # noqa: N802 - the generated stub's name
+        """``Keys`` as the authority interface's generated client answers it;
+        the verifier reads the published keys through exactly this."""
+        return self.keys()
+
+    def claims(self, audience: str = AUDIENCE, lifetime_s: int = 60) -> WorkContextV1:
+        now = int(time.time())
+        context = WorkContextV1(
+            typ="codefly.work-context/v1",
+            algorithm="Ed25519",
+            audience=audience,
+            not_before_unix=now - 60,
+            issued_at_unix=now - 60,
+            expires_at_unix=now + lifetime_s,
+            nonce=secrets.token_hex(8),
+            replay_policy="idempotent",
+            tenant_id="fixture-tenant",
+            owner_principal_id="fixture-owner",
+            owner_principal_kind="human",
+            task_id="fixture-task",
+            session_id="fixture-session",
+        )
+        # The seal the authority writes on every context it issues; the
+        # contract's schema refuses one without it.
+        context.seal.principal_epoch = 1
+        context.seal.installation_id = "fixture-installation"
+        context.seal.installation_revision = 1
+        context.authority_scopes.add(resource_kind=RESOURCE_KIND, actions=list(ACTIONS))
+        return context
+
+    def sign(self, context: WorkContextV1) -> str:
+        context.issuer, context.key_id = context.issuer or self.issuer, self.key_id
+        payload = context.SerializeToString(deterministic=True)
+        return _b64(payload) + "." + _b64(self._key.sign(payload))
+
+    def stamp(self, method: str, *, audience: str = AUDIENCE) -> dict:
+        """What the hop writes on one call it let through to ``method``."""
+        context = self.claims(audience)
+        token = self.sign(context)
+        identity = identity_of(context)
+        headers = {
+            WORK_CONTEXT_KEY: token,
+            CONTEXT_KEY: hashlib.sha256(token.encode()).hexdigest(),
+            OWNER_KEY: identity.owner,
+            OWNER_KIND_KEY: identity.owner_kind,
+            TENANT_KEY: identity.tenant,
+            ACTORS_KEY: ",".join(identity.actors),
+            SCOPES_KEY: ",".join(identity.scopes),
+            BINDING_KEY: identity.binding,
+            TASK_KEY: identity.task,
+            EXPIRES_KEY: str(identity.expires),
+            PROOF_KEY: self.hop.admission(token, method, audience=audience),
+        }
+        # The hop writes no empty header, and the verifier compares what it
+        # wrote against the authenticated context.
+        return dict((key, value) for key, value in headers.items() if value)
+
+
+@pytest.fixture
+def authority() -> Authority:
+    return Authority()
+
+
+@pytest.fixture(autouse=True)
+def admission(authority):
+    """Every test is served behind the verifier the process is served behind,
+    over this authority. Autouse, because there is no unverified way to serve."""
+    verifier = Verifier(authority, audience=AUDIENCE, replay=LocalReservations())
+    ADMISSION.bind(verifier)
+    yield ADMISSION
+    ADMISSION.release()
+
+
+@pytest.fixture
+def stamp(authority):
+    """The headers of one call the hop let through to ``method``."""
+    return authority.stamp
+
+
+@pytest.fixture
+async def client():
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:8080"
+    ) as ac:
+        yield ac

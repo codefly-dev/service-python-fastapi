@@ -1,9 +1,15 @@
 import socket
 
 import grpc
+import pytest
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from src.rpc import server
+
+# The authority the hop stamps for, and the admission every listener in this
+# process verifies with, are in tests/conftest.py. A gRPC call is bound to the
+# full procedure it reaches, which is what the hop signs for it.
+ECHO = "/api.EchoService/Echo"
 
 
 def _free_port() -> int:
@@ -14,21 +20,56 @@ def _free_port() -> int:
     return port
 
 
-async def test_echo_roundtrip():
+async def test_echo_roundtrip(admission, stamp):
     port = _free_port()
-    grpc_server = await server.serve(port)
+    grpc_server = await server.serve(port, admission)
     try:
         async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
             stub = server.pb2_grpc.EchoServiceStub(channel)
-            response = await stub.Echo(server.pb2.EchoRequest(message="hello"))
+            response = await stub.Echo(
+                server.pb2.EchoRequest(message="hello"),
+                metadata=tuple(stamp(ECHO).items()),
+            )
             assert response.message == "hello"
     finally:
         await grpc_server.stop(grace=None)
 
 
-async def test_health_serving():
+async def test_echo_without_an_admission_is_refused(admission):
     port = _free_port()
-    grpc_server = await server.serve(port)
+    grpc_server = await server.serve(port, admission)
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            stub = server.pb2_grpc.EchoServiceStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError) as refused:
+                await stub.Echo(server.pb2.EchoRequest(message="hello"))
+            assert refused.value.code() == grpc.StatusCode.UNAUTHENTICATED
+            assert "stamp_proof" in refused.value.details()
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+async def test_an_admission_signed_for_another_procedure_is_refused(admission, stamp):
+    port = _free_port()
+    grpc_server = await server.serve(port, admission)
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            stub = server.pb2_grpc.EchoServiceStub(channel)
+            with pytest.raises(grpc.aio.AioRpcError) as refused:
+                await stub.Echo(
+                    server.pb2.EchoRequest(message="hello"),
+                    metadata=tuple(stamp("/api.EchoService/Other").items()),
+                )
+            assert refused.value.code() == grpc.StatusCode.UNAUTHENTICATED
+            assert "stamp_method" in refused.value.details()
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+async def test_health_serving(admission):
+    # The health service answers unauthenticated: a probe is not a caller.
+    port = _free_port()
+    grpc_server = await server.serve(port, admission)
     try:
         async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
             health = health_pb2_grpc.HealthStub(channel)
@@ -36,3 +77,8 @@ async def test_health_serving():
             assert response.status == health_pb2.HealthCheckResponse.SERVING
     finally:
         await grpc_server.stop(grace=None)
+
+
+def test_a_server_cannot_be_started_without_an_admission():
+    with pytest.raises(TypeError):
+        server.serve(_free_port())

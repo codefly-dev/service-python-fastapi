@@ -304,9 +304,13 @@ func TestConnectOnlyServiceStarts(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, runtimev0.LoadStatus_ERROR, loaded.GetStatus().GetState(), loaded.GetStatus().GetMessage())
 
+	// The generated app refuses to start without the verifier's inputs, so the
+	// run composes an authority for it.
+	authority := serveHopAuthority(t)
 	mappings, connectPort := connectOnlyMappings(t, runtime.FastAPI.GRPCEndpoint, runtime.FastAPI.ConnectEndpoint)
 	initialized, err := runtime.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext: resources.NewRuntimeContextNative(), ProposedNetworkMappings: mappings,
+		WorkspaceConfigurations: authority.configurations(),
 	})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
@@ -319,6 +323,9 @@ func TestConnectOnlyServiceStarts(t *testing.T) {
 		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", connectPort),
 		strings.NewReader(`{"message":"connect only"}`))
 	require.NoError(t, err)
+	// The face relays onto the gRPC server, whose interceptor admits the call
+	// against the procedure it addressed.
+	request.Header = authority.stamp(t, "/api.EchoService/Echo")
 	request.Header.Set("Content-Type", "application/json")
 	client := http.Client{Timeout: 10 * time.Second}
 	response, err := client.Do(request)
