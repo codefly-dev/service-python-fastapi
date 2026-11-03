@@ -1,10 +1,23 @@
+import contextvars
+
 import grpc
+from codefly_hop import Unauthenticated
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 import api_pb2 as pb2
 import api_pb2_grpc as pb2_grpc
 
+from src.hop import Admission
 from src.rpc.servicer import EchoServicer
+
+# The health service answers unauthenticated: a probe is not a caller. It is the
+# only procedure on this server the hop's admission is not required for.
+HEALTH_PREFIX = "/grpc.health.v1.Health/"
+
+# Who the call being served is for, as the verifier read it from the
+# authenticated Work Context. A servicer reads it here — never from a header,
+# and never from grpc's own context, which is not a place to hang state on.
+CALLER = contextvars.ContextVar("codefly_caller", default=None)
 
 
 class _HealthServicer(health_pb2_grpc.HealthServicer):
@@ -19,6 +32,98 @@ class _HealthServicer(health_pb2_grpc.HealthServicer):
                 status=health_pb2.HealthCheckResponse.SERVING
             )
         )
+
+
+class HopInterceptor(grpc.aio.ServerInterceptor):
+    """Every procedure but a probe is admitted by the authority's hop.
+
+    The admission is verified against the full procedure the call reached, which
+    is what the hop signed for it, and its single-use reservation is held until
+    the handler has returned. A refused call ends UNAUTHENTICATED with the
+    verifier's fixed reason and reaches no servicer; while an admitted one is
+    served, ``CALLER`` holds who it is for.
+
+    The Connect face relays every protocol onto this server (src/rpc/connect_gen.py),
+    so a Connect or gRPC-Web call is admitted here too, with no second
+    Connect-shaped check to keep in step.
+    """
+
+    def __init__(self, admission: Admission):
+        if admission is None:
+            raise ValueError("the authority's admission is required to serve gRPC")
+        self.admission = admission
+
+    async def intercept_service(self, continuation, details):
+        handler = await continuation(details)
+        if handler is None or details.method.startswith(HEALTH_PREFIX):
+            return handler
+        method = details.method
+        if handler.unary_unary is not None:
+            behavior, make = (
+                self._unary(handler.unary_unary, method),
+                grpc.unary_unary_rpc_method_handler,
+            )
+        elif handler.unary_stream is not None:
+            behavior, make = (
+                self._stream(handler.unary_stream, method),
+                grpc.unary_stream_rpc_method_handler,
+            )
+        elif handler.stream_unary is not None:
+            behavior, make = (
+                self._unary(handler.stream_unary, method),
+                grpc.stream_unary_rpc_method_handler,
+            )
+        else:
+            behavior, make = (
+                self._stream(handler.stream_stream, method),
+                grpc.stream_stream_rpc_method_handler,
+            )
+        return make(
+            behavior,
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+    def _pairs(self, context):
+        # Binary metadata (a `-bin` key, a bytes value) carries no stamp.
+        return [
+            (key, value)
+            for key, value in context.invocation_metadata() or ()
+            if isinstance(key, str) and isinstance(value, str)
+        ]
+
+    def _unary(self, behavior, method):
+        async def served(request, context):
+            try:
+                async with self.admission.admit(self._pairs(context), method) as caller:
+                    token = CALLER.set(caller)
+                    try:
+                        return await behavior(request, context)
+                    finally:
+                        CALLER.reset(token)
+            except Unauthenticated as refusal:
+                await _refuse(context, refusal)
+
+        return served
+
+    def _stream(self, behavior, method):
+        async def served(request, context):
+            try:
+                async with self.admission.admit(self._pairs(context), method) as caller:
+                    token = CALLER.set(caller)
+                    try:
+                        async for answer in behavior(request, context):
+                            yield answer
+                    finally:
+                        CALLER.reset(token)
+            except Unauthenticated as refusal:
+                await _refuse(context, refusal)
+
+
+async def _refuse(context, refusal: Unauthenticated):
+    """End the call UNAUTHENTICATED with the verifier's fixed code and text,
+    which name no proof, token, digest, nonce or claim."""
+    await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(refusal))
 
 
 def register(server: grpc.aio.Server) -> None:
@@ -38,10 +143,15 @@ def register(server: grpc.aio.Server) -> None:
 MAX_CONCURRENT_STREAMS = 1000
 
 
-async def serve(port: int) -> grpc.aio.Server:
-    """Start a grpc.aio server on ``port`` and return it (already started)."""
+async def serve(port: int, admission: Admission) -> grpc.aio.Server:
+    """Start a grpc.aio server on ``port`` and return it (already started).
+
+    ``admission`` is required and has no default: a server that cannot verify
+    the hop's admission must not listen.
+    """
     server = grpc.aio.server(
-        options=[("grpc.max_concurrent_streams", MAX_CONCURRENT_STREAMS)]
+        interceptors=(HopInterceptor(admission),),
+        options=[("grpc.max_concurrent_streams", MAX_CONCURRENT_STREAMS)],
     )
     register(server)
     # add_insecure_port returns 0 (it does not raise) when the port can't be

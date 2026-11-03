@@ -686,10 +686,17 @@ func (s *Builder) Create(ctx context.Context, _ *builderv0.CreateRequest) (*buil
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	openapiFile := s.Local("openapi/api.swagger.json")
 	endpoint := s.Base.BaseEndpoint(standards.REST)
-	// New scaffolds explicitly declare the policy supported by their /version
+	// New scaffolds explicitly declare the policy supported by their /ready
 	// route. Existing authored services are loaded, never rewritten by Deploy.
+	//
+	// /ready, not /version: every route the generated app serves is admitted by
+	// the authority's hop, and a kubelet carries no admission. /health and
+	// /ready are the two the app serves unauthenticated, and /ready answers 200
+	// only while the replica holds the authority's keys — so a replica that
+	// cannot admit a call withdraws from rotation instead of refusing every
+	// call it is given.
 	endpoint.Health = &resources.Health{
-		Readiness: &resources.Probe{Kind: resources.ProbeKindHTTP, Path: "/version", Statuses: []string{"200"}},
+		Readiness: &resources.Probe{Kind: resources.ProbeKindHTTP, Path: "/ready", Statuses: []string{"200"}},
 		Startup:   &resources.Probe{Kind: resources.ProbeKindTransport, Period: "2s", FailureThreshold: 30},
 		Liveness:  &resources.Probe{Kind: resources.ProbeKindTransport},
 	}

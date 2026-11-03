@@ -10,6 +10,32 @@ Some of the things this agent provides for you:
 ## Code
 - OpenAPI
 
+## Every listener this agent generates verifies the hop's admission
+
+There is no option. The FastAPI app this agent generates carries the authority's
+verifier as ASGI middleware ahead of every router, and the optional `grpc.aio`
+server carries it as an interceptor, both over `codefly_hop.Verifier` from the
+Codefly authority client — built from the keys source the composition names
+(`authority/endpoint`), the audience the authority knows the module by
+(`CODEFLY__MODULE`) and the replay store each single-use admission is reserved
+in (`hop/replay-connection`, through `codefly_hop.replaypg`). A generated
+service refuses to start without those inputs, which is the refusal the hop
+itself makes, and there is no template setting that removes the verifier or
+turns it off.
+
+`/health` and `/ready` on the HTTP listener, and the gRPC health service, are
+the only things served unauthenticated: a probe is not a caller. Every other
+route — the scaffold's and yours — is admitted against the method the hop signed
+for it (`"<VERB> <path>"` for REST, the full procedure for gRPC and Connect),
+with its single-use nonce reserved for as long as the handler runs. A developer
+run (`CODEFLY__ENVIRONMENT=local`) relaxes one thing and only because the
+verifier relaxes it there: the reservations live in the process rather than in a
+store every replica shares.
+
+The scaffold ships the tests that say so (`tests/hop/test_admission.py`): an
+unstamped call is refused, a call the hop stamped is served, an admission is
+single-use and bound to its own route, and health is open.
+
 ## Production ready
 - Dockerfile and verifiable build plan generation (requires `output_directory`); the CLI owns image builds, builder selection, caching, and publishing
 - Kubernetes deployment
@@ -55,6 +81,6 @@ approves its image digest instead.
 
 Kubernetes probes follow the health predicates of the authored HTTP endpoint (`api: rest` or `api: http`) and transport. HTTP checks preserve accepted statuses and bounded body containment; redirects are not followed. Secured container-local checks authenticate the listener against the exact certificate mounted at `UVICORN_SSL_CERTFILE` before sending HTTP data. The isolated Python probe imports no application code and emits no response content or certificate material.
 
-Startup, readiness and liveness are separate policies. The current Core Kubernetes manifest profile requires all three, so deployment refuses absent startup/liveness declarations instead of copying readiness into a restart policy. New scaffolds explicitly declare `/version` readiness and transport startup/liveness. Existing services must author their own policies. Whole-second timing is required by Kubernetes; predicates or additional listener health that this agent cannot preserve are refused rather than silently omitted.
+Startup, readiness and liveness are separate policies. The current Core Kubernetes manifest profile requires all three, so deployment refuses absent startup/liveness declarations instead of copying readiness into a restart policy. New scaffolds explicitly declare `/ready` readiness and transport startup/liveness — `/ready`, not `/version`, because every other route is admitted and a kubelet carries no admission; it answers 200 only while the replica holds the authority's published keys, so a replica that cannot admit a call withdraws from rotation rather than refusing every call sent to it. Existing services must author their own policies. Whole-second timing is required by Kubernetes; predicates or additional listener health that this agent cannot preserve are refused rather than silently omitted.
 
 Image SBOM requests must provide immutable subjects and their registry/daemon source. The Core scanner preserves each requested identity; there is no registry-to-daemon fallback for a different image.

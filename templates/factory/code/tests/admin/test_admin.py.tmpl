@@ -1,28 +1,14 @@
-import os
-
-# Provide the runtime configuration the app reads without depending on a
-# service.codefly.yaml on disk: the test runner executes against an isolated
-# source snapshot where the manifest isn't present, and codefly.init()'s
-# parent-directory walk would otherwise spin. setdefault preserves any real
-# values injected by the codefly runtime.
-os.environ.setdefault("CODEFLY__MODULE", "mod")
-os.environ.setdefault("CODEFLY__SERVICE", "svc")
-os.environ.setdefault("CODEFLY__SERVICE_VERSION", "0.0.0")
-
-import pytest
-from httpx import ASGITransport, AsyncClient
-
 from src.admin.models import Version
 from src.admin.version import get_version
-from src.main import app
+
+# The runtime configuration the app reads, the authority the hop stamps for and
+# the client are in tests/conftest.py. Every route but /health and /ready is
+# admitted, so a call has to carry the stamp the hop writes for it: "GET /version"
+# is the method the hop's HTTP face binds a REST call to.
 
 
-@pytest.mark.asyncio
-async def test_version():
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://localhost:8080"
-    ) as ac:
-        response = await ac.get("/version")
+async def test_version(client, stamp):
+    response = await client.get("/version", headers=stamp("GET /version"))
     assert response.status_code == 200
 
     assert Version.model_validate(response.json()) == get_version()

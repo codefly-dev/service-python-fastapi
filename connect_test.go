@@ -190,11 +190,27 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 
 	builder.FastAPI.Settings.ConnectEndpoint = true
 	require.NoError(t, builder.syncConnectFace())
-	app := bootScaffold(t, code, true)
+	authority := serveHopAuthority(t)
+	app := bootScaffold(t, code, true, authority)
+	// A Connect call reaches the gRPC server's interceptor as the procedure it
+	// addressed, which is what the hop signs for it; unstamped it is refused
+	// there, however it arrived.
+	unstamped, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", app.connect),
+		strings.NewReader(`{"message":"over connect"}`))
+	require.NoError(t, err)
+	unstamped.Header.Set("Content-Type", "application/json")
+	refused, err := http.DefaultClient.Do(unstamped)
+	require.NoError(t, err)
+	_ = refused.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, refused.StatusCode,
+		"the generated face served a call the hop did not stamp")
+
 	request, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", app.connect),
 		strings.NewReader(`{"message":"over connect","addedLater":1}`))
 	require.NoError(t, err)
+	request.Header = authority.stamp(t, "/api.EchoService/Echo")
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
@@ -210,7 +226,7 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 
 	// Off, with the face still on disk (no sync since): the variable is the switch.
 	defaultFree := !listens(8081)
-	app = bootScaffold(t, code, false)
+	app = bootScaffold(t, code, false, authority)
 	require.True(t, listens(app.grpc), "the gRPC server is up")
 	if defaultFree {
 		require.False(t, listens(8081), "a service without connect-endpoint bound the face's default port")
@@ -219,13 +235,13 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 
 	// On, never synced: the app says what is missing instead of serving no face.
 	require.NoError(t, os.Remove(filepath.Join(root, connectFacePath)))
-	refused := startScaffold(t, code, true)
+	unserved := startScaffold(t, code, true, authority)
 	select {
-	case <-refused.exited:
+	case <-unserved.exited:
 	case <-time.After(3 * time.Minute):
-		t.Fatalf("the app served without its Connect face:\n%s", refused.output)
+		t.Fatalf("the app served without its Connect face:\n%s", unserved.output)
 	}
-	require.Contains(t, refused.output.String(), "src/rpc/connect_gen.py is missing: run `codefly sync service`")
+	require.Contains(t, unserved.output.String(), "src/rpc/connect_gen.py is missing: run `codefly sync service`")
 }
 
 type scaffoldApp struct {
@@ -236,19 +252,24 @@ type scaffoldApp struct {
 }
 
 // startScaffold launches the scaffold's app under uvicorn with the variables
-// the runtime hands it: CODEFLY_CONNECT_PORT only when connect is on.
-func startScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
+// the runtime hands it: where the authority answers, which the app refuses to
+// start without, and CODEFLY_CONNECT_PORT only when connect is on.
+func startScaffold(t *testing.T, code string, connect bool, authority *hopAuthority) *scaffoldApp {
 	t.Helper()
 	app := &scaffoldApp{output: &lockedOutput{}, exited: make(chan error, 1),
 		rest: freePort(t), grpc: freePort(t), connect: freePort(t)}
 	app.cmd = exec.Command("uv", "run", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", fmt.Sprint(app.rest))
 	app.cmd.Dir = code
-	environment := []string{fmt.Sprintf("CODEFLY_GRPC_PORT=%d", app.grpc)}
+	var environment []string
 	for _, variable := range os.Environ() {
 		if !strings.HasPrefix(variable, "CODEFLY_CONNECT_PORT=") {
 			environment = append(environment, variable)
 		}
 	}
+	// Appended after the inherited environment so they win over whatever the
+	// host happens to export under the same names.
+	environment = append(environment, fmt.Sprintf("CODEFLY_GRPC_PORT=%d", app.grpc))
+	environment = append(environment, authority.environment()...)
 	if connect {
 		environment = append(environment, fmt.Sprintf("CODEFLY_CONNECT_PORT=%d", app.connect))
 	}
@@ -263,9 +284,9 @@ func startScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
 // bootScaffold starts the scaffold's app and returns once it answers on its
 // REST port: uvicorn listens only after every startup handler, gRPC and
 // Connect included, has run.
-func bootScaffold(t *testing.T, code string, connect bool) *scaffoldApp {
+func bootScaffold(t *testing.T, code string, connect bool, authority *hopAuthority) *scaffoldApp {
 	t.Helper()
-	app := startScaffold(t, code, connect)
+	app := startScaffold(t, code, connect, authority)
 	deadline := time.Now().Add(3 * time.Minute) // a cold uv sync
 	for !answers(app.rest) {
 		select {
@@ -290,10 +311,12 @@ func (a *scaffoldApp) stop(t *testing.T) {
 	require.NotContains(t, a.output.String(), "Traceback", a.output.String())
 }
 
-// answers reports whether the scaffold's /version route answers.
+// answers reports whether the scaffold serves: /ready is one of the two paths
+// it answers without the hop's admission, and it answers 200 only once the
+// replica holds the authority's published keys.
 func answers(port uint16) bool {
 	client := http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/version", port))
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/ready", port))
 	if err != nil {
 		return false
 	}

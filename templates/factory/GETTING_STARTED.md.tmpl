@@ -11,3 +11,23 @@ Dependency management uses [uv](https://docs.astral.sh/uv/). Common commands:
 - `uv run uvicorn src.main:app --reload` — run the dev server
 
 `codefly run service <name>` does all of the above for you via the agent.
+
+## Every call your service serves is admitted by the authority's hop
+
+`src/hop.py` installs the authority's verifier on the FastAPI app, ahead of
+every router, and on the gRPC server when you have one. There is no switch:
+your service refuses to start until the composition delivers `authority/endpoint`
+(where the published keys are read), `CODEFLY__MODULE` (the audience the
+authority knows your module by) and, outside a local run,
+`hop/replay-connection` (the Postgres each single-use admission is reserved in,
+shared by every replica).
+
+`/health` and `/ready` are the only paths served unauthenticated, because a
+probe is not a caller. Every route you add is admitted like the scaffold's, with
+no code of yours: read who the call is for from the verified identity on
+`request.state.codefly_identity` — or `src.rpc.server.CALLER` in a gRPC
+servicer — never from a header.
+
+`tests/conftest.py` runs the authority and its hop the way your tests need them.
+`stamp("GET /your-route")` is the headers of one call the hop let through; the
+gRPC equivalent is the full procedure, `stamp("/api.EchoService/Echo")`.
