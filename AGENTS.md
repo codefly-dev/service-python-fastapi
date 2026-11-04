@@ -133,40 +133,35 @@ anything from it.
 | `base/` | a checked-in sample service, embedded nowhere |
 
 `templates/` and `base/` look interchangeable and are not. Only `templates/` is
-embedded, so **editing `base/` changes nothing a user receives**; it has drifted
-from `templates/factory/`. Dependabot watches `/base/code` for pip and
-`/templates/builder` for the base image, so a bump there is not a bump of the
-scaffold — carry it into `templates/factory/code/pyproject.toml.tmpl` yourself.
+embedded in the binary, so **editing `base/` changes nothing a user receives**;
+it has already drifted from `templates/factory/`. Dependabot watches
+`/base/code` for pip updates and `/templates/builder` for the base image, so a
+dependency bump landing in `base/code` is not a bump of the scaffold — carry it
+into `templates/factory/code/pyproject.toml.tmpl` yourself.
 
 ## Rules that bite
 
 - **Endpoint contracts are read from fixed locations in the *generated
-  service*** — `openapi/api.swagger.json` and `proto/api.proto` (core's
-  `standards.ProtoPath`) — by Builder, Runtime and every dependent service. The
-  swagger does not exist at `Create` time (`src/openapi.py` writes it at
-  runtime), so absent there is normal, not an error to code around.
-- **Every listener the scaffold emits verifies the hop's admission, and no
-  setting turns it off** — one `codefly_hop.Verifier` behind the app's ASGI
-  middleware and the gRPC interceptor, `/health` and `/ready` the only open
-  paths, no start without its delivered inputs. Depth: `templates/AGENTS.md`.
-- **Readiness is the endpoint's declared health check, never an open port**, its
-  intents kept separate by `resources.PlanEndpointProbes`: collapsing them drops a predicate.
+  service*** (not paths in this repo): `openapi/api.swagger.json` for REST and
+  `proto/api.proto` for gRPC, the latter being core's `standards.ProtoPath`.
+  Both Builder and Runtime re-derive endpoints from exactly there, and so does
+  any dependent service. The swagger file does not exist at `Create` time — the
+  service generates it at runtime from its own `src/openapi.py` — so absent is
+  a normal state there, not an error to code around.
+- **Every listener the scaffold emits verifies the hop's admission, in an entry
+  this agent writes** (`hopentry.go`) rather than in the service's own source,
+  and `Init`/`Build`/`Deploy` refuse a service that carries no verifier
+  (`hopstack.go`). Depth: `templates/AGENTS.md`, `docs/hop-migration.md`.
+- **Readiness is the endpoint's declared health check, never an open port.**
+  Probe intents (readiness / startup / liveness) stay separate through
+  `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.
 - **The build recipe owns its uv, and its build context.** The emitted
-  Dockerfile copies a pinned uv (`uvVersion` in `main.go`) rather than running
-  whichever one the base image was built with — a project written against a
-  newer `[tool.uv]` key otherwise resolves locally and fails in the builder
-  stage. And a `[tool.uv.sources]` path leaving the project makes the recipe
-  assemble its own context, mirroring the repository-relative layout so the
-  same relative path resolves there; that plan claims the whole tree
-  (`RECIPE_INVENTORY_SCOPE_TREE`), the Dockerfile-only one claims just what it
-  emitted. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
-  A git source is declared in the recipe (`git_source_downloads`) by the URL
-  exactly as `uv.lock` records it up to its query, which is what uv hands git;
-  the caller fetches it with its own credentials and the Dockerfile maps that
-  URL onto the mirror; a normalized URL would miss it silently. A source core
-  refuses, or whose URL begins an undeclared locked one (insteadOf is a
-  prefix match), is not declared; a warning says why. An image whose own git
-  config already rewrites a declared URL keeps that rewrite (git prefers it).
+  Dockerfile copies a pinned uv (`uvVersion` in `main.go`), a
+  `[tool.uv.sources]` path leaving the project makes the recipe assemble its own
+  context (claiming the whole tree, `RECIPE_INVENTORY_SCOPE_TREE`), and a git
+  source `uv.lock` pins is declared for the caller to mirror by the URL the lock
+  records. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
+  Depth: `templates/builder/AGENTS.md`.
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
   `:latest`. The default `ghcr.io/codefly-dev/python` companion is built from
   core and pinned by the digest of its multi-platform index — prefer it. Its tag

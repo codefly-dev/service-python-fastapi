@@ -27,7 +27,7 @@ import (
 // cli#993).
 //
 // THE PROGRAM is the interpreter `uv run` will execute the app with, and it is
-// asked of uv rather than derived. `uv run uvicorn src.main:app` resolves the
+// asked of uv rather than derived. `uv run uvicorn <entry>` resolves the
 // project environment through $UV_PROJECT_ENVIRONMENT, a `.python-version`, the
 // lock's requires-python and uv's own configuration — and that variable reaches
 // the process from the developer's own environment, from a `uv.toml`, from a
@@ -51,7 +51,13 @@ import (
 //     `*.py`. The entrypoint `src.main:app` is in there (as `src/main.py`, or
 //     as `src/main/__init__.py` — naming the tree covers both), and so is a
 //     prompt, a template or a schema the app loads at runtime. A digest that
-//     tracked only `*.py` would call a changed prompt the same build.
+//     tracked only `*.py` would call a changed prompt the same build;
+//   - the ASGI entry uvicorn is pointed at, `codefly_hop_entry.py`. It is this
+//     agent's file rather than the service's (hopentry.go), so it is not under
+//     `src/` and naming that tree does not cover it — and it is what wraps the
+//     app in the hop's admission, so an agent release that changes the wrap is
+//     a new build of what runs. A project with no admission stack has none, and
+//     is started at `src.main:app` instead (hopstack.go).
 //
 // WHAT IS LEFT OUT, and why each exclusion is the honest answer rather than a
 // convenience:
@@ -290,7 +296,14 @@ func startedSources(serviceDir, sourceDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(sources, tree...), nil
+	sources = append(sources, tree...)
+	// Named when it is there, not required: a project with no admission stack
+	// was started at src.main:app and has no entry to name.
+	entry := filepath.Join(sourceDir, hopEntryModule)
+	if info, err := os.Stat(entry); err == nil && info.Mode().IsRegular() {
+		sources = append(sources, entry)
+	}
+	return sources, nil
 }
 
 // canonical is dir as one absolute, symlink-resolved spelling.

@@ -6,11 +6,16 @@ verified by the very ``codefly_hop.Verifier`` the process runs. Keep these
 tests: they are what says a route of yours cannot be reached unstamped.
 """
 
+import asyncio
+import time
+
 import pytest
+from codefly_hop import Replayed
 from fastapi import Request
 
+from codefly_hop_entry import app as served
 from src import hop
-from src.hop import Admission
+from src.hop import Admission, HopAdmission, LocalReservations
 from src.main import app
 
 
@@ -75,6 +80,45 @@ async def test_a_route_reads_who_the_call_is_for(client, stamp):
         ]
 
 
+def test_the_wrap_is_the_agents_entry_and_not_this_services_source():
+    # Where the admission is, which is as much of the rule as that it is there:
+    # codefly_hop_entry.py is the agent's file, rewritten on every start, and it
+    # wraps this service's application from outside. Nothing under src/ installs
+    # the wrap, so no edit under src/ removes it — and installing it here as
+    # well would make every call look replayed, because an admission is
+    # single-use and would then be verified twice.
+    assert isinstance(served, HopAdmission)
+    assert served.app is app
+    assert not any(
+        getattr(middleware, "cls", None) is HopAdmission
+        for middleware in app.user_middleware
+    )
+
+
+async def test_a_browser_preflight_is_answered_rather_than_refused(client):
+    # A preflight is not a call: the browser sends it before the call it is
+    # asking about, it carries no Work Context — the hop signs no admission for
+    # one — and the app's CORS layer answers it with headers alone. Refusing it
+    # would make every browser call fail at the preflight instead of at the
+    # call, which is not the hop's decision to report.
+    answered = await client.options(
+        "/version",
+        headers={
+            "Origin": "https://caller.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert answered.status_code == 200
+
+
+async def test_an_options_call_that_is_not_a_preflight_is_admitted_like_any_other(
+    client,
+):
+    refused = await client.options("/version")
+    assert refused.status_code == 401
+    assert refused.json()["code"] == "stamp_proof"
+
+
 async def test_health_and_ready_are_open(client):
     assert (await client.get("/health")).status_code == 200
     ready = await client.get("/ready")
@@ -95,6 +139,22 @@ async def test_a_call_is_refused_when_no_verifier_is_bound(client, admission, st
     refused = await client.get("/version", headers=headers)
     assert refused.status_code == 401
     assert refused.json()["code"] == "configuration"
+
+
+async def test_a_reservation_is_forgotten_once_its_retention_passes():
+    # A developer run reserves in this process, and what it reserves has to be
+    # evictable: holding every nonce it ever saw would grow for as long as the
+    # run lasts. A reservation only has to outlive the admission it belongs to —
+    # past that the verifier refuses the admission as expired before its nonce
+    # is looked up at all — so forgetting it there is not a replay hole.
+    reservations = LocalReservations()
+    retain_until = time.time() + 0.05
+    await reservations.reserve_async("nonce", retain_until)
+    with pytest.raises(Replayed):
+        await reservations.reserve_async("nonce", retain_until)
+
+    await asyncio.sleep(0.06)
+    await reservations.reserve_async("nonce", time.time() + 30)
 
 
 async def test_the_service_refuses_to_start_without_the_authority_endpoint(monkeypatch):

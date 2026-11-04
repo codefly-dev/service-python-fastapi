@@ -1,6 +1,8 @@
 import contextvars
+import inspect
 
 import grpc
+
 from codefly_hop import Unauthenticated
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
@@ -54,10 +56,20 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
         self.admission = admission
 
     async def intercept_service(self, continuation, details):
-        handler = await continuation(details)
-        if handler is None or details.method.startswith(HEALTH_PREFIX):
+        handler, method = await continuation(details), details.method
+        if method.startswith(HEALTH_PREFIX):
             return handler
-        method = details.method
+        if handler is None:
+            # A procedure this server does not serve is not disclosed before
+            # admission. Answering UNIMPLEMENTED here — which is what returning
+            # None does — tells an unstamped caller which procedures exist,
+            # which the HTTP face deliberately does not: HopAdmission runs ahead
+            # of routing, so a path no route claims is refused rather than
+            # answered. So the call is admitted first, and only a caller the hop
+            # stamped is told that the procedure does not exist.
+            return grpc.unary_unary_rpc_method_handler(
+                self._unary(_unimplemented, method)
+            )
         if handler.unary_unary is not None:
             behavior, make = (
                 self._unary(handler.unary_unary, method),
@@ -107,6 +119,19 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
         return served
 
     def _stream(self, behavior, method):
+        # grpc.aio accepts two shapes of streaming handler and drives the one it
+        # was handed: an async generator it iterates, or a coroutine that writes
+        # each answer through the context and returns None. A wrapper has to
+        # keep the shape it wrapped — grpc reads the shape off the wrapper, not
+        # off what is inside it — so an async-generator wrapper around a
+        # reader/writer handler fails every call with "'async for' requires an
+        # object with __aiter__ method, got coroutine", and fails it after
+        # admission, where it reads as a server fault rather than a shape
+        # mismatch. A reader/writer handler holds its admission exactly as a
+        # unary one does, which is what _unary's wrapper already is.
+        if not inspect.isasyncgenfunction(behavior):
+            return self._unary(behavior, method)
+
         async def served(request, context):
             try:
                 async with self.admission.admit(self._pairs(context), method) as caller:
@@ -118,6 +143,15 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
                         CALLER.reset(token)
             except Unauthenticated as refusal:
                 await _refuse(context, refusal)
+
+        return served
+
+
+async def _unimplemented(request, context):
+    """What an admitted call to a procedure this server does not serve is told.
+    The status is grpc's own for an unknown method; what changes is that only a
+    caller the hop stamped ever reaches it."""
+    await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
 
 
 async def _refuse(context, refusal: Unauthenticated):

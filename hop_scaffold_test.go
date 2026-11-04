@@ -45,7 +45,11 @@ func TestTheScaffoldProvesItsOwnAdmission(t *testing.T) {
 
 	suite := exec.Command("uv", "run", "pytest", "-q", "-p", "no:cacheprovider")
 	suite.Dir = code
-	suite.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	// CODEFLY__ENVIRONMENT is exported, and not as "local": a pipeline that
+	// names its run is the ordinary case, and the suite's own fixtures have to
+	// hold whatever the run is called. Reserving admissions in the process is
+	// the test process's decision, which conftest.py makes for itself.
+	suite.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "CODEFLY__ENVIRONMENT=ci")
 	out, err := suite.CombinedOutput()
 	require.NoError(t, err, "%s", out)
 }
@@ -64,7 +68,8 @@ func TestAGeneratedServiceRefusesToStartWithoutTheVerifiersInputs(t *testing.T) 
 	}
 	_, root := createServiceForTest(t, nil)
 	port := freePort(t)
-	app := exec.Command("uv", "run", "uvicorn", "src.main:app",
+	require.NoError(t, writeHopEntry(filepath.Join(root, "code")))
+	app := exec.Command("uv", "run", "uvicorn", hopEntryApp,
 		"--host", "127.0.0.1", "--port", fmt.Sprint(port))
 	app.Dir = filepath.Join(root, "code")
 	var environment []string
