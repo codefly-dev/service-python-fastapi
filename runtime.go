@@ -180,6 +180,13 @@ type Runtime struct {
 
 	cacheLocation string
 
+	// hopStack is what of the hop's admission stack the project carries, read
+	// by Init (hopstack.go). It selects what uvicorn is pointed at and whether
+	// the agent-owned entry is written, so Start consumes it exactly as it
+	// consumes the ports — published under initMu, which is what serializes
+	// Init against Start.
+	hopStack hopStack
+
 	// destroyed marks the runtime as torn down, guarded by runnerMu. Destroy
 	// cannot stop a Start that is already on its way — the watcher's debounce
 	// can still fire one after StopWatcher — so Start consults this rather
@@ -554,6 +561,19 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitErrorf(nil, "no pyproject.toml found")
 	}
 
+	// What the service can admit, before anything is started: a project with no
+	// admission stack is what this agent starts unadmitted (hopstack.go), and
+	// the one thing it must not do is start it silently.
+	s.hopStack, err = readHopStack(s.Service.SourceLocation)
+	if err != nil {
+		return s.Base.Runtime.InitError(err)
+	}
+	if refusal, warn := checkHopStack(s.hopStack); refusal != nil {
+		return s.Base.Runtime.InitError(refusal)
+	} else if warn != "" {
+		s.Wool.Warn(warn)
+	}
+
 	// uv sync: one command, reads pyproject.toml + uv.lock (creates lock if
 	// missing). Cached on pyproject.toml + uv.lock so we only re-run when
 	// dependencies actually change.
@@ -651,8 +671,35 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("service has been destroyed (Init must run before it can start again)"))
 	}
 
+	// Re-read here, rather than trusted from Init. InitError returns a response
+	// field — InitStatus_ERROR with a nil Go error — so a caller that branches
+	// on the error proceeds to Start, which is the one call that opens the
+	// socket; and a long-lived agent whose Init passed with a warning can reach
+	// a Start after the date has turned. The refusal belongs where the listener
+	// starts.
+	stack, stackErr := readHopStack(s.Service.SourceLocation)
+	if stackErr != nil {
+		return s.Base.Runtime.StartError(stackErr)
+	}
+	if refusal, warn := checkHopStack(stack); refusal != nil {
+		return s.Base.Runtime.StartError(refusal)
+	} else if warn != "" {
+		s.Wool.Warn(warn)
+	}
+	s.hopStack = stack
+	// Rewritten on every Start, including the one below that keeps the running
+	// process: with hot reload, uvicorn re-imports whatever is on disk inside
+	// that process, so an edit made during a developer run would otherwise be
+	// what serves until the next launch.
+	if stack.complete() {
+		if err := writeHopEntry(s.Service.SourceLocation); err != nil {
+			return s.Base.Runtime.StartError(err)
+		}
+	}
+
 	inputs := startInputs(req)
-	launch := launchInputs(inputs, s.port, s.grpcPort, s.connectPort, s.FastAPI.Settings.HotReload) + fmt.Sprintf("\ninit-fixture %q", s.initFixture)
+	launch := launchInputs(inputs, s.port, s.grpcPort, s.connectPort, s.FastAPI.Settings.HotReload) +
+		fmt.Sprintf("\ninit-fixture %q\nserved-app %q", s.initFixture, servedApp(s.hopStack))
 
 	if s.runner != nil {
 		switch {
@@ -700,7 +747,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err := writeUvicornLogging(s.Service.SourceLocation); err != nil {
 		return s.Base.Runtime.StartError(err)
 	}
-	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(s.port, s.FastAPI.Settings.HotReload)...)
+	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(servedApp(s.hopStack), s.port, s.FastAPI.Settings.HotReload)...)
 	if err != nil {
 		return s.Base.Runtime.StartError(err)
 	}
@@ -974,18 +1021,28 @@ func grpcAnswers(ctx context.Context, address string) error {
 // makes uvicorn fork a supervisor that re-executes the app on source edits,
 // which is not what a service configured without hot reload asked for.
 //
+// app is what uvicorn serves: the agent-owned entry that wraps the application
+// in the hop's admission (hopentry.go), never the application itself for a
+// project that carries the stack the entry imports.
+//
 // Port zero is a service with no HTTP endpoint. Its app still runs under
 // uvicorn, because the app's lifespan is what starts its gRPC server and
 // Connect face, but its HTTP listener is no endpoint: it binds a loopback port
 // the system picks and no one is told.
-func uvicornArgs(port uint16, hotReload bool) []string {
+func uvicornArgs(app string, port uint16, hotReload bool) []string {
 	host := "0.0.0.0"
 	if port == 0 {
 		host = "127.0.0.1"
 	}
-	args := []string{"run", "uvicorn", "src.main:app", "--host", host, "--port", fmt.Sprintf("%d", port), "--log-config", uvicornLogConfigFile}
+	args := []string{"run", "uvicorn", app, "--host", host, "--port", fmt.Sprintf("%d", port), "--log-config", uvicornLogConfigFile}
+
 	if hotReload {
-		args = append(args, "--reload")
+		// The entry is excluded from the watch: it is the agent's file, so an
+		// edit to it is not a source change to reload on. The reloader still
+		// re-imports it from disk on a reload another edit triggers, so an edit
+		// does survive inside a developer run until the next Start rewrites it
+		// — hopentry.go states what this boundary does and does not cover.
+		args = append(args, "--reload", "--reload-exclude", hopEntryModule)
 	}
 	return args
 }

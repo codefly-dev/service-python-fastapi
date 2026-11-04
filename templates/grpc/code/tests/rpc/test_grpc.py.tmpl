@@ -82,3 +82,135 @@ async def test_health_serving(admission):
 def test_a_server_cannot_be_started_without_an_admission():
     with pytest.raises(TypeError):
         server.serve(_free_port())
+
+
+async def test_a_procedure_this_server_does_not_serve_is_not_disclosed(admission):
+    # What a caller learns before it is admitted: nothing. An unknown procedure
+    # answered UNIMPLEMENTED would tell an unstamped caller which procedures
+    # exist, which the HTTP face does not — its admission runs ahead of routing.
+    #
+    # Both caller shapes. grpc.aio reads the single request message before it
+    # invokes a unary behavior, which is before the admission runs, so an
+    # unknown procedure answered by a unary handler left a client-streaming
+    # caller that sends nothing hanging for the life of the connection —
+    # unstamped, with no status. The synthesized handler is stream_stream.
+    port = _free_port()
+    grpc_server = await server.serve(port, admission)
+    unknown = "/api.EchoService/NotAProcedure"
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            with pytest.raises(grpc.aio.AioRpcError) as refused:
+                await channel.unary_unary(unknown)(b"")
+            assert refused.value.code() == grpc.StatusCode.UNAUTHENTICATED
+            assert "stamp_proof" in refused.value.details()
+
+            # A client-streaming caller that sends no message at all, with a
+            # deadline only so a hang fails the test rather than wedging it.
+            async def nothing():
+                return
+                yield b""
+
+            with pytest.raises(grpc.aio.AioRpcError) as hung:
+                await channel.stream_unary(unknown)(nothing(), timeout=10)
+            assert hung.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+# A streaming procedure, registered on a server of its own: the starter contract
+# has only the unary Echo, and what is being proved here is the interceptor's
+# handling of a shape, not a contract of yours.
+STREAM = "/api.EchoService/Stream"
+
+
+async def _stream_server(admission, behavior):
+    """A server serving STREAM with behavior, behind the same interceptor the
+    scaffold's server runs."""
+    port = _free_port()
+    grpc_server = grpc.aio.server(interceptors=(server.HopInterceptor(admission),))
+    grpc_server.add_generic_rpc_handlers(
+        (
+            grpc.method_handlers_generic_handler(
+                "api.EchoService",
+                {
+                    "Stream": grpc.unary_stream_rpc_method_handler(
+                        behavior,
+                        request_deserializer=server.pb2.EchoRequest.FromString,
+                        response_serializer=server.pb2.EchoResponse.SerializeToString,
+                    )
+                },
+            ),
+        )
+    )
+    assert grpc_server.add_insecure_port(f"localhost:{port}") != 0
+    await grpc_server.start()
+    return grpc_server, port
+
+
+async def _streamed(port, stamp):
+    async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+        call = channel.unary_stream(
+            STREAM,
+            request_serializer=server.pb2.EchoRequest.SerializeToString,
+            response_deserializer=server.pb2.EchoResponse.FromString,
+        )
+        return [
+            answer.message
+            async for answer in call(
+                server.pb2.EchoRequest(message="one"),
+                metadata=tuple(stamp(STREAM).items()),
+            )
+        ]
+
+
+async def test_a_streaming_handler_written_as_an_async_generator_is_served(
+    admission, stamp
+):
+    async def behavior(request, context):
+        yield server.pb2.EchoResponse(message=request.message)
+        yield server.pb2.EchoResponse(message=request.message)
+
+    grpc_server, port = await _stream_server(admission, behavior)
+    try:
+        assert await _streamed(port, stamp) == ["one", "one"]
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+async def test_a_streaming_handler_written_as_a_reader_writer_is_served(
+    admission, stamp
+):
+    # grpc.aio accepts this shape too — a coroutine that writes each answer
+    # through the context and returns None — and drives it differently. The
+    # interceptor has to keep whichever shape it wrapped: one shape for both
+    # serves one half and fails the other after admission, with a TypeError the
+    # caller reads as a server fault.
+    async def behavior(request, context):
+        await context.write(server.pb2.EchoResponse(message=request.message))
+        await context.write(server.pb2.EchoResponse(message=request.message))
+
+    grpc_server, port = await _stream_server(admission, behavior)
+    try:
+        assert await _streamed(port, stamp) == ["one", "one"]
+    finally:
+        await grpc_server.stop(grace=None)
+
+
+async def test_a_streaming_handler_is_refused_without_an_admission(admission):
+    async def behavior(request, context):
+        await context.write(server.pb2.EchoResponse(message=request.message))
+
+    grpc_server, port = await _stream_server(admission, behavior)
+    try:
+        async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
+            call = channel.unary_stream(
+                STREAM,
+                request_serializer=server.pb2.EchoRequest.SerializeToString,
+                response_deserializer=server.pb2.EchoResponse.FromString,
+            )
+            with pytest.raises(grpc.aio.AioRpcError) as refused:
+                async for _ in call(server.pb2.EchoRequest(message="one")):
+                    pass
+            assert refused.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    finally:
+        await grpc_server.stop(grace=None)

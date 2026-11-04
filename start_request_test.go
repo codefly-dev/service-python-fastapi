@@ -508,11 +508,12 @@ func startStatus(t *testing.T, runtime *Runtime) *runtimev0.StartStatus {
 // service configured without hot reload never asked for.
 func TestUvicornArgsReloadIsConditional(t *testing.T) {
 	require.Equal(t,
-		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"},
-		uvicornArgs(8080, false))
+		[]string{"run", "uvicorn", hopEntryApp, "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"},
+		uvicornArgs(hopEntryApp, 8080, false))
 	require.Equal(t,
-		[]string{"run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json", "--reload"},
-		uvicornArgs(8080, true))
+		[]string{"run", "uvicorn", hopEntryApp, "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json",
+			"--reload", "--reload-exclude", hopEntryModule},
+		uvicornArgs(hopEntryApp, 8080, true))
 }
 
 // TestStartWithoutHotReloadOmitsReloadFlag is the same guarantee seen from

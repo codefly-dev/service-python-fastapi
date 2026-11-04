@@ -12,12 +12,29 @@ Context under the authority's published keys. Anything else is refused, naming
 why. Who the call is for is then read from the verified identity alone, never
 from a header.
 
-There is no switch. ``HopAdmission`` sits on the FastAPI app ahead of every
-router and ``HopInterceptor`` (``src/rpc/server.py``) on the gRPC server, so
-every path and every procedure reaches one verification point. ``/health`` and
-``/ready``, and the gRPC health service, are the only things served
-unauthenticated, because a probe is not a caller. The process refuses to start
-without the verifier's inputs (``build``) — the same refusal the hop makes.
+The wrap is applied by ``codefly_hop_entry.py`` — the module uvicorn serves,
+written by the codefly agent and rewritten on every start — which wraps
+``src.main:app`` in ``HopAdmission``, so no line in ``src/main.py`` installs
+the admission and no edit there removes it. ``HopInterceptor``
+(``src/rpc/server.py``) is the same point on the gRPC server. ``/health`` and
+``/ready``, the gRPC health service, and a browser's CORS preflight are the only
+things served unauthenticated, because none of them is a caller. The process
+refuses to start without the verifier's inputs (``build``) — the same refusal
+the hop makes.
+
+**What this file cannot promise.** It is yours: rendered once and never
+rewritten. The entry reads the open set and the preflight test out of it before
+any module of yours is imported, and holds the wrapper function it calls, so
+rebinding those after the fact changes nothing. The rest of this module is
+still reachable from your own code — ``_refuse``, ``Admission.admit``, this
+class's other attributes — so an edit here, or a line in ``src/main.py`` that
+reaches in here, can still stop the verification. Nothing in the agent detects
+that. Closing it means this class and its policy living in the pinned
+``codefly_hop`` distribution instead of in your tree, which is
+codefly-dev/authority's to ship; until it does, treat the paragraph above as
+"the agent installs it for you", not as "you cannot take it out".
+
+
 
 What Codefly delivers, and nothing else:
 
@@ -63,12 +80,37 @@ HOP, REPLAY_CONNECTION_KEY = "hop", "replay-connection"
 MODULE_ENV = "CODEFLY__MODULE"
 ENVIRONMENT_ENV, LOCAL_ENVIRONMENT = "CODEFLY__ENVIRONMENT", "local"
 
-# The only paths served without an admission: a probe is not a caller. Adding a
-# path here publishes it to anyone who can reach the listener.
+# The DEFAULT open set: the only paths served without an admission, because a
+# probe is not a caller. ``codefly_hop_entry.py`` reads this once, before this
+# service's own modules are imported, and the wrap it builds tests every request
+# against its own copy — so adding a path here changes what a NEW process opens,
+# and rebinding it later changes nothing. Adding a path publishes it to anyone
+# who can reach the listener.
 OPEN_PATHS = ("/health", "/ready")
+# The headers a browser's CORS preflight carries, and the other thing that is
+# not a caller: the browser sends it before the call it is asking about, it
+# carries no Work Context — the hop signs no admission for one — and it is
+# answered with headers alone by the app's own CORS layer, which claims it
+# before any route sees it. An app that removes that layer answers a preflight
+# from its router instead (405 for every route the scaffold ships), so a route
+# that serves OPTIONS itself is the one place a preflight reaches a handler.
+# Two header NAMES are all a server can see, so a non-browser caller can
+# present them: this is an open shape, not an authenticated one.
+PREFLIGHT_HEADERS = ("origin", "access-control-request-method")
+# Where an admitted call's identity is recorded on the ASGI scope, for a route
+# to read as ``request.state.codefly_identity``. It is written by the wrap after
+# the admission verified, and read by nothing in the admission path: an earlier
+# version skipped verification when it was already set, which let an
+# application seed it from its own lifespan and serve every request unadmitted.
+IDENTITY_KEY = "codefly_identity"
+
+
 # How often reservations aged past their retention are removed from the shared
 # store. The consumer schedules this; nothing else does.
 COLLECT_EVERY_S = 60.0
+# How many times the reservation table's creation is attempted, and how long to
+# wait between attempts, when replicas start together (``_reservations_exist``).
+MIGRATION_ATTEMPTS, MIGRATION_RETRY_S = 3, 0.2
 
 
 def is_local() -> bool:
@@ -89,20 +131,33 @@ class LocalReservations:
     """
 
     def __init__(self) -> None:
-        self._held: dict[str, bool] = {}
+        # nonce -> the instant past which the reservation no longer has to be
+        # remembered, which is what the verifier hands reserve_async.
+        self._held: dict[str, float] = {}
         self._lock = threading.Lock()
 
     async def reserve_async(self, nonce: str, retain_until: int) -> None:
         with self._lock:
+            now = time.time()
+            # Nothing is kept past its retention. A reservation only has to
+            # outlive the admission it belongs to — after that the admission is
+            # refused as expired before its nonce is ever looked up — so holding
+            # every nonce the process ever saw would grow the dict for as long
+            # as the developer run lasts, with nothing to evict it.
+            self._held = {
+                held: until for held, until in self._held.items() if until > now
+            }
             if nonce in self._held:
                 raise Replayed()
-            if retain_until <= time.time():
+            if retain_until <= now:
                 raise Expired()
-            self._held[nonce] = True
+            self._held[nonce] = retain_until
 
     async def finish_async(self, nonce: str) -> None:
-        with self._lock:
-            self._held[nonce] = False
+        # Nothing: the reservation stands until its retention passes. Finishing
+        # the call must not make its single-use admission usable again, which is
+        # why the nonce is not dropped here.
+        return None
 
     async def consume_async(self, nonce: str, retain_until: int) -> None:
         await self.reserve_async(nonce, retain_until)
@@ -194,14 +249,20 @@ async def build(admission: Admission = ADMISSION):
             audience=audience,
             replay=replay,
         )
-        if verifier.keys_error is not None:
+        if not verifier.ready():
             # Not fatal: the authority may publish its hop's key after this
             # service starts, and the verifier reads again. Until then every
             # call is refused as keys_unavailable, which this line explains.
+            #
+            # Asked of ready(), not of keys_error: the first read can still be
+            # in flight, and then no key is held and no error has been recorded
+            # either — the state the warning exists for, and the one a
+            # keys_error check is silent about.
             _log.warning(
-                "no call can be admitted yet: the authority's keys are unavailable: %s",
-                verifier.keys_error,
+                "no call can be admitted yet: the authority's keys are not held: %s",
+                verifier.keys_error or "the first read has not completed",
             )
+
         admission.bind(verifier)
         closing.callback(admission.release)
         # Nothing failed, so the teardown is handed to the caller, which runs it
@@ -227,13 +288,52 @@ async def _replay_store(closing: AsyncExitStack):
 
     pool = await asyncpg.create_pool(connection)
     closing.push_async_callback(pool.close)
-    # The consumer owns the schema; the table and nonce namespace are the
-    # library's, shared with every other service reserving in this store.
-    await pool.execute(replaypg.MIGRATION)
+    await _reservations_exist(pool)
     store = replaypg.Store(pool)
+
     collector = asyncio.create_task(_collect(store))
     closing.callback(collector.cancel)
     return store
+
+
+async def _reservations_exist(pool) -> None:
+    """Make sure the store has the library's reservation table.
+
+    The consumer owns the schema; the table and nonce namespace are the
+    library's, shared with every other service reserving in this store. The
+    connection therefore needs ``CREATE`` on that schema the first time any
+    replica of any such service starts — grant it, or run ``replaypg.MIGRATION``
+    once as a composition step, and this call finds nothing left to do.
+
+    ``CREATE TABLE IF NOT EXISTS`` is not concurrency-safe: replicas starting
+    together can all pass its existence check, and the losers raise a
+    duplicate-key error on a catalog index rather than finding the table there.
+    A retry is a loser reading the table a winner has now created — but
+    ``IF NOT EXISTS`` does not see an uncommitted catalog row, so with several
+    replicas in flight a retry can lose to the next one. Hence a few attempts,
+    with a short wait between them, rather than one; past them the process
+    refuses to start and the restart finds the table committed.
+    """
+    import asyncpg
+
+    from codefly_hop import replaypg
+
+    racing = (
+        asyncpg.UniqueViolationError,
+        asyncpg.DuplicateTableError,
+        asyncpg.DuplicateObjectError,
+    )
+    for remaining in reversed(range(MIGRATION_ATTEMPTS)):
+        try:
+            await pool.execute(replaypg.MIGRATION)
+            return
+        except racing as lost:
+            if not remaining:
+                raise
+            _log.info(
+                "another replica is creating the admission reservations: %s", lost
+            )
+            await asyncio.sleep(MIGRATION_RETRY_S)
 
 
 async def _collect(store) -> None:
@@ -252,10 +352,31 @@ class HopAdmission:
     path no router claims is refused here instead of answered, and a route added
     later is admitted without having to opt in. The admission's single-use
     reservation is held until the response has been sent.
+
+    ``codefly_hop_entry.py`` applies it — the agent's module, around the whole
+    of ``src.main:app`` — so nothing in ``src/main.py`` has to install it. The
+    policy it enforces is handed in at construction and held on the instance,
+    never re-read from this module, so the open set a request is tested against
+    is the one the entry read before this service's modules were imported.
     """
 
-    def __init__(self, app, admission: Admission = ADMISSION) -> None:
+    def __init__(
+        self,
+        app,
+        admission: Admission = ADMISSION,
+        *,
+        open_paths=None,
+        preflight_headers=None,
+    ) -> None:
         self.app, self.admission = app, admission
+        # The policy this instance enforces, copied into the instance rather
+        # than read from this module per request. The entry passes what it read
+        # before any of this service's modules were imported; the module
+        # globals are the default for anything that builds one itself.
+        self.open_paths = frozenset(OPEN_PATHS if open_paths is None else open_paths)
+        self.preflight_headers = tuple(
+            PREFLIGHT_HEADERS if preflight_headers is None else preflight_headers
+        )
 
     async def __call__(self, scope, receive, send) -> None:
         kind = scope.get("type")
@@ -263,7 +384,7 @@ class HopAdmission:
             await self.app(scope, receive, send)  # a lifespan message is not a call
             return
         path = scope.get("path", "")
-        if kind == "http" and path in OPEN_PATHS:
+        if kind == "http" and path in self.open_paths:
             await self.app(scope, receive, send)
             return
         # A WebSocket reaches the hop as the GET that opens it.
@@ -272,29 +393,57 @@ class HopAdmission:
             (name.decode("latin-1"), value.decode("latin-1"))
             for name, value in scope.get("headers", ())
         ]
+        if verb == "OPTIONS" and self._is_preflight(headers):
+            await self.app(scope, receive, send)
+            return
+        # Every call is verified. There is no state of the scope, and nothing an
+        # application can put on it, that skips this.
         try:
             async with self.admission.admit(headers, f"{verb} {path}") as identity:
-                scope.setdefault("state", {})["codefly_identity"] = identity
+                scope.setdefault("state", {})[IDENTITY_KEY] = identity
                 await self.app(scope, receive, send)
         except Unauthenticated as refusal:
-            await _refuse(kind, send, refusal)
+            await _refuse(kind, send, refusal, headers)
+
+    def _is_preflight(self, headers) -> bool:
+        """Whether these headers are a browser's CORS preflight. Both names are
+        required: a browser sends both on every preflight, and an OPTIONS
+        carrying neither is an ordinary call that needs the hop's admission."""
+        carried = {name.lower() for name, _ in headers}
+        return all(header in carried for header in self.preflight_headers)
 
 
-async def _refuse(kind: str, send, refusal: Unauthenticated) -> None:
+async def _refuse(kind: str, send, refusal: Unauthenticated, headers=()) -> None:
     """What a refused caller is told: the verifier's fixed code and text, which
-    name no proof, token, digest, nonce or claim."""
+    name no proof, token, digest, nonce or claim.
+
+    The refusal is produced OUTSIDE the application's CORS layer, because the
+    wrap is around the whole application, so it carries the CORS response
+    headers itself. Without them a browser cannot read the status at all — fetch
+    rejects with an opaque TypeError — and a front end cannot tell "your stamp
+    expired, re-stamp" from "the service is down". Echoing the caller's own
+    Origin publishes nothing: the body is the fixed refusal above.
+    """
     if kind == "websocket":
         await send({"type": "websocket.close", "code": 1008, "reason": refusal.code})
         return
     body = json.dumps({"code": refusal.code, "detail": refusal.text}).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
-        }
-    )
+    response = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    response.extend(_cors(headers))
+    await send({"type": "http.response.start", "status": 401, "headers": response})
     await send({"type": "http.response.body", "body": body})
+
+
+def _cors(headers):
+    """The CORS response headers a cross-origin refusal carries."""
+    for name, value in headers:
+        if name.lower() == "origin" and value:
+            return [
+                (b"access-control-allow-origin", value.encode("latin-1")),
+                (b"access-control-allow-credentials", b"true"),
+                (b"vary", b"Origin"),
+            ]
+    return []

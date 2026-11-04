@@ -133,24 +133,30 @@ anything from it.
 | `base/` | a checked-in sample service, embedded nowhere |
 
 `templates/` and `base/` look interchangeable and are not. Only `templates/` is
-embedded, so **editing `base/` changes nothing a user receives**; it has drifted
-from `templates/factory/`. Dependabot watches `/base/code` for pip and
-`/templates/builder` for the base image, so a bump there is not a bump of the
-scaffold — carry it into `templates/factory/code/pyproject.toml.tmpl` yourself.
+embedded in the binary, so **editing `base/` changes nothing a user receives**;
+it has already drifted from `templates/factory/`. Dependabot watches
+`/base/code` for pip updates and `/templates/builder` for the base image, so a
+dependency bump landing in `base/code` is not a bump of the scaffold — carry it
+into `templates/factory/code/pyproject.toml.tmpl` yourself.
 
 ## Rules that bite
 
 - **Endpoint contracts are read from fixed locations in the *generated
-  service*** — `openapi/api.swagger.json` and `proto/api.proto` (core's
-  `standards.ProtoPath`) — by Builder, Runtime and every dependent service. The
-  swagger does not exist at `Create` time (`src/openapi.py` writes it at
-  runtime), so absent there is normal, not an error to code around.
-- **Every listener the scaffold emits verifies the hop's admission, and no
-  setting turns it off** — one `codefly_hop.Verifier` behind the app's ASGI
-  middleware and the gRPC interceptor, `/health` and `/ready` the only open
-  paths, no start without its delivered inputs. Depth: `templates/AGENTS.md`.
-- **Readiness is the endpoint's declared health check, never an open port**, its
-  intents kept separate by `resources.PlanEndpointProbes`: collapsing them drops a predicate.
+  service*** (not paths in this repo): `openapi/api.swagger.json` for REST and
+  `proto/api.proto` for gRPC, the latter being core's `standards.ProtoPath`.
+  Both Builder and Runtime re-derive endpoints from exactly there, and so does
+  any dependent service. The swagger file does not exist at `Create` time — the
+  service generates it at runtime from its own `src/openapi.py` — so absent is
+  a normal state there, not an error to code around.
+- **Every listener the scaffold emits is wrapped by an entry this agent writes**
+  (`hopentry.go`), not by a line in the service's source, and
+  `Init`/`Start`/`Build`/`Deploy` refuse a service carrying no verifier at all
+  (`hopstack.go`). What the wrap *is* still lives in the author's tree, so that
+  is not yet enforcement: `templates/AGENTS.md` states exactly what holds and
+  what does not, `docs/hop-migration.md` what an existing service does.
+- **Readiness is the endpoint's declared health check, never an open port.**
+  Probe intents (readiness / startup / liveness) stay separate through
+  `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.
 - **The build recipe owns its uv, and its build context.** The emitted
   Dockerfile copies a pinned uv (`uvVersion` in `main.go`) rather than running
   whichever one the base image was built with — a project written against a
@@ -192,9 +198,11 @@ carried here:
   or `ci / build` goes red on a change that passed every other local check.
 - `agent.codefly.yaml` carries the agent version; releases are tag-driven
   (`.github/workflows/releaser.yml`), never hand-built.
-- Keep this file near ~150 lines, hard cap 200. Push depth into a nested
+- Keep this file near ~180 lines, hard cap 215. Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`. The cap and
   each skill's frontmatter are asserted in `conformance_test.go`, so `go test
-  ./...` enforces them with no workflow change.
+  ./...` enforces them with no workflow change. Raise the cap deliberately when
+  a rule earns its lines; never buy room by thinning a rule in another section,
+  which is how #130 and #131 each paid for a new bullet.
 - There is no `CLAUDE.md`; if one is added, it is a one-line `@AGENTS.md` pointer.
 - Treat this file as code; native ownership qualification: [procedure](docs/native-qualification.md).

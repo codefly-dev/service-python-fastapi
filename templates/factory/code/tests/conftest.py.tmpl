@@ -34,8 +34,14 @@ os.environ.setdefault("CODEFLY__MODULE", "mod")
 os.environ.setdefault("CODEFLY__SERVICE", "svc")
 os.environ.setdefault("CODEFLY__SERVICE_VERSION", "0.0.0")
 # The run named exactly local, which is the only one whose admission
-# reservations may live in a single process.
-os.environ.setdefault("CODEFLY__ENVIRONMENT", "local")
+# reservations may live in a single process. Set, not setdefault: the admission
+# fixture below reserves in this process, which the verifier accepts in that run
+# and nowhere else, so a pipeline that exports CODEFLY__ENVIRONMENT=ci would
+# otherwise raise replay_store_not_shared inside the fixture and error every
+# test at setup. What the run is called is the runtime's business; what this
+# test process reserves in is this file's.
+os.environ["CODEFLY__ENVIRONMENT"] = "local"
+
 
 import pytest
 from authority_client._gen.host.authority.v1.authority_pb2 import KeysResponse
@@ -59,8 +65,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from httpx import ASGITransport, AsyncClient
 
+from codefly_hop_entry import app as served
 from src.hop import ADMISSION, LocalReservations
-from src.main import app
+
 
 AUDIENCE = os.environ["CODEFLY__MODULE"]
 ISSUER = "fixture-authority"
@@ -214,7 +221,11 @@ def stamp(authority):
 
 @pytest.fixture
 async def client():
+    """A client of the app as a caller reaches it: through codefly_hop_entry,
+    the agent's ASGI entry, which is what uvicorn serves and where the hop's
+    admission is applied. Never src.main:app on its own — that is the
+    application without the wrap, which nothing serves."""
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://localhost:8080"
+        transport=ASGITransport(app=served), base_url="http://localhost:8080"
     ) as ac:
         yield ac

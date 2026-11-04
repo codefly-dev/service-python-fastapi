@@ -258,7 +258,10 @@ func startScaffold(t *testing.T, code string, connect bool, authority *hopAuthor
 	t.Helper()
 	app := &scaffoldApp{output: &lockedOutput{}, exited: make(chan error, 1),
 		rest: freePort(t), grpc: freePort(t), connect: freePort(t)}
-	app.cmd = exec.Command("uv", "run", "uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", fmt.Sprint(app.rest))
+	// The agent's entry, which is what a start serves: the admission is applied
+	// there rather than in the scaffold's own source (hopentry.go).
+	require.NoError(t, writeHopEntry(code))
+	app.cmd = exec.Command("uv", "run", "uvicorn", hopEntryApp, "--host", "127.0.0.1", "--port", fmt.Sprint(app.rest))
 	app.cmd.Dir = code
 	var environment []string
 	for _, variable := range os.Environ() {

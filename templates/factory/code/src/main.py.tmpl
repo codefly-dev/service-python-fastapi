@@ -5,8 +5,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src import hop
-from src.hop import HopAdmission
-
 
 def _service_manifest_reachable() -> bool:
     # codefly.init() walks parent directories for service.codefly.yaml but does
@@ -23,7 +21,6 @@ def _service_manifest_reachable() -> bool:
             return False
         directory = parent
 
-
 if _service_manifest_reachable():
     codefly.init()
 
@@ -33,20 +30,19 @@ _close_admission = None
 
 app = FastAPI()
 
-# Every call this app serves is admitted by the authority's hop (src/hop.py).
-# Added first, so it is the innermost middleware: it runs before routing, and
-# there is no switch to turn it off. /health and /ready are the only paths it
-# lets through unauthenticated.
-app.add_middleware(HopAdmission)
+# Every call this app serves is admitted by the authority's hop (src/hop.py),
+# and NOT by a line in this file: `codefly_hop_entry.py` is the module uvicorn
+# serves, and it wraps this app in `src.hop.HopAdmission` itself. The codefly
+# agent writes that module and rewrites it on every start, so the admission is
+# not something an edit here can remove, and there is no switch to turn it off.
+# /health and /ready are the only paths it lets through unauthenticated, plus a
+# browser's CORS preflight, which the CORS layer below answers with headers
+# alone — the hop signs no admission for one.
 
 # CORS will be done properly in next release
 origins = [
     "*",
 ]
-# Added after the admission, so it is outermost: a browser preflight (OPTIONS)
-# carries no Work Context and the hop signs no admission for one, so CORS
-# answers it rather than the admission refusing it. A preflight carries no
-# request body and is answered with headers alone.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -54,7 +50,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.on_event("startup")
 async def _build_admission():
@@ -64,7 +59,6 @@ async def _build_admission():
     global _close_admission
 
     _close_admission = await hop.build()
-
 
 # Initialize configuration before importing routes or user-provided plugins.
 # Routes
@@ -93,7 +87,6 @@ _grpc_server = None
 # src/rpc/connect_gen.py.
 _connect_face = None
 
-
 @app.on_event("startup")
 async def _start_grpc():
     global _grpc_server, _connect_face
@@ -118,7 +111,6 @@ async def _start_grpc():
             ) from missing
         _connect_face = await connect_gen.start(port)
 
-
 @app.on_event("shutdown")
 async def _stop_grpc():
     if _connect_face is not None:
@@ -127,7 +119,6 @@ async def _stop_grpc():
         await _grpc_server.stop(grace=5)
 {{- end }}
 
-
 @app.on_event("shutdown")
 async def _close_admission_last():
     # Registered after every other shutdown handler, so a listener still has its
@@ -135,8 +126,11 @@ async def _close_admission_last():
     if _close_admission is not None:
         await _close_admission()
 
-
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app)
+    # The agent's entry, never this module's `app`: the hop's admission is
+    # verified there, so running `app` directly would serve every route
+    # unadmitted. `codefly run service` launches exactly this entry.
+    uvicorn.run("codefly_hop_entry:app")
+

@@ -469,7 +469,7 @@ func TestImageServesNoHTTPWithoutAnHTTPEndpoint(t *testing.T) {
 	builder.FastAPI.HTTPEndpoint = nil
 	outputDir := t.TempDir()
 	dockerfile := dockerfileOf(t, outputDir, emitRecipe(t, builder, outputDir))
-	require.Contains(t, dockerfile, `CMD ["uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]`)
+	require.Contains(t, dockerfile, `CMD ["uvicorn", "codefly_hop_entry:app", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]`)
 	require.NotContains(t, dockerfile, "0.0.0.0")
 	require.NotContains(t, dockerfile, "8080")
 }

@@ -1,6 +1,8 @@
 import contextvars
+import inspect
 
 import grpc
+
 from codefly_hop import Unauthenticated
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
@@ -11,8 +13,12 @@ from src.hop import Admission
 from src.rpc.servicer import EchoServicer
 
 # The health service answers unauthenticated: a probe is not a caller. It is the
-# only procedure on this server the hop's admission is not required for.
-HEALTH_PREFIX = "/grpc.health.v1.Health/"
+# only thing on this server the hop's admission is not required for, and the
+# interceptor recognises it by the IDENTITY of the servicer the handler belongs
+# to — never by matching a prefix against details.method, which is built from
+# the proto package and service names the AUTHOR declares. An author who named a
+# package grpc.health.v1 and a service Health would otherwise have every
+# procedure of theirs matched by that prefix and served unadmitted.
 
 # Who the call being served is for, as the verifier read it from the
 # authenticated Work Context. A servicer reads it here — never from a header,
@@ -48,16 +54,51 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
     Connect-shaped check to keep in step.
     """
 
-    def __init__(self, admission: Admission):
+    def __init__(self, admission: Admission, health=None):
         if admission is None:
             raise ValueError("the authority's admission is required to serve gRPC")
         self.admission = admission
+        # The health servicer this server registered, if any. Only handlers
+        # belonging to this object are served unadmitted.
+        self.health = health
+
+    def _is_health(self, handler) -> bool:
+        """Whether handler is the registered health servicer's own."""
+        if self.health is None:
+            return False
+        for behavior in (
+            handler.unary_unary,
+            handler.unary_stream,
+            handler.stream_unary,
+            handler.stream_stream,
+        ):
+            if behavior is not None:
+                return getattr(behavior, "__self__", None) is self.health
+        return False
 
     async def intercept_service(self, continuation, details):
-        handler = await continuation(details)
-        if handler is None or details.method.startswith(HEALTH_PREFIX):
+        handler, method = await continuation(details), details.method
+        if handler is not None and self._is_health(handler):
             return handler
-        method = details.method
+        if handler is None:
+            # A procedure this server does not serve is not disclosed before
+            # admission. Answering UNIMPLEMENTED here — which is what returning
+            # None does — tells an unstamped caller which procedures exist,
+            # which the HTTP face deliberately does not: HopAdmission runs ahead
+            # of routing, so a path no route claims is refused rather than
+            # answered. So the call is admitted first, and only a caller the hop
+            # stamped is told that the procedure does not exist.
+            #
+            # stream_stream, whatever the caller's shape. grpc.aio reads the
+            # single request message before it invokes a unary_unary behavior —
+            # before the admission runs — so a client-streaming or bidi caller
+            # that sends nothing never reaches it: the call hung for the life of
+            # the connection, unstamped, with no status. A stream_stream handler
+            # is driven without that pre-read and answers every caller shape.
+            return grpc.stream_stream_rpc_method_handler(
+                self._unary(_unimplemented, method)
+            )
+
         if handler.unary_unary is not None:
             behavior, make = (
                 self._unary(handler.unary_unary, method),
@@ -107,6 +148,19 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
         return served
 
     def _stream(self, behavior, method):
+        # grpc.aio accepts two shapes of streaming handler and drives the one it
+        # was handed: an async generator it iterates, or a coroutine that writes
+        # each answer through the context and returns None. A wrapper has to
+        # keep the shape it wrapped — grpc reads the shape off the wrapper, not
+        # off what is inside it — so an async-generator wrapper around a
+        # reader/writer handler fails every call with "'async for' requires an
+        # object with __aiter__ method, got coroutine", and fails it after
+        # admission, where it reads as a server fault rather than a shape
+        # mismatch. A reader/writer handler holds its admission exactly as a
+        # unary one does, which is what _unary's wrapper already is.
+        if not inspect.isasyncgenfunction(behavior):
+            return self._unary(behavior, method)
+
         async def served(request, context):
             try:
                 async with self.admission.admit(self._pairs(context), method) as caller:
@@ -119,6 +173,15 @@ class HopInterceptor(grpc.aio.ServerInterceptor):
             except Unauthenticated as refusal:
                 await _refuse(context, refusal)
 
+        return served
+
+
+async def _unimplemented(request, context):
+    """What an admitted call to a procedure this server does not serve is told.
+    The status is grpc's own for an unknown method; what changes is that only a
+    caller the hop stamped ever reaches it."""
+    await context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
+
 
 async def _refuse(context, refusal: Unauthenticated):
     """End the call UNAUTHENTICATED with the verifier's fixed code and text,
@@ -126,13 +189,15 @@ async def _refuse(context, refusal: Unauthenticated):
     await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(refusal))
 
 
-def register(server: grpc.aio.Server) -> None:
+def register(server: grpc.aio.Server, health=None) -> None:
     """Register the service and health servicers on a grpc.aio server.
 
-    Add your own servicers here as you grow the proto contract.
+    Add your own servicers here as you grow the proto contract. ``health`` is
+    the servicer the interceptor was built with, so the one thing served
+    unadmitted is the object the interceptor recognises.
     """
     pb2_grpc.add_EchoServiceServicer_to_server(EchoServicer(), server)
-    health_pb2_grpc.add_HealthServicer_to_server(_HealthServicer(), server)
+    health_pb2_grpc.add_HealthServicer_to_server(health or _HealthServicer(), server)
 
 
 # How many calls one client connection may have open at once, advertised to clients
@@ -149,11 +214,12 @@ async def serve(port: int, admission: Admission) -> grpc.aio.Server:
     ``admission`` is required and has no default: a server that cannot verify
     the hop's admission must not listen.
     """
+    health = _HealthServicer()
     server = grpc.aio.server(
-        interceptors=(HopInterceptor(admission),),
+        interceptors=(HopInterceptor(admission, health),),
         options=[("grpc.max_concurrent_streams", MAX_CONCURRENT_STREAMS)],
     )
-    register(server)
+    register(server, health)
     # add_insecure_port returns 0 (it does not raise) when the port can't be
     # bound; without this check the server would "start" listening on nothing
     # while FastAPI stays healthy, masking the failure.

@@ -8,25 +8,38 @@ Dependency management uses [uv](https://docs.astral.sh/uv/). Common commands:
 - `uv add <package>` — add a runtime dependency
 - `uv add --dev <package>` — add a dev dependency
 - `uv run pytest` — run tests
-- `uv run uvicorn src.main:app --reload` — run the dev server
+- `uv run uvicorn codefly_hop_entry:app --reload` — run the dev server
 
 `codefly run service <name>` does all of the above for you via the agent.
 
 ## Every call your service serves is admitted by the authority's hop
 
-`src/hop.py` installs the authority's verifier on the FastAPI app, ahead of
-every router, and on the gRPC server when you have one. There is no switch:
-your service refuses to start until the composition delivers `authority/endpoint`
-(where the published keys are read), `CODEFLY__MODULE` (the audience the
-authority knows your module by) and, outside a local run,
+`src/hop.py` holds the authority's verifier, and `codefly_hop_entry.py` is what
+uvicorn serves: it wraps your whole app in that verifier, so every route is
+admitted ahead of routing, and the gRPC server's interceptor does the same for
+every procedure. That entry is codefly's file, not yours — it is rewritten on
+every start, so nothing in `src/` has to ask to be protected. Run the app as
+`codefly_hop_entry:app`; `src.main:app` is the application without the wrap, and
+nothing serves it.
+
+`src/hop.py` is yours, though, and editing it *can* stop the verification —
+codefly installs the admission for you, it does not stop you removing it. Treat
+that file as something you read, not something you change.
+
+There is no switch: your service refuses to start until the composition delivers
+`authority/endpoint` (where the published keys are read), `CODEFLY__MODULE` (the
+audience the authority knows your module by) and, outside a local run,
 `hop/replay-connection` (the Postgres each single-use admission is reserved in,
 shared by every replica).
 
 `/health` and `/ready` are the only paths served unauthenticated, because a
-probe is not a caller. Every route you add is admitted like the scaffold's, with
-no code of yours: read who the call is for from the verified identity on
+probe is not a caller — plus a browser's CORS preflight, which your CORS layer
+answers with headers alone. Every route you add is admitted like the scaffold's,
+with no code of yours: read who the call is for from the verified identity on
 `request.state.codefly_identity` — or `src.rpc.server.CALLER` in a gRPC
-servicer — never from a header.
+servicer — never from a header. Do not add `HopAdmission` to `src/main.py`
+yourself: an admission is single-use, and a second wrap would refuse every call
+as replayed.
 
 `tests/conftest.py` runs the authority and its hop the way your tests need them.
 `stamp("GET /your-route")` is the headers of one call the hop let through; the

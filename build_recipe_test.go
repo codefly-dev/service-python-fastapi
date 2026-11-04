@@ -198,5 +198,8 @@ func TestBuildShipsSiblingPackages(t *testing.T) {
 		"COPY --chown=appuser code/model_service code/model_service",
 		// uvicorn's logging configuration and filter, written by the builder (uvicorn_logging.go).
 		"COPY --chown=appuser code/uvicorn-log-config.json code/codefly_uvicorn_logging.py ./",
+		// The ASGI entry uvicorn is pointed at, written by the builder too
+		// (hopentry.go): the image serves what a native start serves.
+		"COPY --chown=appuser code/codefly_hop_entry.py ./",
 	}, copies)
 }

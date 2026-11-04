@@ -86,5 +86,10 @@ WORKDIR /app/code
 # writes it. The builder writes both into the project before the build.
 COPY --chown=appuser code/uvicorn-log-config.json code/codefly_uvicorn_logging.py ./
 
+# The ASGI entry this agent owns (hopentry.go): it wraps the application in the
+# authority's admission, so the image serves what a native start serves and the
+# wrap is not something the application's own source can remove.
+COPY --chown=appuser code/codefly_hop_entry.py ./
+
 # Default REST port (overridden by codefly at runtime).
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
+CMD ["uvicorn", "codefly_hop_entry:app", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
