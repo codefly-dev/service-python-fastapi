@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,12 +14,29 @@ import (
 // removed the admission from every route and nothing anywhere said so. The
 // shipped tests went with the same commit, so `codefly test` stayed green.
 //
-// So the wrap is not in the service's source any more. uvicorn serves a module
-// this agent owns: it imports src.main:app and wraps it in
+// So the wrap is not applied from the service's source any more. uvicorn serves
+// a module this agent owns: it imports src.main:app and wraps it in
 // src.hop.HopAdmission itself, and it is rewritten from here on every create,
-// sync, start and image build — the same ownership src/rpc/connect_gen.py has.
-// An author can still delete the file; what they cannot do is keep it deleted,
-// or get a start out of this agent without it (hopstack.go).
+// sync, update, start and image build — the same ownership
+// src/rpc/connect_gen.py has.
+//
+// WHAT THIS DOES NOT DO, stated here because the documents used to claim
+// otherwise. src.hop is still the service's file, imported into the same
+// interpreter, so what the wrap IS remains in the author's tree even though
+// WHERE it is applied no longer is. This module narrows that as far as one
+// module can: it reads the open set and the preflight test, and takes hold of
+// the wrapper function itself, BEFORE any module of the service is imported, so
+// the two bypasses that were reproduced against it — rebinding
+// src.hop.OPEN_PATHS or src.hop.PREFLIGHT_HEADERS from src/main.py — no longer
+// reach the policy a request is tested against. A no-op HopAdmission in
+// src/hop.py, or a line in src/main.py that rebinds src.hop._refuse or
+// Admission.admit, still defeats it, and hopstack.go cannot tell.
+//
+// The fix is the one r56 named first: HopAdmission, its open set, its preflight
+// test and its refusal move into the pinned codefly_hop distribution, this
+// module imports them from there, and the gate asks the resolved environment
+// for the installed version. That distribution is codefly-dev/authority's;
+// until it ships those symbols, this is where the boundary actually is.
 
 // hopEntryModule is the file, and hopEntryApp the import string uvicorn and the
 // image's CMD name. It sits beside src/ in the project directory, which is both
@@ -27,6 +45,9 @@ import (
 const (
 	hopEntryModule = "codefly_hop_entry.py"
 	hopEntryApp    = "codefly_hop_entry:app"
+	// hopEntryPackage is the directory name that would shadow the module; see
+	// writeHopEntry.
+	hopEntryPackage = "codefly_hop_entry"
 )
 
 // unadmittedApp is what uvicorn served before the entry existed, and what a
@@ -43,29 +64,70 @@ rewritten on every create, sync, start and image build -- do not edit it, and
 do not import from it; an edit here does not survive.
 
 This module, not src.main:app, is what uvicorn serves. It wraps the application
-in the authority's admission (src.hop.HopAdmission), so every call the
-application answers has been verified against the admission the hop signed for
-exactly that call, and no edit to this service's own source can remove the wrap
-or widen it. src/hop.py decides what that means -- which paths are open, what a
-refused caller is told -- and this file decides nothing.
+in the authority's admission (src.hop.HopAdmission), so no line in src/main.py
+installs the admission and a route added there is admitted without opting in.
+
+The order below is the point of the file. The open set, the preflight test, the
+wrapper function and the wrapper itself are all taken out of src/hop.py BEFORE
+src.main is imported, so what every request is tested against is what
+src/hop.py shipped with rather than whatever the application's module-level code
+leaves behind. src.hop is still the service's own module, so this is a narrowing
+and not a boundary: see hopentry.go for exactly what it does not cover.
 
 Run it as "uvicorn codefly_hop_entry:app"; codefly run service does.
 """
 
-from src.hop import ADMISSION, HopAdmission
-from src.main import app as application
+from src.hop import ADMISSION, OPEN_PATHS, PREFLIGHT_HEADERS, HopAdmission
 
-# The ASGI application uvicorn serves. Lifespan passes straight through the
-# wrap, so the application's startup handlers -- the ones that build the
-# verifier this wrap admits with, and start the gRPC server and Connect face --
-# run exactly as they do when the application is served on its own.
-app = HopAdmission(application, ADMISSION)
+# Copied now, while nothing of the service has run.
+_ADMISSION = ADMISSION
+_OPEN_PATHS = tuple(OPEN_PATHS)
+_PREFLIGHT_HEADERS = tuple(PREFLIGHT_HEADERS)
+# The function object, not the attribute: rebinding HopAdmission.__call__ after
+# this line does not change what this module calls.
+_ADMIT = HopAdmission.__call__
+# Built now too, so even the constructor runs before the application does. The
+# app it wraps is the one thing that cannot be known yet; it is attached below.
+_WRAP = HopAdmission(
+    None,
+    _ADMISSION,
+    open_paths=_OPEN_PATHS,
+    preflight_headers=_PREFLIGHT_HEADERS,
+)
+
+from src.main import app as application  # noqa: E402 - after the reads above
+
+_WRAP.app = application
+
+
+async def app(scope, receive, send):
+    """The ASGI application uvicorn serves. Lifespan passes straight through the
+    wrap, so the application's startup handlers -- the ones that build the
+    verifier this wrap admits with, and start the gRPC server and Connect face
+    -- run exactly as they do when the application is served on its own."""
+    await _ADMIT(_WRAP, scope, receive, send)
 `
 
 // writeHopEntry writes the entry into dir, the project directory uvicorn runs
 // from. It is rewritten whole on every call: the file is the agent's, and a
 // hand edit is drift the next write removes.
+//
+// It also removes a directory of the entry's name first. CPython resolves a
+// package before a same-named module within one sys.path entry, and uvicorn
+// puts the working directory at sys.path[0] — so `code/codefly_hop_entry/` with
+// an __init__.py of its own wins over this file, and the agent would go on
+// rewriting a module nothing imports while the unwrapped application is served.
 func writeHopEntry(dir string) error {
+	shadow := filepath.Join(dir, hopEntryPackage)
+	info, err := os.Stat(shadow)
+	switch {
+	case err == nil && info.IsDir():
+		if err := os.RemoveAll(shadow); err != nil {
+			return fmt.Errorf("remove the package shadowing %s: %w", hopEntryModule, err)
+		}
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("cannot read %s: %w", shadow, err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, hopEntryModule), []byte(hopEntrySource), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", hopEntryModule, err)
 	}

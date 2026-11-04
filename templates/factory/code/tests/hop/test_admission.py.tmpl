@@ -13,6 +13,7 @@ import pytest
 from codefly_hop import Replayed
 from fastapi import Request
 
+import codefly_hop_entry as entry
 from codefly_hop_entry import app as served
 from src import hop
 from src.hop import Admission, HopAdmission, LocalReservations
@@ -81,18 +82,89 @@ async def test_a_route_reads_who_the_call_is_for(client, stamp):
 
 
 def test_the_wrap_is_the_agents_entry_and_not_this_services_source():
-    # Where the admission is, which is as much of the rule as that it is there:
-    # codefly_hop_entry.py is the agent's file, rewritten on every start, and it
-    # wraps this service's application from outside. Nothing under src/ installs
-    # the wrap, so no edit under src/ removes it — and installing it here as
-    # well would make every call look replayed, because an admission is
-    # single-use and would then be verified twice.
-    assert isinstance(served, HopAdmission)
-    assert served.app is app
+    # Where the admission is applied, which is as much of the rule as that it is
+    # applied: codefly_hop_entry.py is the agent's file, rewritten on every
+    # start, and it wraps this service's application from outside. Nothing under
+    # src/ installs the wrap. Installing it here as well is a misconfiguration
+    # the agent refuses, not something to absorb: there is one wrap.
+    assert isinstance(entry._WRAP, HopAdmission)
+    assert entry._WRAP.app is app
     assert not any(
         getattr(middleware, "cls", None) is HopAdmission
         for middleware in app.user_middleware
     )
+
+
+def test_the_wrap_holds_its_own_copy_of_the_open_set():
+    # Read by the entry before this service's modules were imported, and held on
+    # the instance. A request is never tested against the module global.
+    assert "/health" in entry._WRAP.open_paths
+    assert "/ready" in entry._WRAP.open_paths
+    assert "/version" not in entry._WRAP.open_paths
+
+
+async def test_rebinding_the_open_set_does_not_open_a_path(client):
+    # The shape of a line in src/main.py: `hop.OPEN_PATHS = <contains
+    # everything>`. It ran at import time in an earlier version of the entry and
+    # opened every path, because the wrap looked the global up per request.
+    class _Everything:
+        def __contains__(self, item):
+            return True
+
+    original, hop.OPEN_PATHS = hop.OPEN_PATHS, _Everything()
+    try:
+        refused = await client.get("/version")
+        assert refused.status_code == 401
+    finally:
+        hop.OPEN_PATHS = original
+
+
+async def test_rebinding_the_preflight_headers_does_not_open_a_method(client):
+    original, hop.PREFLIGHT_HEADERS = hop.PREFLIGHT_HEADERS, ()
+    try:
+        refused = await client.get("/version")
+        assert refused.status_code == 401
+    finally:
+        hop.PREFLIGHT_HEADERS = original
+
+
+async def test_scope_state_cannot_stand_in_for_an_admission():
+    # uvicorn seeds every request scope from the application's lifespan state,
+    # so an application that yields {"codefly_identity": ...} from its own
+    # lifespan pre-sets it for every request it will ever receive. An earlier
+    # version of this wrap read that as "already admitted" — to tolerate a
+    # second wrap added by hand — and served the call. Every call is verified.
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await served(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/version",
+            "headers": [],
+            "state": {"codefly_identity": "whoever-I-say"},
+        },
+        receive,
+        send,
+    )
+    assert sent[0]["status"] == 401
+
+
+async def test_a_refusal_is_readable_by_a_browser(client):
+    # The wrap is outside the app's CORS layer, so the refusal carries the CORS
+    # headers itself. Without them a browser gets an opaque TypeError and cannot
+    # tell "re-stamp this call" from "the service is down".
+    refused = await client.get("/version", headers={"Origin": "https://caller.example"})
+    assert refused.status_code == 401
+    assert refused.headers["access-control-allow-origin"] == "https://caller.example"
+    assert refused.headers["access-control-allow-credentials"] == "true"
+    assert refused.headers["vary"] == "Origin"
 
 
 async def test_a_browser_preflight_is_answered_rather_than_refused(client):

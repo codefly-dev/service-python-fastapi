@@ -561,19 +561,17 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Base.Runtime.InitErrorf(nil, "no pyproject.toml found")
 	}
 
-	// What the service can admit, before anything is synced or started: a
-	// project with no admission stack is what this agent starts unadmitted
-	// (hopstack.go), and the one thing it must not do is start it silently.
+	// What the service can admit, before anything is started: a project with no
+	// admission stack is what this agent starts unadmitted (hopstack.go), and
+	// the one thing it must not do is start it silently.
 	s.hopStack, err = readHopStack(s.Service.SourceLocation)
 	if err != nil {
 		return s.Base.Runtime.InitError(err)
 	}
-	if !s.hopStack.complete() {
-		if hopStackNow().Before(hopStackRequiredFrom) {
-			s.Wool.Warn(hopStackWarning(s.hopStack))
-		} else {
-			return s.Base.Runtime.InitError(hopStackRefusal(s.hopStack))
-		}
+	if refusal, warn := checkHopStack(s.hopStack); refusal != nil {
+		return s.Base.Runtime.InitError(refusal)
+	} else if warn != "" {
+		s.Wool.Warn(warn)
 	}
 
 	// uv sync: one command, reads pyproject.toml + uv.lock (creates lock if
@@ -673,6 +671,32 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Base.Runtime.StartError(s.Wool.NewError("service has been destroyed (Init must run before it can start again)"))
 	}
 
+	// Re-read here, rather than trusted from Init. InitError returns a response
+	// field — InitStatus_ERROR with a nil Go error — so a caller that branches
+	// on the error proceeds to Start, which is the one call that opens the
+	// socket; and a long-lived agent whose Init passed with a warning can reach
+	// a Start after the date has turned. The refusal belongs where the listener
+	// starts.
+	stack, stackErr := readHopStack(s.Service.SourceLocation)
+	if stackErr != nil {
+		return s.Base.Runtime.StartError(stackErr)
+	}
+	if refusal, warn := checkHopStack(stack); refusal != nil {
+		return s.Base.Runtime.StartError(refusal)
+	} else if warn != "" {
+		s.Wool.Warn(warn)
+	}
+	s.hopStack = stack
+	// Rewritten on every Start, including the one below that keeps the running
+	// process: with hot reload, uvicorn re-imports whatever is on disk inside
+	// that process, so an edit made during a developer run would otherwise be
+	// what serves until the next launch.
+	if stack.complete() {
+		if err := writeHopEntry(s.Service.SourceLocation); err != nil {
+			return s.Base.Runtime.StartError(err)
+		}
+	}
+
 	inputs := startInputs(req)
 	launch := launchInputs(inputs, s.port, s.grpcPort, s.connectPort, s.FastAPI.Settings.HotReload) +
 		fmt.Sprintf("\ninit-fixture %q\nserved-app %q", s.initFixture, servedApp(s.hopStack))
@@ -722,15 +746,6 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	// working directory uvicorn puts on sys.path.
 	if err := writeUvicornLogging(s.Service.SourceLocation); err != nil {
 		return s.Base.Runtime.StartError(err)
-	}
-	// The entry uvicorn serves, rewritten here on every start: the admission is
-	// the agent's, so an edit to it does not survive a start (hopentry.go). A
-	// project with no admission stack is started without it, having been warned
-	// by Init (hopstack.go).
-	if s.hopStack.complete() {
-		if err := writeHopEntry(s.Service.SourceLocation); err != nil {
-			return s.Base.Runtime.StartError(err)
-		}
 	}
 	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(servedApp(s.hopStack), s.port, s.FastAPI.Settings.HotReload)...)
 	if err != nil {
@@ -1022,7 +1037,12 @@ func uvicornArgs(app string, port uint16, hotReload bool) []string {
 	args := []string{"run", "uvicorn", app, "--host", host, "--port", fmt.Sprintf("%d", port), "--log-config", uvicornLogConfigFile}
 
 	if hotReload {
-		args = append(args, "--reload")
+		// The entry is excluded from the watch: it is the agent's file, so an
+		// edit to it is not a source change to reload on. The reloader still
+		// re-imports it from disk on a reload another edit triggers, so an edit
+		// does survive inside a developer run until the next Start rewrites it
+		// — hopentry.go states what this boundary does and does not cover.
+		args = append(args, "--reload", "--reload-exclude", hopEntryModule)
 	}
 	return args
 }

@@ -12,12 +12,24 @@ Some of the things this agent provides for you:
 
 ## Every listener this agent generates verifies the hop's admission
 
-There is no option, and no line of yours to get right. What uvicorn serves is
+There is no option and no line of yours to get right. What uvicorn serves is
 `codefly_hop_entry.py`, a module this agent writes and rewrites on every start:
 it wraps your whole FastAPI app in the authority's verifier, ahead of every
 router, and the optional `grpc.aio` server carries the same verifier as an
-interceptor. Nothing in `src/` installs the admission, so no edit in `src/` — and
-no deleted line — removes it. The verifier is `codefly_hop.Verifier` from the
+interceptor. Nothing in `src/` installs the admission, so there is no line there
+to delete and a route you add is admitted without opting in.
+
+What this does **not** yet do, stated plainly because it is easy to read the
+paragraph above as more: the verifier class and its open-path list live in
+`src/hop.py`, which is your file after creation. The entry reads that policy
+before any module of yours is imported, so rebinding it later changes nothing —
+but editing `src/hop.py` itself, or reaching into it from `src/main.py`, can
+still stop the verification, and this agent cannot detect that. It detects a
+service with no admission at all. The durable fix is the verifier moving into
+the pinned authority client; until then treat this as "codefly installs it for
+you", not as "you cannot take it out".
+
+The verifier is `codefly_hop.Verifier` from the
 Codefly authority client, built from the keys source the composition names
 (`authority/endpoint`), the audience the authority knows the module by
 (`CODEFLY__MODULE`) and the replay store each single-use admission is reserved
@@ -39,8 +51,11 @@ the process rather than in a store every replica shares.
 
 The scaffold ships the tests that say so (`tests/hop/test_admission.py`): an
 unstamped call is refused, a call the hop stamped is served, an admission is
-single-use and bound to its own route, health is open, and the wrap is in this
-agent's entry rather than in your source.
+single-use and bound to its own route, health is open, a refusal carries the
+CORS headers a browser needs to read it, and the wrap is in this agent's entry
+rather than in your source. Do not add the middleware in `src/main.py` as well:
+an admission is single-use, two wraps verify it twice, and this agent refuses to
+start a service that does.
 
 **A service created before this agent carried the admission has none of it**:
 it serves every route to anything that can address its listener. `Init`, `Build`

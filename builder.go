@@ -125,81 +125,107 @@ func (s *Builder) Update(ctx context.Context, _ *builderv0.UpdateRequest) (*buil
 	if err := s.Base.Templates(ctx, services.WithBuilder(builderFS)); err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot copy and apply template")
 	}
-	// The agent's entry, so a service that took the admission on by hand is
-	// served through the wrap this agent owns rather than through whatever its
-	// own src/main.py says (hopentry.go).
-	if err := s.writeHopEntryIfMigrated(); err != nil {
-		return nil, err
-	}
-	if err := s.migrateReadinessProbe(ctx); err != nil {
+	// The agent's entry, and the readiness probe that has to move with it, so a
+	// service that took the admission on by hand is served through the wrap
+	// this agent owns and stays reachable by a kubelet (hopentry.go).
+	if err := s.adoptHopEntry(ctx); err != nil {
 		return nil, err
 	}
 	return &builderv0.UpdateResponse{}, nil
 }
 
-// legacyReadinessPath is the readiness path every scaffold declared before the
-// hop's admission reached this agent: an ordinary route, which the admission
-// now admits like any other.
-const legacyReadinessPath = "/version"
-
-// migrateReadinessProbe moves a declared HTTP readiness probe off /version.
-//
-// A service migrated by hand keeps the probe its manifest was scaffolded with,
-// and /version is admitted like every other route the moment the admission is
-// installed: a kubelet carries no admission, so it reads 401, every replica is
-// NotReady for ever, and nothing in the rollout names the cause. hopReadinessPath
-// is the path the admission leaves open, and it answers 200 only while the
-// replica holds the authority's keys — which is what readiness is asking.
-//
-// It runs only for a service that carries the admission stack. One without it
-// still serves /version to a kubelet, and pointing the probe at a route that
-// service does not have would take out exactly the replicas this is here to
-// keep in rotation.
-func (s *Builder) migrateReadinessProbe(ctx context.Context) error {
+// adoptHopEntry is what every agent call that touches a migrated service's tree
+// does: write the entry it is served through, and put its readiness probe on a
+// route a kubelet can still reach. The two belong together — writing the entry
+// is what makes /version admitted — and the migration document names one
+// command, so the command that writes the entry has to do both or the document
+// is false. Update and Sync both call this, and a test asserts the pairing.
+func (s *Builder) adoptHopEntry(ctx context.Context) error {
 	stack, err := readHopStack(s.SourceLocation)
 	if err != nil {
 		return err
 	}
-	if !stack.complete() {
-		return nil
+	if stack.secondWrap {
+		return secondWrapRefusal()
 	}
-	migrated := false
+	if stack.complete() {
+		if err := writeHopEntry(s.SourceLocation); err != nil {
+			return err
+		}
+	}
+	return s.alignReadinessProbe(ctx, stack)
+}
+
+// alignReadinessProbe keeps the declared readiness probe on a route the
+// service actually serves unadmitted, in both directions.
+//
+// Forward: a service migrated by hand keeps the probe its manifest was
+// scaffolded with, and /version is admitted like every other route the moment
+// the admission is installed — a kubelet carries no admission, so it reads 401,
+// every replica is NotReady for ever, and nothing in the rollout names the
+// cause. hopReadinessPath is the path the admission leaves open, and it answers
+// 200 only while the replica holds the authority's keys, which is what
+// readiness is asking.
+//
+// Backward, because the forward move is persisted into service.codefly.yaml and
+// had no inverse: an owner who starts a migration, hits a problem and takes
+// src/hop.py back out was left pointing at /ready on a service that no longer
+// serves it — permanently NotReady, with nothing willing to touch it.
+//
+// Either way the move happens only when the service's own source declares the
+// route being moved to. The failure this exists to prevent is a probe on a path
+// that answers 404, and a halfway migration is exactly how to cause it.
+func (s *Builder) alignReadinessProbe(ctx context.Context, stack hopStack) error {
+	from, to := legacyReadinessPath, hopReadinessPath
+	if !stack.complete() {
+		from, to = hopReadinessPath, legacyReadinessPath
+	}
+	moved := false
 	for _, endpoint := range s.Base.Service.Endpoints {
 		if endpoint.Health == nil || endpoint.Health.Readiness == nil {
 			continue
 		}
 		readiness := endpoint.Health.Readiness
-		if readiness.Kind != resources.ProbeKindHTTP || readiness.Path != legacyReadinessPath {
+		if readiness.Kind != resources.ProbeKindHTTP || readiness.Path != from {
 			continue
 		}
-		readiness.Path = hopReadinessPath
-		readiness.Statuses = []string{"200"}
-		migrated = true
-		s.Wool.Info("readiness moved off a route the hop admits: a kubelet carries no admission",
-			wool.Field("endpoint", endpoint.Name), wool.Field("path", hopReadinessPath))
+		serves, err := servesRoute(s.SourceLocation, to)
+		if err != nil {
+			return err
+		}
+		if !serves {
+			s.Wool.Warn("readiness is on a route the hop admits and this service does not serve the open one, "+
+				"so the probe is left alone: a kubelet reads 401 there and the replica never becomes ready",
+				wool.Field("endpoint", endpoint.Name), wool.Field("readiness", readiness.Path), wool.Field("open", to))
+			continue
+		}
+		readiness.Path = to
+		// The author's accepted statuses are theirs. Only a probe that declared
+		// none gets the one this agent would have scaffolded.
+		if len(readiness.Statuses) == 0 {
+			readiness.Statuses = []string{"200"}
+		}
+		moved = true
+		s.Wool.Info("readiness moved: a kubelet carries no admission, so it must probe a route the admission leaves open",
+			wool.Field("endpoint", endpoint.Name), wool.Field("from", from), wool.Field("to", to))
 	}
-	if !migrated {
+	if !moved {
 		return nil
 	}
 	if err := s.Base.Service.Save(ctx); err != nil {
-		return s.Wool.Wrapf(err, "cannot record the migrated readiness probe")
+		return s.Wool.Wrapf(err, "cannot record the moved readiness probe")
 	}
 	return nil
 }
 
-// writeHopEntryIfMigrated writes the agent-owned entry for a project that
-// carries the stack it imports, and writes nothing for one that does not:
-// Update is the one agent call a service already created runs through, so it is
-// where a hand migration picks the entry up.
-func (s *Builder) writeHopEntryIfMigrated() error {
-	stack, err := readHopStack(s.SourceLocation)
-	if err != nil {
-		return err
+// servesRoute reports whether the project declares route. hopReadinessPath has
+// its own reader (servesOpenReadiness); this is the same search for either
+// direction of the move.
+func servesRoute(sourceDir, route string) (bool, error) {
+	if route == hopReadinessPath {
+		return servesOpenReadiness(sourceDir)
 	}
-	if !stack.complete() {
-		return nil
-	}
-	return writeHopEntry(s.SourceLocation)
+	return servesDeclaredRoute(sourceDir, route)
 }
 
 // Sync generates gRPC client stubs for declared dependencies.
@@ -235,12 +261,14 @@ func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv
 		return s.Base.Builder.SyncError(err)
 	}
 	// The ASGI entry is the agent's too, and regenerated here for the same
-	// reason the Connect face is: a hand edit to it is drift (hopentry.go).
-	if err := s.writeHopEntryIfMigrated(); err != nil {
+	// reason the Connect face is: a hand edit to it is drift (hopentry.go). The
+	// readiness probe moves with it — docs/hop-migration.md sends an owner
+	// here, and writing the entry without moving the probe is the NotReady
+	// failure that document exists to prevent.
+	if err := s.adoptHopEntry(ctx); err != nil {
 		return s.Base.Builder.SyncError(err)
 	}
 	return s.Base.Builder.SyncResponse()
-
 }
 
 // connectFacePath is where the agent writes the Connect face, relative to the
@@ -403,14 +431,15 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
+	if refusal, warn := checkHopStack(hopStack); refusal != nil {
+		return s.Base.Builder.BuildError(refusal)
+	} else if warn != "" {
+		s.Wool.Warn(warn)
+	}
 	if hopStack.complete() {
 		if err := writeHopEntry(s.SourceLocation); err != nil {
 			return s.Base.Builder.BuildError(err)
 		}
-	} else if hopStackNow().Before(hopStackRequiredFrom) {
-		s.Wool.Warn(hopStackWarning(hopStack))
-	} else {
-		return s.Base.Builder.BuildError(hopStackRefusal(hopStack))
 	}
 	membership, err := enclosingUVWorkspace(s.Location, s.SourceLocation)
 
@@ -686,12 +715,10 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	if err != nil {
 		return nil, err
 	}
-	if !stack.complete() {
-		if hopStackNow().Before(hopStackRequiredFrom) {
-			s.Wool.Warn(hopStackWarning(stack))
-		} else {
-			return nil, hopStackRefusal(stack)
-		}
+	if refusal, warn := checkHopStack(stack); refusal != nil {
+		return nil, refusal
+	} else if warn != "" {
+		s.Wool.Warn(warn)
 	}
 
 	// The current Core manifest profile requires all three intents. Require
@@ -832,9 +859,8 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	// refusing every call it is given.
 	endpoint.Health = &resources.Health{
 		Readiness: &resources.Probe{Kind: resources.ProbeKindHTTP, Path: hopReadinessPath, Statuses: []string{"200"}},
-
-		Startup:  &resources.Probe{Kind: resources.ProbeKindTransport, Period: "2s", FailureThreshold: 30},
-		Liveness: &resources.Probe{Kind: resources.ProbeKindTransport},
+		Startup:   &resources.Probe{Kind: resources.ProbeKindTransport, Period: "2s", FailureThreshold: 30},
+		Liveness:  &resources.Probe{Kind: resources.ProbeKindTransport},
 	}
 
 	if s.FastAPI.Settings.PublicEndpoint {

@@ -88,15 +88,31 @@ async def test_a_procedure_this_server_does_not_serve_is_not_disclosed(admission
     # What a caller learns before it is admitted: nothing. An unknown procedure
     # answered UNIMPLEMENTED would tell an unstamped caller which procedures
     # exist, which the HTTP face does not — its admission runs ahead of routing.
+    #
+    # Both caller shapes. grpc.aio reads the single request message before it
+    # invokes a unary behavior, which is before the admission runs, so an
+    # unknown procedure answered by a unary handler left a client-streaming
+    # caller that sends nothing hanging for the life of the connection —
+    # unstamped, with no status. The synthesized handler is stream_stream.
     port = _free_port()
     grpc_server = await server.serve(port, admission)
+    unknown = "/api.EchoService/NotAProcedure"
     try:
         async with grpc.aio.insecure_channel(f"localhost:{port}") as channel:
-            call = channel.unary_unary("/api.EchoService/NotAProcedure")
             with pytest.raises(grpc.aio.AioRpcError) as refused:
-                await call(b"")
+                await channel.unary_unary(unknown)(b"")
             assert refused.value.code() == grpc.StatusCode.UNAUTHENTICATED
             assert "stamp_proof" in refused.value.details()
+
+            # A client-streaming caller that sends no message at all, with a
+            # deadline only so a hang fails the test rather than wedging it.
+            async def nothing():
+                return
+                yield b""
+
+            with pytest.raises(grpc.aio.AioRpcError) as hung:
+                await channel.stream_unary(unknown)(nothing(), timeout=10)
+            assert hung.value.code() == grpc.StatusCode.UNAUTHENTICATED
     finally:
         await grpc_server.stop(grace=None)
 

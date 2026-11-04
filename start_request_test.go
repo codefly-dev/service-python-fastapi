@@ -511,7 +511,8 @@ func TestUvicornArgsReloadIsConditional(t *testing.T) {
 		[]string{"run", "uvicorn", hopEntryApp, "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"},
 		uvicornArgs(hopEntryApp, 8080, false))
 	require.Equal(t,
-		[]string{"run", "uvicorn", hopEntryApp, "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json", "--reload"},
+		[]string{"run", "uvicorn", hopEntryApp, "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json",
+			"--reload", "--reload-exclude", hopEntryModule},
 		uvicornArgs(hopEntryApp, 8080, true))
 }
 

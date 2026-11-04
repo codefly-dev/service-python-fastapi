@@ -148,20 +148,31 @@ into `templates/factory/code/pyproject.toml.tmpl` yourself.
   any dependent service. The swagger file does not exist at `Create` time — the
   service generates it at runtime from its own `src/openapi.py` — so absent is
   a normal state there, not an error to code around.
-- **Every listener the scaffold emits verifies the hop's admission, in an entry
-  this agent writes** (`hopentry.go`) rather than in the service's own source,
-  and `Init`/`Build`/`Deploy` refuse a service that carries no verifier
-  (`hopstack.go`). Depth: `templates/AGENTS.md`, `docs/hop-migration.md`.
+- **Every listener the scaffold emits is wrapped by an entry this agent writes**
+  (`hopentry.go`), not by a line in the service's source, and
+  `Init`/`Start`/`Build`/`Deploy` refuse a service carrying no verifier at all
+  (`hopstack.go`). What the wrap *is* still lives in the author's tree, so that
+  is not yet enforcement: `templates/AGENTS.md` states exactly what holds and
+  what does not, `docs/hop-migration.md` what an existing service does.
 - **Readiness is the endpoint's declared health check, never an open port.**
   Probe intents (readiness / startup / liveness) stay separate through
   `resources.PlanEndpointProbes`; collapsing them silently drops a predicate.
 - **The build recipe owns its uv, and its build context.** The emitted
-  Dockerfile copies a pinned uv (`uvVersion` in `main.go`), a
-  `[tool.uv.sources]` path leaving the project makes the recipe assemble its own
-  context (claiming the whole tree, `RECIPE_INVENTORY_SCOPE_TREE`), and a git
-  source `uv.lock` pins is declared for the caller to mirror by the URL the lock
-  records. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
-  Depth: `templates/builder/AGENTS.md`.
+  Dockerfile copies a pinned uv (`uvVersion` in `main.go`) rather than running
+  whichever one the base image was built with — a project written against a
+  newer `[tool.uv]` key otherwise resolves locally and fails in the builder
+  stage. And a `[tool.uv.sources]` path leaving the project makes the recipe
+  assemble its own context, mirroring the repository-relative layout so the
+  same relative path resolves there; that plan claims the whole tree
+  (`RECIPE_INVENTORY_SCOPE_TREE`), the Dockerfile-only one claims just what it
+  emitted. Never rewrite `pyproject.toml` or `uv.lock` to make a path resolve.
+  A git source is declared in the recipe (`git_source_downloads`) by the URL
+  exactly as `uv.lock` records it up to its query, which is what uv hands git;
+  the caller fetches it with its own credentials and the Dockerfile maps that
+  URL onto the mirror; a normalized URL would miss it silently. A source core
+  refuses, or whose URL begins an undeclared locked one (insteadOf is a
+  prefix match), is not declared; a warning says why. An image whose own git
+  config already rewrites a declared URL keeps that rewrite (git prefers it).
 - **The runtime image is pinned.** `docker-image` rejects a bare name and
   `:latest`. The default `ghcr.io/codefly-dev/python` companion is built from
   core and pinned by the digest of its multi-platform index — prefer it. Its tag
@@ -187,9 +198,11 @@ carried here:
   or `ci / build` goes red on a change that passed every other local check.
 - `agent.codefly.yaml` carries the agent version; releases are tag-driven
   (`.github/workflows/releaser.yml`), never hand-built.
-- Keep this file near ~150 lines, hard cap 200. Push depth into a nested
+- Keep this file near ~180 lines, hard cap 215. Push depth into a nested
   `AGENTS.md` beside what it describes, or into `.claude/skills/`. The cap and
   each skill's frontmatter are asserted in `conformance_test.go`, so `go test
-  ./...` enforces them with no workflow change.
+  ./...` enforces them with no workflow change. Raise the cap deliberately when
+  a rule earns its lines; never buy room by thinning a rule in another section,
+  which is how #130 and #131 each paid for a new bullet.
 - There is no `CLAUDE.md`; if one is added, it is a one-line `@AGENTS.md` pointer.
 - Treat this file as code; native ownership qualification: [procedure](docs/native-qualification.md).

@@ -38,24 +38,53 @@ both listeners:
   Connect face relays every protocol onto that server, so there is no second
   Connect-shaped check to keep in step.
 
-### The wrap is the agent's file, not the service's
+### Where the wrap is applied is the agent's. What the wrap IS is not, yet.
 
-**Nothing may depend on the author doing auth correctly, and that includes not
-deleting a line.** `src/main.py` installs nothing: `codefly_hop_entry.py`
-(`hopentry.go`) is what uvicorn and the image's `CMD` serve, it imports
-`src.main:app` and wraps it in `HopAdmission` itself, and it is rewritten whole
-on every create, sync, update, start and image build. Adding the middleware in
-`src/main.py` as well is the one thing to get wrong: an admission is single-use,
-so two wraps verify it twice and refuse every call as `stamp_replayed`.
-`HopAdmission` passes a scope it already marked straight through for exactly
-that reason, so a hand-migrated service that kept its own line still serves.
+**Read this before citing the rule as settled.** `src/main.py` installs nothing:
+`codefly_hop_entry.py` (`hopentry.go`) is what uvicorn and the image's `CMD`
+serve, it imports `src.main:app`, wraps it in `HopAdmission`, and is rewritten
+whole on every create, sync, update, start and image build. So the edit that
+used to remove the admission — deleting a line from `src/main.py` — no longer
+exists, and a route an author adds is admitted without opting in.
 
-`Init`, `Build` and `Deploy` read the stack the entry imports — `src/hop.py`
-defining `HopAdmission`, `authority-client` in `pyproject.toml` — and warn,
-then from `hopStackRequiredFrom` refuse, when it is absent (`hopstack.go`). A
-service created before the admission has none of it and migrates by hand:
-[docs/hop-migration.md](../docs/hop-migration.md), which is also where the
-readiness rewrite `Update` performs is written down.
+But `HopAdmission`, `OPEN_PATHS`, `PREFLIGHT_HEADERS` and the refusal all still
+live in `factory/code/src/hop.py`, which is the author's file from `Create` on,
+imported into the author's own interpreter. The entry narrows that as far as one
+module can: it reads the open set and the preflight test, and takes hold of the
+wrapper function itself, **before** any module of the service is imported, so
+the two bypasses reproduced against the first version of it — rebinding
+`hop.OPEN_PATHS` or `hop.PREFLIGHT_HEADERS` from `src/main.py` — no longer reach
+what a request is tested against. Three channels remain open: a no-op
+`HopAdmission` in `src/hop.py`, a line that rebinds `src.hop._refuse` or
+`Admission.admit`, and any other edit to that module. **`hopstack.go` cannot
+detect any of them** — it reads source text, and a `class HopAdmission` that
+passes every request through satisfies it completely.
+
+So the honest statement of the rule today is: *the agent installs the admission
+for you and an ordinary service cannot lose it by accident*, **not** *an author
+cannot take it out*. Closing the difference means `HopAdmission` and its policy
+living in the pinned `codefly_hop` distribution rather than in the service tree,
+with the gate asking the resolved environment for that distribution's version
+instead of grepping source. That distribution is codefly-dev/authority's to
+ship; the PR that wrote this paragraph specifies what it has to export.
+
+`Init`, `Start`, `Build` and `Deploy` read the stack the entry imports —
+`src/hop` defining `HopAdmission`, `authority-client` in `pyproject.toml` — and
+warn, then from `hopStackRequiredFrom` refuse, when it is absent
+(`hopstack.go`). That detects a service with **no** admission, which is the
+whole installed base, and is what it is for. `Start` re-reads rather than
+trusting `Init`, because `Init` answers a response field and `Start` is the call
+that opens the socket.
+
+**One wrap, and a second is refused.** `src/main.py` calling
+`add_middleware(HopAdmission)` fails `Init` on sight: an admission is
+single-use, so two wraps verify it twice and refuse every call as
+`stamp_replayed`. An earlier version absorbed it instead, by letting a scope
+that was already marked through — which let an application mark every scope from
+its own `lifespan` and serve every request unadmitted. Tolerance was the hole.
+
+A service created before the admission migrates by hand:
+[docs/hop-migration.md](../docs/hop-migration.md).
 
 The method verified is the one the hop signed: `"<VERB> <path>"` for an HTTP
 call, as the hop's HTTP face binds it (`libraries/hop/go/forward/http.go` in
@@ -63,14 +92,22 @@ codefly-dev/authority), and the full procedure for gRPC and Connect. Getting
 that string wrong refuses every genuine call with `stamp_method`.
 
 **Open paths are `/health` and `/ready`, plus the gRPC health service and a
-browser's CORS preflight** — none of them is a caller. The list is `OPEN_PATHS`
-in `src/hop.py` and `PREFLIGHT_HEADERS` beside it; adding to either publishes a
-shape to anyone who can reach the listener. A preflight is open because the hop
-signs no admission for one and the app's own CORS layer answers it with headers
-alone — which means a route that serves `OPTIONS` itself is the one place a
-preflight reaches a handler. A gRPC procedure the server does not serve is
-admitted before it is answered, so an unstamped caller learns nothing about
-which procedures exist. `/health` and `/ready` are out of the OpenAPI schema
+browser's CORS preflight** — none of them is a caller. `OPEN_PATHS` and
+`PREFLIGHT_HEADERS` in `src/hop.py` are the defaults; the entry reads them once
+and the wrap tests every request against its own copy, so editing them changes
+what a NEW process opens and rebinding them later changes nothing. Adding to
+either publishes a shape to anyone who can reach the listener. A preflight is
+open because the hop signs no admission for one and the app's own CORS layer
+answers it with headers alone — and "a browser's preflight" is two header NAMES,
+which any caller can present, so a route that serves `OPTIONS` itself is a
+handler reachable unadmitted. The gRPC health exemption is matched by the
+**identity** of the registered health servicer, not by a prefix on
+`details.method`, which is built from proto names the author declares. A gRPC
+procedure the server does not serve is admitted before it is answered, so an
+unstamped caller learns nothing about which procedures exist — through a
+`stream_stream` handler, because grpc.aio reads a unary request message before
+invoking the behavior and a client-streaming caller that sends nothing would
+hang unadmitted. `/health` and `/ready` are out of the OpenAPI schema
 (`include_in_schema=False`) — `openapi/api.swagger.json` is the service's API,
 what a dependent service generates a client from and what the hop routes, and a
 kubelet's probe is none of that. `/ready` is the declared readiness probe
@@ -78,6 +115,17 @@ kubelet's probe is none of that. `/ready` is the declared readiness probe
 and `/ready` answers 200 only while `Verifier.ready()` holds, so a replica that
 cannot admit a call withdraws from rotation instead of refusing every call sent
 to it. Never gate readiness on `keys_error`.
+
+### A refusal has to be readable by a browser
+
+The wrap is outside the app's CORS layer, so a 401 is produced where that layer
+cannot add headers to it. Without them a browser gets an opaque `TypeError` from
+`fetch` and a front end cannot tell "your stamp expired, re-stamp" from "the
+service is down" — which is a working-software break for every browser-facing
+module, not a hole. `_refuse` therefore emits them itself: the caller's own
+`Origin` echoed, `Access-Control-Allow-Credentials`, `Vary: Origin`. Nothing
+private is published by making the refusal readable; its body is the verifier's
+fixed code and text. Asserted at `factory/code/tests/hop/test_admission.py.tmpl`.
 
 ### A streaming gRPC handler keeps its own shape
 

@@ -17,6 +17,15 @@ defining `HopAdmission`, and `authority-client` in `code/pyproject.toml`. Both
 present is a migrated service; the agent then writes `code/codefly_hop_entry.py`
 and points uvicorn and the image's `CMD` at it.
 
+## What this migration does and does not buy you
+
+It makes codefly install the admission for you: the entry wraps your app, every
+route is verified, and a route you add later is verified without opting in. It
+does **not** make the admission un-removable — `code/src/hop.py` is your file,
+and editing it can stop the verification with nothing detecting that. The agent
+detects a service with no admission at all, which is what this document is for.
+The durable fix is the verifier moving into the pinned authority client.
+
 ## What you are reachable by until you have done this
 
 Every route of the service, by anything that can address the listener. There is
@@ -42,11 +51,22 @@ are — they are the verification point, not a starting point:
 Do **not** add `app.add_middleware(HopAdmission)` to `code/src/main.py`. The wrap
 is `codefly_hop_entry.py`'s, which the agent writes on the next `codefly sync
 service` (or `update`, `build`, or run) — that is the point of the move, and a
-second wrap in your own source would verify each single-use admission twice and
-refuse every call as replayed.
+second wrap in your own source verifies each single-use admission twice and
+refuses every call as replayed. **`Init` refuses to start a service with that
+line**, so this is not a thing to leave in and sort out later.
 
-Then `codefly sync service <name>`. The agent writes the entry and moves the
-readiness probe in `service.codefly.yaml` off `/version` for you.
+Then `codefly sync service <name>`. That one command writes the entry *and*
+moves the readiness probe in `service.codefly.yaml` off `/version` — the two
+belong together, because writing the entry is what makes `/version` admitted. A
+test in this repo asserts the pairing, so the command and this sentence cannot
+drift apart.
+
+Step 3 is not optional and not last: the probe is only moved once your own
+source declares `/ready`. A migration that copies `src/hop.py` and the
+dependency but not the route leaves readiness on `/version` and logs why,
+because moving it onto a path you answer 404 for is the failure this is
+preventing. And it reverses — take `src/hop.py` back out and the next `update`
+or `sync` moves readiness back to `/version`.
 
 ## Readiness: why it has to move
 
@@ -56,13 +76,14 @@ admitted like every other route, and a kubelet carries no admission: it reads
 401, every replica is `NotReady` for ever, and nothing in the rollout says why.
 `/ready` is one of the two paths the admission leaves open.
 
-`Update` rewrites that probe — from `/version` to `/ready`, statuses `200` —
-for a service that carries the stack, and leaves it alone for one that does not,
-because a service with no admission still serves `/version` to a kubelet and
-pointing its probe at a route it does not have would take out exactly the
-replicas this is here to keep in rotation. If you changed the readiness path to
-something of your own, the rewrite does not touch it: point it at a path the
-admission leaves open yourself.
+`Sync` and `Update` move that probe — `/version` to `/ready` for a service that
+carries the stack and serves the open route, `/ready` back to `/version` when
+the stack goes away — and leave it alone otherwise, because pointing a probe at
+a route the service does not answer would take out exactly the replicas this is
+here to keep in rotation. Statuses you declared yourself are kept; only a probe
+that declared none gets `200`. If you changed the readiness path to something of
+your own, nothing touches it: point it at a path the admission leaves open
+yourself.
 
 ## What the composition has to deliver
 
@@ -77,7 +98,10 @@ makes:
 
 The connection needs `CREATE` on its schema the first time any replica of any
 such service starts, for the reservation table, or run `replaypg.MIGRATION` once
-as a composition step.
+as a composition step and the start finds nothing to do. `CREATE TABLE IF NOT
+EXISTS` is not concurrency-safe, so replicas starting together race on it; the
+start retries a few times and then refuses, which a restart resolves once one
+of them has committed.
 
 ## Checking it
 
