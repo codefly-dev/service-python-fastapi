@@ -125,4 +125,3 @@ CMD ["uvicorn", "{{.ServedApp}}", "--host", "127.0.0.1", "--port", "0", "--log-c
 # Default REST port (overridden by codefly at runtime).
 CMD ["uvicorn", "{{.ServedApp}}", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
 {{- end}}
-
