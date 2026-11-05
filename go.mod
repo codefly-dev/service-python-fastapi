@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/codefly-dev/authority/libraries/authority-client/go v0.1.1-0.20261103182220-19ad6b641f9d
 	github.com/codefly-dev/authority/libraries/hop/go v0.1.1-0.20261103182220-19ad6b641f9d
-	github.com/codefly-dev/core v0.19.13
+	github.com/codefly-dev/core v0.19.18
 	github.com/codefly-dev/service-python v0.0.66
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/stretchr/testify v1.12.1

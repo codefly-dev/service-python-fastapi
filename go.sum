@@ -47,8 +47,8 @@ github.com/codefly-dev/authority/libraries/authority-client/go v0.1.1-0.20261103
 github.com/codefly-dev/authority/libraries/authority-client/go v0.1.1-0.20261103182220-19ad6b641f9d/go.mod h1:4hRjiWuJOKzrEk8AS87pbWCbpiEmhEvQBGQaJo5Hmkg=
 github.com/codefly-dev/authority/libraries/hop/go v0.1.1-0.20261103182220-19ad6b641f9d h1:2LvhtadgU95DQPa2tfsDfvK2yc1Y48cWvvqokqaLD1U=
 github.com/codefly-dev/authority/libraries/hop/go v0.1.1-0.20261103182220-19ad6b641f9d/go.mod h1:/SZab4/ll1nAKTucP3h30rpcXo56BHmJWLkvs2ayaMs=
-github.com/codefly-dev/core v0.19.13 h1:PdBd4JZhNSr/IRlm2Xic6R3vsZyPRhhCC2NDmquXh3E=
-github.com/codefly-dev/core v0.19.13/go.mod h1:Q7PHKw8SFb1wNxlTy2EgG11cI9Zmq55TYY1fdsQUhpE=
+github.com/codefly-dev/core v0.19.18 h1:9hzquFfv6NdKQFgU8tqyVW6qJeNInsJIyaVGVMRDqeQ=
+github.com/codefly-dev/core v0.19.18/go.mod h1:Q7PHKw8SFb1wNxlTy2EgG11cI9Zmq55TYY1fdsQUhpE=
 github.com/codefly-dev/gortk v0.2.0 h1:7bOlS5valYz2zil+fZctQNcPCYBcPj86abcw9N8h1hQ=
 github.com/codefly-dev/gortk v0.2.0/go.mod h1:dDWUMFgAP063OCGhTEpV7FFUj9+zTcxxO/nV80VKEwg=
 github.com/codefly-dev/service-python v0.0.66 h1:Y74QvKAYMaOnZcsfRxuD9dpQo3//7Mjo12RYELyrp5o=
