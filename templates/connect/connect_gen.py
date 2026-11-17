@@ -53,6 +53,10 @@ is never cut by the face, however long its handler takes to answer: its deadline
 gRPC server's own policy bound it.
 A JSON request field the service's proto does not know is ignored, as connect-go's codec
 ignores it, so a client built from a newer proto calls a Python service and a Go one alike.
+A request the service's proto refuses is answered ``invalid_argument`` in the caller's
+protocol, in both codecs, and the handler never runs: a body that does not parse, a
+member of the wrong type, or a missing required member (proto2 ``required``, or an
+edition's ``LEGACY_REQUIRED``), which the answer names.
 
 The agent hands the process ``CODEFLY_CONNECT_PORT`` exactly when the service sets
 ``connect-endpoint``, locally and in its deployment. The agent's generated
@@ -78,6 +82,7 @@ from urllib.parse import quote
 import grpc
 import h11
 from google.protobuf import any_pb2, descriptor_pool, json_format, message_factory
+from google.protobuf.message import DecodeError
 
 __all__ = ["ConnectFace", "serve", "start"]
 
@@ -873,17 +878,31 @@ def _method(path):
 class _Codec:
     def __init__(self, name):
         self.name = name
+        self.label = "JSON" if name == "json" else "proto"
 
     def request(self, cls, data: bytes) -> bytes:
-        if self.name == "proto":
-            return data
+        """The request as the proto the gRPC server reads, or the caller's invalid
+        argument: a body that does not parse as ``cls``, or parses without a member
+        ``cls`` requires. Refused here, the service's handler never sees it."""
         try:
-            # Unknown fields are dropped, as connect-go's JSON codec does: a client built
-            # from a newer contract still reaches a service on the older one.
-            message = json_format.Parse(data or b"{}", cls(), ignore_unknown_fields=True)
-            return message.SerializeToString()
-        except (json_format.ParseError, UnicodeDecodeError, ValueError) as exc:
-            raise CallError(grpc.StatusCode.INVALID_ARGUMENT, f"unmarshal JSON: {exc}") from exc
+            if self.name == "proto":
+                message = cls.FromString(data)
+            else:
+                # Unknown fields are dropped, as connect-go's JSON codec does: a client
+                # built from a newer contract still reaches a service on the older one.
+                message = json_format.Parse(data or b"{}", cls(), ignore_unknown_fields=True)
+        except (json_format.ParseError, DecodeError, UnicodeDecodeError, ValueError) as exc:
+            raise CallError(
+                grpc.StatusCode.INVALID_ARGUMENT, f"unmarshal {self.label}: {exc}"
+            ) from exc
+        if not message.IsInitialized():
+            missing = ", ".join(message.FindInitializationErrors())
+            raise CallError(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"unmarshal {self.label}: {cls.DESCRIPTOR.full_name} is missing required "
+                f"fields: {missing}",
+            )
+        return data if self.name == "proto" else message.SerializeToString()
 
     def response(self, cls, data: bytes) -> bytes:
         if self.name == "proto":
