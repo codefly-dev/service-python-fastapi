@@ -744,7 +744,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	// The logging configuration uvicorn is started with (uvicorn_logging.go),
 	// written beside the project so the filter module is importable from the
 	// working directory uvicorn puts on sys.path.
-	if err := writeUvicornLogging(s.Service.SourceLocation); err != nil {
+	if err := writeUvicornLogging(ctx, s.Service.SourceLocation); err != nil {
 		return s.Base.Runtime.StartError(err)
 	}
 	proc, err := s.runnerEnvironment.NewProcess("uv", uvicornArgs(servedApp(s.hopStack), s.port, s.FastAPI.Settings.HotReload)...)

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/codefly-dev/core/shared"
 )
 
 // Health probes are not traffic. A kubelet asks /healthz and /readyz every
@@ -91,7 +95,7 @@ func uvicornLogConfig() map[string]any {
 
 // writeUvicornLogging writes the configuration and the filter module into dir,
 // the directory uvicorn runs from. Both are rewritten whole on every call.
-func writeUvicornLogging(dir string) error {
+func writeUvicornLogging(ctx context.Context, dir string) error {
 	config, err := json.MarshalIndent(uvicornLogConfig(), "", "  ")
 	if err != nil {
 		return fmt.Errorf("render uvicorn logging configuration: %w", err)
@@ -100,7 +104,15 @@ func writeUvicornLogging(dir string) error {
 		uvicornLogConfigFile: append(config, '\n'),
 		uvicornLoggingModule: []byte(uvicornLoggingModuleSource),
 	} {
-		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
+		path := filepath.Join(dir, name)
+		existing, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(existing, content) {
+			continue
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if err := shared.WriteFileAtomic(ctx, path, content, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}

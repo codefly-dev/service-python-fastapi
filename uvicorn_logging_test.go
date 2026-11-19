@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +17,7 @@ import (
 // path and keeps every other request line.
 func TestUvicornLoggingDropsProbesAndNothingElse(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, writeUvicornLogging(dir))
+	require.NoError(t, writeUvicornLogging(t.Context(), dir))
 
 	raw, err := os.ReadFile(filepath.Join(dir, uvicornLogConfigFile))
 	require.NoError(t, err)
@@ -43,9 +44,18 @@ func TestUvicornLoggingDropsProbesAndNothingElse(t *testing.T) {
 		require.False(t, probe.MatchString(path), path)
 	}
 
-	// Rewritten whole on every call: a stale copy never survives an agent upgrade.
+	// Starting another scope must not trigger StatReload in a running service.
+	stamp := time.Unix(1700000000, 0)
+	path := filepath.Join(dir, uvicornLoggingModule)
+	require.NoError(t, os.Chtimes(path, stamp, stamp))
+	require.NoError(t, writeUvicornLogging(t.Context(), dir))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.True(t, info.ModTime().Equal(stamp), "unchanged Python source must keep its modification time")
+
+	// A stale copy is still replaced on upgrade.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, uvicornLoggingModule), []byte("stale"), 0o644))
-	require.NoError(t, writeUvicornLogging(dir))
+	require.NoError(t, writeUvicornLogging(t.Context(), dir))
 	module, err = os.ReadFile(filepath.Join(dir, uvicornLoggingModule))
 	require.NoError(t, err)
 	require.NotEqual(t, "stale", string(module))

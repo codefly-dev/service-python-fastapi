@@ -422,7 +422,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	// assembled from it: the build context is the service directory (or the
 	// assembled copy of it), and the Dockerfile copies them from code/ beside
 	// src (uvicorn_logging.go).
-	if err := writeUvicornLogging(s.SourceLocation); err != nil {
+	if err := writeUvicornLogging(ctx, s.SourceLocation); err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
 	// The ASGI entry the image's CMD serves, written into the project before
