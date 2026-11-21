@@ -128,8 +128,8 @@ type Settings struct {
 var runtimeImage = &resources.DockerImage{
 	Repository: resources.ImageRegistry,
 	Name:       "python",
-	Tag:        "0.0.7",
-	Digest:     "sha256:3b2a8f8d7854809212410db93d178d0fc5ce7b44e80ce334df0328cd6b0d156d",
+	Tag:        "0.0.15",
+	Digest:     "sha256:de2d6dcb55b98fcd53d39d5d6f98f466090167c8a38cc29912b70b704f57e16c",
 }
 
 // uvVersion is the uv the emitted build recipe resolves its lockfile with.
