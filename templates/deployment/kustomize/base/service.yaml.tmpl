@@ -9,8 +9,8 @@ spec:
   ports:
     - protocol: TCP
       name: http-port
-      port: 8080
-      targetPort: 8080
+      port: {{ .Deployment.Parameters.HTTPPort }}
+      targetPort: {{ .Deployment.Parameters.HTTPPort }}
 {{- if .Deployment.Parameters.GRPCEnabled }}
     - protocol: TCP
       name: grpc-port

@@ -73,7 +73,7 @@ func deploymentProbes(endpoint *basev0.Endpoint, native bool) (string, error) {
 }
 
 func kubernetesProbe(endpoint *basev0.Endpoint, probe *basev0.Probe, intent string, native bool) (map[string]any, error) {
-	config := localProbe{Port: 8080, Secured: resources.EndpointSecured(endpoint), Timeout: 1}
+	config := localProbe{Port: httpContainerPort(), Secured: resources.EndpointSecured(endpoint), Timeout: 1}
 	switch predicate := probe.GetPredicate().(type) {
 	case *basev0.Probe_Transport:
 		config.Kind = "transport"

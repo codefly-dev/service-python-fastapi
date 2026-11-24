@@ -123,5 +123,5 @@ COPY --chown=appuser {{.ServicePrefix}}code/{{.HopEntry}} ./
 CMD ["uvicorn", "{{.ServedApp}}", "--host", "127.0.0.1", "--port", "0", "--log-config", "uvicorn-log-config.json"]
 {{- else -}}
 # Default REST port (overridden by codefly at runtime).
-CMD ["uvicorn", "{{.ServedApp}}", "--host", "0.0.0.0", "--port", "8080", "--log-config", "uvicorn-log-config.json"]
+CMD ["uvicorn", "{{.ServedApp}}", "--host", "0.0.0.0", "--port", "{{.HTTPPort}}", "--log-config", "uvicorn-log-config.json"]
 {{- end}}

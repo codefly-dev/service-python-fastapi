@@ -26,7 +26,7 @@ spec:
         - name: {{ .Service.Name.DNSCase }}
           image: {{ .Image.FullName }}
           ports:
-            - containerPort: 8080
+            - containerPort: {{ .Deployment.Parameters.HTTPPort }}
 {{- if .Deployment.Parameters.GRPCEnabled }}
             - name: grpc
               containerPort: {{ .Deployment.Parameters.GRPCPort }}

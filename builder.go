@@ -395,6 +395,15 @@ type DockerTemplating struct {
 	ServedApp string
 }
 
+// httpContainerPort is the port the app's HTTP listener binds in a container:
+// the standard REST port. The image's CMD, the Service, the containerPort and
+// the probes all read it here, so the number is written nowhere in this agent.
+func httpContainerPort() int { return int(standards.Port(standards.REST)) }
+
+// HTTPPort is the port the image's uvicorn binds when the service declares an
+// HTTP endpoint.
+func (DockerTemplating) HTTPPort() int { return httpContainerPort() }
+
 func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
 	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
@@ -662,6 +671,10 @@ type Parameters struct {
 	AutomountServiceAccountToken bool
 }
 
+// HTTPPort is the in-cluster port of the app's HTTP listener: the Service
+// port, its targetPort and the containerPort.
+func (Parameters) HTTPPort() int { return httpContainerPort() }
+
 // The container runs with readOnlyRootFilesystem, so the template reserves one
 // scratch volume and mounts it at the path HOME also points at.
 const (
@@ -702,7 +715,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	defer s.Wool.Catch()
 
 	// The rendered pod is probed on the app's HTTP listener, the container's
-	// port 8080, which a service with no HTTP endpoint does not publish: say so
+	// standard REST port, which a service with no HTTP endpoint does not publish: say so
 	// rather than report the missing endpoint as missing health.
 	listener := s.FastAPI.HTTPEndpoint
 	if listener == nil {

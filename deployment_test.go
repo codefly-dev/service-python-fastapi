@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -338,4 +341,32 @@ func TestRestrictedDeploymentLeavesTheNamespaceToTheEnvironment(t *testing.T) {
 	kustomization, err = os.ReadFile(filepath.Join(local, "base", "kustomization.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(kustomization), "namespace.yaml")
+}
+
+// The HTTP listener's port is the standard REST port in every rendered place:
+// the Service, its targetPort, the containerPort and the image's CMD. None of
+// the templates writes the number, so they cannot disagree with the probes.
+func TestHTTPPortIsTheStandardPortEverywhere(t *testing.T) {
+	want := int(standards.Port(standards.REST))
+	require.Equal(t, want, httpContainerPort())
+
+	for _, name := range []string{
+		"templates/deployment/kustomize/base/service.yaml.tmpl",
+		"templates/deployment/kustomize/base/deployment.yaml.tmpl",
+	} {
+		source, err := fs.ReadFile(deploymentFS, name)
+		require.NoError(t, err)
+		require.NotRegexp(t, `(?m)^\s*(-\s*)?(port|targetPort|containerPort):\s*\d+`, string(source), "%s hardcodes a port", name)
+	}
+	dockerfile, err := fs.ReadFile(builderFS, "templates/builder/Dockerfile.tmpl")
+	require.NoError(t, err)
+	require.NotRegexp(t, `"--port",\s*"[1-9]\d*"`, string(dockerfile), "the Dockerfile template hardcodes a port")
+
+	destination := agenttesting.AssertKustomizeTemplates(t, deploymentFS, deploymentTestParameters(t, Parameters{}))
+	service, err := os.ReadFile(filepath.Join(destination, "base", "service.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(service), fmt.Sprintf("      name: http-port\n      port: %d\n      targetPort: %d\n", want, want))
+	deployment, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(deployment), fmt.Sprintf("            - containerPort: %d\n", want))
 }

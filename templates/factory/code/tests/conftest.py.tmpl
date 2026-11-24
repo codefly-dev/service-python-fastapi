@@ -225,7 +225,9 @@ async def client():
     the agent's ASGI entry, which is what uvicorn serves and where the hop's
     admission is applied. Never src.main:app on its own — that is the
     application without the wrap, which nothing serves."""
+    # The transport is in-process: nothing is dialled, so the base URL is a
+    # reserved name and never an address.
     async with AsyncClient(
-        transport=ASGITransport(app=served), base_url="http://localhost:8080"
+        transport=ASGITransport(app=served), base_url="http://service.invalid"
     ) as ac:
         yield ac

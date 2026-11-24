@@ -14,8 +14,8 @@ from src.admin.models import Version
 async def test_version():
     codefly.init("..")
     endpoint = codefly.endpoint(api="rest")
-    address = endpoint.address if endpoint else "http://localhost:8080"
-    async with AsyncClient(transport=ASGITransport(app=app), base_url=address) as ac:
+    assert endpoint is not None, "codefly resolved no rest endpoint for this service"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=endpoint.address) as ac:
         response = await ac.get("/version")
     assert response.status_code == 200
 
