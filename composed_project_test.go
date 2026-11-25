@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
@@ -59,11 +59,11 @@ func TestContainerEnvironmentCarriesAProjectOutsideTheWorkspace(t *testing.T) {
 	runtime.Environment = shared.Must(resources.LocalEnvironment().Proto())
 	runtime.Service.SourceLocation = source
 
-	endpoint := &basev0.Endpoint{Module: "mod", Service: runtime.Identity.Name, Name: "rest", Api: standards.REST}
+	endpoint := &basev1.Endpoint{Module: "mod", Service: runtime.Identity.Name, Name: "rest", Api: standards.REST}
 	runtime.FastAPI.HTTPEndpoint = endpoint
-	runtime.NetworkMappings = []*basev0.NetworkMapping{{
+	runtime.NetworkMappings = []*basev1.NetworkMapping{{
 		Endpoint: endpoint,
-		Instances: []*basev0.NetworkInstance{{
+		Instances: []*basev1.NetworkInstance{{
 			Access:   resources.NewNativeNetworkAccess(),
 			Hostname: "localhost",
 			Port:     9998,

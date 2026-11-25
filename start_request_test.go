@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/standards"
@@ -174,10 +174,10 @@ func processEnv(proc *fakeProc, key string) []string {
 	return values
 }
 
-func dependencyMapping() *basev0.NetworkMapping {
-	return &basev0.NetworkMapping{
-		Endpoint: &basev0.Endpoint{Module: "mod", Service: "store", Name: "rest", Api: standards.REST},
-		Instances: []*basev0.NetworkInstance{{
+func dependencyMapping() *basev1.NetworkMapping {
+	return &basev1.NetworkMapping{
+		Endpoint: &basev1.Endpoint{Module: "mod", Service: "store", Name: "rest", Api: standards.REST},
+		Instances: []*basev1.NetworkInstance{{
 			Access:   resources.NewNativeNetworkAccess(),
 			Hostname: "localhost",
 			Port:     9876,
@@ -194,13 +194,13 @@ func TestStartHonorsStartRequest(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 
 	dependency := dependencyMapping()
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{
 		Overrides:                   map[string]string{"LOG_LEVEL": "debug"},
 		Fixture:                     "seed",
-		DependenciesNetworkMappings: []*basev0.NetworkMapping{dependency},
+		DependenciesNetworkMappings: []*basev1.NetworkMapping{dependency},
 	})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1)
 	proc := uvicornProcs(env)[0]
 	require.True(t, proc.isStarted())
@@ -220,18 +220,18 @@ func TestStartOverrideBeatsConfiguration(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev0.Configuration{
+	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev1.Configuration{
 		Origin: "mod/store",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name:                "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{{Key: "url", Value: "from-configuration"}},
+			ConfigurationValues: []*basev1.ConfigurationValue{{Key: "url", Value: "from-configuration"}},
 		}},
 	}))
 
 	key := resources.ServiceConfigurationKeyFromUnique("mod/store", "postgres", "url")
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "from-override"}})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{key: "from-override"}})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1)
 
 	require.Equal(t, []string{"from-override"}, processEnv(uvicornProcs(env)[0], key))
@@ -245,13 +245,13 @@ func TestStartHotReloadKeepsProcessOnIdenticalRequest(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	runtime.FastAPI.Settings.HotReload = true
 
-	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
+	req := &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 	launched := len(env.started())
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
 	require.False(t, uvicornProcs(env)[0].isStopped())
@@ -266,13 +266,13 @@ func TestStartHotReloadReplacesProcessOnChangedRequest(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	runtime.FastAPI.Settings.HotReload = true
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 2)
 	require.True(t, uvicornProcs(env)[0].isStopped(), "the process carrying the old environment must be torn down")
 	require.Equal(t, []string{"trace"}, processEnv(uvicornProcs(env)[1], "LOG_LEVEL"))
@@ -285,11 +285,11 @@ func TestStartOverrideBeatsSecret(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev0.Configuration{
+	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev1.Configuration{
 		Origin: "mod/store",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name: "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{
+			ConfigurationValues: []*basev1.ConfigurationValue{
 				{Key: "password", Value: "real-secret", Secret: true},
 				{Key: "token", Value: "untouched-secret", Secret: true},
 			},
@@ -297,7 +297,7 @@ func TestStartOverrideBeatsSecret(t *testing.T) {
 	}))
 
 	key := resources.ServiceSecretConfigurationKeyFromUnique("mod/store", "postgres", "password")
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "stub"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{key: "stub"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
@@ -314,7 +314,7 @@ func TestStartWithoutOverridesLeavesEnvironmentUnchanged(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
@@ -330,11 +330,11 @@ func TestStartWithdrawnFixtureReverts(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "seed"})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Fixture: "seed"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"seed"}, processEnv(uvicornProcs(env)[0], resources.FixturePrefix))
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 2)
 	require.Empty(t, processEnv(uvicornProcs(env)[1], resources.FixturePrefix), "a withdrawn fixture must not survive into the next process")
@@ -348,20 +348,20 @@ func TestStartWithdrawnOverrideRevertsToConfiguration(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev0.Configuration{
+	require.NoError(t, runtime.EnvironmentVariables.AddConfigurations(ctx, &basev1.Configuration{
 		Origin: "mod/store",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name:                "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{{Key: "url", Value: "from-configuration"}},
+			ConfigurationValues: []*basev1.ConfigurationValue{{Key: "url", Value: "from-configuration"}},
 		}},
 	}))
 	key := resources.ServiceConfigurationKeyFromUnique("mod/store", "postgres", "url")
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{key: "from-override"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{key: "from-override"}})
 	require.NoError(t, err)
 	require.Equal(t, []string{"from-override"}, processEnv(uvicornProcs(env)[0], key))
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 2)
 	require.Equal(t, []string{"from-configuration"}, processEnv(uvicornProcs(env)[1], key))
@@ -373,11 +373,11 @@ func TestStartWithdrawnOverrideDisappearsWithoutConfiguration(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Equal(t, []string{"debug"}, processEnv(uvicornProcs(env)[0], "LOG_LEVEL"))
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 2)
 	require.Empty(t, processEnv(uvicornProcs(env)[1], "LOG_LEVEL"))
@@ -391,13 +391,13 @@ func TestStartIgnoresSpecsOnlyChange(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	runtime.FastAPI.Settings.HotReload = true
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{
 		Overrides: map[string]string{"LOG_LEVEL": "debug"},
-		Specs:     &basev0.Specs{Fields: map[string]*basev0.SpecValue{"unread": {}}},
+		Specs:     &basev1.Specs{Fields: map[string]*basev1.SpecValue{"unread": {}}},
 	})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1, "a Specs-only difference must not restart the process")
@@ -412,7 +412,7 @@ func TestStartSerializesConcurrentStarts(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	runtime.FastAPI.Settings.HotReload = true
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
@@ -421,7 +421,7 @@ func TestStartSerializesConcurrentStarts(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, startErr := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
+			_, startErr := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 			require.NoError(t, startErr)
 		}()
 	}
@@ -443,9 +443,9 @@ func TestUnresolvedDependencies(t *testing.T) {
 	unreachable.Endpoint.Service = "cache"
 	unreachable.Instances[0].Access = resources.NewContainerNetworkAccess()
 
-	mappings := []*basev0.NetworkMapping{reachable, unreachable, nil}
+	mappings := []*basev1.NetworkMapping{reachable, unreachable, nil}
 	require.Equal(t, []string{"mod/cache/rest"}, unresolvedDependencies(mappings, resources.NewNativeNetworkAccess()))
-	require.Empty(t, unresolvedDependencies([]*basev0.NetworkMapping{reachable}, resources.NewNativeNetworkAccess()))
+	require.Empty(t, unresolvedDependencies([]*basev1.NetworkMapping{reachable}, resources.NewNativeNetworkAccess()))
 }
 
 // currentRunner reads the live generation the way the runtime's own code does.
@@ -496,9 +496,9 @@ func currentRunner(runtime *Runtime) *runnerHandle {
 
 // startStatus reads the status the orchestrator polls for, which is the only
 // channel a dead runner has to reach `codefly run`.
-func startStatus(t *testing.T, runtime *Runtime) *runtimev0.StartStatus {
+func startStatus(t *testing.T, runtime *Runtime) *runtimev1.StartStatus {
 	t.Helper()
-	info, err := runtime.Base.Runtime.InformationResponse(context.Background(), &runtimev0.InformationRequest{})
+	info, err := runtime.Base.Runtime.InformationResponse(context.Background(), &runtimev1.InformationRequest{})
 	require.NoError(t, err)
 	return info.GetStartStatus()
 }
@@ -521,7 +521,7 @@ func TestUvicornArgsReloadIsConditional(t *testing.T) {
 func TestStartWithoutHotReloadOmitsReloadFlag(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	_, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 	require.Equal(t, "uv", uvicornProcs(env)[0].bin)
@@ -535,14 +535,14 @@ func TestStartWithoutHotReloadIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 	launched := len(env.started())
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1, "an unchanged request must reuse the running process")
 	require.False(t, uvicornProcs(env)[0].isStopped())
 	require.Len(t, env.started(), launched, keepPathSpawnsNothing)
@@ -555,10 +555,10 @@ func TestStartWithoutHotReloadReplacesProcessOnChangedRequest(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
 
 	serviceProcs := uvicornProcs(env)
@@ -575,16 +575,16 @@ func TestStartRestartsDeadProcess(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	runtime.FastAPI.Settings.HotReload = true
 
-	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
+	req := &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
 	uvicornProcs(env)[0].die(errors.New("exit status 1"))
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	serviceProcs := uvicornProcs(env)
 	require.Len(t, serviceProcs, 2, "an unchanged request against a dead process must start a new one")
@@ -601,9 +601,9 @@ func TestRunnerExitRevokesStarted(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, startStatus(t, runtime).GetState())
+	require.Equal(t, runtimev1.StartStatus_STARTED, startStatus(t, runtime).GetState())
 
 	proc := uvicornProcs(env)[0]
 	_, err = proc.output.Write([]byte("ImportError: no module named 'missing'\n"))
@@ -611,7 +611,7 @@ func TestRunnerExitRevokesStarted(t *testing.T) {
 	proc.die(errors.New("exit status 1"))
 
 	require.Eventually(t, func() bool {
-		return startStatus(t, runtime).GetState() == runtimev0.StartStatus_ERROR
+		return startStatus(t, runtime).GetState() == runtimev1.StartStatus_ERROR
 	}, time.Second, 5*time.Millisecond)
 
 	message := startStatus(t, runtime).GetMessage()
@@ -625,13 +625,13 @@ func TestCleanRunnerExitRevokesStarted(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 
 	uvicornProcs(env)[0].die(nil)
 
 	require.Eventually(t, func() bool {
-		return startStatus(t, runtime).GetState() == runtimev0.StartStatus_ERROR
+		return startStatus(t, runtime).GetState() == runtimev1.StartStatus_ERROR
 	}, time.Second, 5*time.Millisecond)
 	require.Contains(t, startStatus(t, runtime).GetMessage(), "exited unexpectedly")
 }
@@ -642,14 +642,14 @@ func TestStopDoesNotRevokeStarted(t *testing.T) {
 	ctx := context.Background()
 	runtime, _ := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 
-	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
+	_, err = runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 
 	require.Never(t, func() bool {
-		return startStatus(t, runtime).GetState() == runtimev0.StartStatus_ERROR
+		return startStatus(t, runtime).GetState() == runtimev1.StartStatus_ERROR
 	}, 200*time.Millisecond, 10*time.Millisecond)
 }
 
@@ -661,17 +661,17 @@ func TestStaleRunnerExitLeavesReplacementStarted(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}})
 	require.NoError(t, err)
 	stale := currentRunner(runtime)
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "trace"}})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 2)
 
 	runtime.reportRunnerExit(stale, errors.New("exit status 1"))
 
-	require.Equal(t, runtimev0.StartStatus_STARTED, startStatus(t, runtime).GetState())
+	require.Equal(t, runtimev1.StartStatus_STARTED, startStatus(t, runtime).GetState())
 	require.NotNil(t, currentRunner(runtime), "the replacement must still own the service")
 }
 
@@ -687,7 +687,7 @@ func TestConcurrentStartStopAndExits(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, startErr := runtime.Start(ctx, &runtimev0.StartRequest{
+			_, startErr := runtime.Start(ctx, &runtimev1.StartRequest{
 				Overrides: map[string]string{"LOG_LEVEL": fmt.Sprintf("level-%d", i%3)},
 			})
 			require.NoError(t, startErr)
@@ -703,12 +703,12 @@ func TestConcurrentStartStopAndExits(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, stopErr := runtime.Stop(ctx, &runtimev0.StopRequest{})
+		_, stopErr := runtime.Stop(ctx, &runtimev1.StopRequest{})
 		require.NoError(t, stopErr)
 	}()
 	wg.Wait()
 
-	_, err := runtime.Stop(ctx, &runtimev0.StopRequest{})
+	_, err := runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 	require.Nil(t, currentRunner(runtime))
 }
@@ -746,17 +746,17 @@ func TestStartRelaunchesWhenInitRepublishesThePort(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 
 	runtime.port = 9000
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 1)
 	require.Contains(t, uvicornProcs(env)[0].args, "9000")
 
 	// What a re-Init resolving a different network mapping publishes.
 	runtime.port = 9100
-	resp, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	serviceProcs := uvicornProcs(env)
 	require.Len(t, serviceProcs, 2, "the process on the superseded port must be replaced")
@@ -772,7 +772,7 @@ func TestStartDoesNotRefoldAnUnchangedRequest(t *testing.T) {
 	ctx := context.Background()
 	runtime, env := startTestRuntime(t)
 
-	req := &runtimev0.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
+	req := &runtimev1.StartRequest{Overrides: map[string]string{"LOG_LEVEL": "debug"}}
 	runtime.port = 9000
 	_, err := runtime.Start(ctx, req)
 	require.NoError(t, err)
@@ -798,9 +798,9 @@ func TestStartRefusesAnAbandonedRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Empty(t, env.started(), "no process may be launched for an abandoned request")
 	require.Nil(t, currentRunner(runtime))
 }

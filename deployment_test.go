@@ -11,8 +11,8 @@ import (
 
 	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
@@ -219,7 +219,7 @@ func TestDeploymentAutomountServiceAccountTokenRejectsUndeclaredProjection(t *te
 	require.NoError(t, os.WriteFile(path, []byte(projected), 0o600))
 
 	validation := services.ValidateKubernetesManifestTree(t.Context(), destination, "test", "codefly-test",
-		builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
+		builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
 
 	require.Contains(t, validation.GetViolations(),
 		"Deployment/example-service must set automountServiceAccountToken: false, or declare codefly.dev/api-server-access: required")
@@ -234,7 +234,7 @@ func TestDeploymentAutomountServiceAccountTokenRendersDeclaredProjection(t *test
 	require.Equal(t, services.APIServerAccessRequired, pod.Metadata.Annotations[services.AnnotationAPIServerAccess])
 
 	validation := services.ValidateKubernetesManifestTree(t.Context(), destination, "test", "codefly-test",
-		builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
+		builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1, false, "", "")
 	require.Empty(t, validation.GetViolations())
 }
 
@@ -294,7 +294,7 @@ func TestPreparePodOverlayAcceptsNoOverlay(t *testing.T) {
 
 // renderProfile renders the deployment templates for one output profile through
 // the same core entry point Deploy uses.
-func renderProfile(t *testing.T, profile builderv0.KubernetesOutputProfile) string {
+func renderProfile(t *testing.T, profile builderv1.KubernetesOutputProfile) string {
 	t.Helper()
 	ctx := context.Background()
 	identity := &resources.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "example-service", Version: "1.2.3"}
@@ -317,12 +317,12 @@ func renderProfile(t *testing.T, profile builderv0.KubernetesOutputProfile) stri
 	builder := &services.BuilderWrapper{Base: base}
 	base.Builder = builder
 	destination := t.TempDir()
-	deployment := &builderv0.KubernetesDeployment{Namespace: "codefly-test", Destination: destination, Profile: profile}
+	deployment := &builderv1.KubernetesDeployment{Namespace: "codefly-test", Destination: destination, Profile: profile}
 	params := services.DeploymentParameters{
 		ConfigMap:  services.EnvironmentMap{"CODEFLY_TEST_VALUE": "value"},
 		Parameters: deploymentTestParameters(t, Parameters{}),
 	}
-	require.NoError(t, builder.KustomizeDeploy(ctx, &basev0.Environment{Name: "test"}, deployment, deploymentFS, params))
+	require.NoError(t, builder.KustomizeDeploy(ctx, &basev1.Environment{Name: "test"}, deployment, deploymentFS, params))
 	return destination
 }
 
@@ -331,13 +331,13 @@ func renderProfile(t *testing.T, profile builderv0.KubernetesOutputProfile) stri
 // belongs to the environment that owns it, as in the go-grpc agent; only the
 // ephemeral local apply creates one.
 func TestRestrictedDeploymentLeavesTheNamespaceToTheEnvironment(t *testing.T) {
-	restricted := renderProfile(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
+	restricted := renderProfile(t, builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
 	kustomization, err := os.ReadFile(filepath.Join(restricted, "base", "kustomization.yaml"))
 	require.NoError(t, err)
 	require.NotContains(t, string(kustomization), "namespace.yaml")
 	require.Contains(t, string(kustomization), "deployment.yaml")
 
-	local := renderProfile(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
+	local := renderProfile(t, builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
 	kustomization, err = os.ReadFile(filepath.Join(local, "base", "kustomization.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(kustomization), "namespace.yaml")

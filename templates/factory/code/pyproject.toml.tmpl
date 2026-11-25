@@ -12,7 +12,7 @@ dependencies = [
     # serves is admitted through codefly_hop.Verifier (src/hop.py), and no
     # dependency carrying a verifier is ever resolved by name from a public
     # index. Move the commit deliberately, never with a range.
-    "authority-client @ git+https://github.com/codefly-dev/authority@19ad6b641f9dafda1294ee277f6f6c7c1dd2db51#subdirectory=libraries/authority-client/python",
+    "authority-client @ git+https://github.com/codefly-dev/authority@75e89768397fe1d0efee026a3d37c20633e1d350#subdirectory=libraries/authority-client/python",
     # The driver codefly_hop.replaypg reserves each single-use admission with,
     # in the Postgres hop/replay-connection names. Required wherever the run is
     # not the one named local, which reserves in the process instead.

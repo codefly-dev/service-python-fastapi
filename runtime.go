@@ -18,8 +18,8 @@ import (
 	"github.com/codefly-dev/core/agents/helpers/code"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
@@ -201,7 +201,7 @@ func NewRuntime(svc *Service) *Runtime {
 	}
 }
 
-func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
+func (s *Runtime) Load(ctx context.Context, req *runtimev1.LoadRequest) (*runtimev1.LoadResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -454,14 +454,14 @@ func (s *Runtime) runnerEnv(ctx context.Context) (runners.RunnerEnvironment, str
 // SetRuntimeContext publishes the runtime context under runnerMu. Init calls
 // it while Destroy reads the same field through IsContainerRuntime and Start
 // reads it through applyStartInputs, both holding the lock.
-func (s *Runtime) SetRuntimeContext(_ context.Context, runtimeContext *basev0.RuntimeContext) error {
+func (s *Runtime) SetRuntimeContext(_ context.Context, runtimeContext *basev1.RuntimeContext) error {
 	s.runnerMu.Lock()
 	defer s.runnerMu.Unlock()
 	s.Base.Runtime.RuntimeContext = pythonhelpers.SetPythonRuntimeContext(runtimeContext)
 	return nil
 }
 
-func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
+func (s *Runtime) Init(ctx context.Context, req *runtimev1.InitRequest) (*runtimev1.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -647,7 +647,7 @@ func (s *Runtime) initOpenAPI(ctx context.Context, env runners.RunnerEnvironment
 	return nil
 }
 
-func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
+func (s *Runtime) Start(ctx context.Context, req *runtimev1.StartRequest) (*runtimev1.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -851,7 +851,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 // the one now running. The failure paths deliberately do not go through it —
 // StartError discards any report, so a build named for a process that never
 // served is never stamped on the attempt that does.
-func (s *Runtime) started() (*runtimev0.StartResponse, error) {
+func (s *Runtime) started() (*runtimev1.StartResponse, error) {
 	s.Base.Runtime.ReportStartedArtifact(s.startedArtifact())
 	return s.Base.Runtime.StartResponse()
 }
@@ -1187,7 +1187,7 @@ func (w *tailWriter) Tail() string {
 // req.Specs carries agent-specific runtime knobs and fastapi defines none, so
 // it is deliberately absent — a request differing only there produces an
 // identical process and must not cost a restart.
-func startInputs(req *runtimev0.StartRequest) string {
+func startInputs(req *runtimev1.StartRequest) string {
 	lines := []string{fmt.Sprintf("fixture %s", req.GetFixture())}
 	for _, key := range slices.Sorted(maps.Keys(req.GetOverrides())) {
 		lines = append(lines, fmt.Sprintf("override %s=%s", key, req.GetOverrides()[key]))
@@ -1222,7 +1222,7 @@ func launchInputs(requestInputs string, port uint16, grpcPort uint16, connectPor
 // must only invoke it when the inputs actually changed: the manager appends
 // overrides and endpoints without ever removing any, so re-folding an unchanged
 // request would grow those slices on every restart.
-func (s *Runtime) applyStartInputs(ctx context.Context, req *runtimev0.StartRequest) error {
+func (s *Runtime) applyStartInputs(ctx context.Context, req *runtimev1.StartRequest) error {
 	overrides := req.GetOverrides()
 	s.EnvironmentVariables.AddOverrides(overrides)
 	if s.appliedOverrides == nil {
@@ -1252,7 +1252,7 @@ func (s *Runtime) applyStartInputs(ctx context.Context, req *runtimev0.StartRequ
 // reachable from networkAccess, named module/service/endpoint. It mirrors the
 // filter AddEndpoints applies, which reports nothing when a mapping contributes
 // no address.
-func unresolvedDependencies(mappings []*basev0.NetworkMapping, networkAccess *basev0.NetworkAccess) []string {
+func unresolvedDependencies(mappings []*basev1.NetworkMapping, networkAccess *basev1.NetworkAccess) []string {
 	var unresolved []string
 	for _, mapping := range mappings {
 		if mapping == nil {
@@ -1277,7 +1277,7 @@ func unresolvedDependencies(mappings []*basev0.NetworkMapping, networkAccess *ba
 // processEnvironment returns what the service process runs with. All() already
 // carries the secret configuration values alongside the plain ones, so this is
 // the complete set and the override resolution below covers secrets too.
-func (s *Runtime) processEnvironment(req *runtimev0.StartRequest) ([]*resources.EnvironmentVariable, error) {
+func (s *Runtime) processEnvironment(req *runtimev1.StartRequest) ([]*resources.EnvironmentVariable, error) {
 	// Init remains authoritative. Without an Init selection, the legacy
 	// Start-owned selector can be withdrawn instead of latching into a new process.
 	fixture := s.initFixture
@@ -1380,7 +1380,7 @@ func (s *Runtime) endExecution(ctx context.Context) (bool, error) {
 
 // Stop releases the execution resources and keeps everything on disk, so a
 // later Init and Start bring the same service back.
-func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
+func (s *Runtime) Stop(ctx context.Context, req *runtimev1.StopRequest) (*runtimev1.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -1399,7 +1399,7 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 // directly, with no Stop in between, so ending execution is Destroy's own job
 // rather than a precondition on its callers. Safe before Init, after a failed
 // Init, after Stop, and repeated.
-func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
+func (s *Runtime) Destroy(ctx context.Context, req *runtimev1.DestroyRequest) (*runtimev1.DestroyResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 

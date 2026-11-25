@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/stretchr/testify/require"
 )
@@ -86,7 +86,7 @@ func uvicornRuntime(t *testing.T, source string, hotReload bool) *Runtime {
 	runtime.port = freePort(t)
 
 	t.Cleanup(func() {
-		_, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{})
+		_, _ = runtime.Stop(context.Background(), &runtimev1.StopRequest{})
 	})
 	return runtime
 }
@@ -112,9 +112,9 @@ func serves(port uint16) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func runtimeStartState(t *testing.T, runtime *Runtime) *runtimev0.StartStatus {
+func runtimeStartState(t *testing.T, runtime *Runtime) *runtimev1.StartStatus {
 	t.Helper()
-	info, err := runtime.Base.Runtime.InformationResponse(context.Background(), &runtimev0.InformationRequest{})
+	info, err := runtime.Base.Runtime.InformationResponse(context.Background(), &runtimev1.InformationRequest{})
 	require.NoError(t, err)
 	return info.GetStartStatus()
 }
@@ -128,24 +128,24 @@ func TestUvicornDeathRevokesStartedAndSourceFixRecovers(t *testing.T) {
 	source := uvProject(t, brokenApp)
 	runtime := uvicornRuntime(t, source, false)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	require.Eventually(t, func() bool {
-		return runtimeStartState(t, runtime).GetState() == runtimev0.StartStatus_ERROR
+		return runtimeStartState(t, runtime).GetState() == runtimev1.StartStatus_ERROR
 	}, 30*time.Second, 100*time.Millisecond, "a uvicorn that died on an import error must not stay STARTED")
 	require.Contains(t, runtimeStartState(t, runtime).GetMessage(), "codefly-lifecycle-boom",
 		"the diagnostic must name what killed the process")
 
 	writeApp(t, source, servingApp)
-	resp, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	require.Eventually(t, func() bool { return serves(runtime.port) }, 30*time.Second, 200*time.Millisecond,
 		"fixing the source must let a later start serve")
-	require.Equal(t, runtimev0.StartStatus_STARTED, runtimeStartState(t, runtime).GetState())
+	require.Equal(t, runtimev1.StartStatus_STARTED, runtimeStartState(t, runtime).GetState())
 }
 
 // TestStartReturnsOnceUvicornServes is the contract dependents are started on:
@@ -158,9 +158,9 @@ func TestStartReturnsOnceUvicornServes(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.True(t, serves(runtime.port), "STARTED was returned before uvicorn answered")
 }
 
@@ -172,9 +172,9 @@ func TestStartFailsWhenUvicornDiesBeforeServing(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "codefly-lifecycle-boom")
 }
 
@@ -187,18 +187,18 @@ func TestRepeatedStartWithoutHotReloadOwnsOneProcess(t *testing.T) {
 	source := uvProject(t, servingApp)
 	runtime := uvicornRuntime(t, source, false)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return serves(runtime.port) }, 30*time.Second, 200*time.Millisecond)
 
 	first := currentRunner(runtime)
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Same(t, first, currentRunner(runtime), "an unchanged request must not launch a second uvicorn")
 	require.True(t, serves(runtime.port))
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "seed"})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Fixture: "seed"})
 	require.NoError(t, err)
 	require.NotSame(t, first, currentRunner(runtime), "changed inputs need a process carrying them")
 
@@ -220,11 +220,11 @@ func TestHotReloadParentOutlivesBrokenApp(t *testing.T) {
 	source := uvProject(t, brokenApp)
 	runtime := uvicornRuntime(t, source, true)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 
 	require.Never(t, func() bool {
-		return runtimeStartState(t, runtime).GetState() == runtimev0.StartStatus_ERROR
+		return runtimeStartState(t, runtime).GetState() == runtimev1.StartStatus_ERROR
 	}, 5*time.Second, 250*time.Millisecond, "the reload supervisor is alive, so the process did not exit")
 	require.False(t, serves(runtime.port), "an app that failed to import serves nothing, whatever the process status says")
 
@@ -257,10 +257,10 @@ async def app(scope, receive, send):
 			return err == nil && string(body) == want
 		}, 10*time.Second, 100*time.Millisecond)
 	}
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "seed"})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{Fixture: "seed"})
 	require.NoError(t, err)
 	assertBody("seed")
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	assertBody("none")
 	// uvicornRuntime establishes the state after Init. Preserve that invocation
@@ -268,13 +268,13 @@ async def app(scope, receive, send):
 	runtime.runnerMu.Lock()
 	runtime.initFixture = "installed"
 	runtime.runnerMu.Unlock()
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "other"})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Fixture: "other"})
 	require.NoError(t, err)
 	assertBody("installed")
 	runtime.runnerMu.Lock()
 	runtime.initFixture = "replacement"
 	runtime.runnerMu.Unlock()
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{Fixture: "other"})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{Fixture: "other"})
 	require.NoError(t, err)
 	assertBody("replacement")
 }

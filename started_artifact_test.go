@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/contract"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/stretchr/testify/require"
 )
@@ -79,7 +79,7 @@ func servedIdentity(t *testing.T, port uint16) ranAs {
 // on: every path is absolute, and every path is a regular file it can digest
 // (cli#993). A report that breaks either fails the native delivery of a service
 // that is up, so it is asserted here rather than discovered there.
-func requireDeliverable(t *testing.T, artifact *runtimev0.StartedArtifact) {
+func requireDeliverable(t *testing.T, artifact *runtimev1.StartedArtifact) {
 	t.Helper()
 	require.NotEmpty(t, artifact.GetExecutable(), "the artifact names no program")
 	for _, path := range append([]string{artifact.GetExecutable()}, artifact.GetSources()...) {
@@ -119,9 +119,9 @@ func TestNativeStartNamesTheInterpreterAndSourcesThatActuallyRan(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	artifact := resp.GetStatus().GetStartedArtifact()
 	require.NotNil(t, artifact, "a native start must name the build it ran, or a native run refuses the service")
@@ -153,16 +153,16 @@ func TestAnUnchangedRestartNamesItsBuildAgain(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	first, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	first, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.NotNil(t, first.GetStatus().GetStartedArtifact())
 	running := currentRunner(runtime)
 
-	second, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	second, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Same(t, running, currentRunner(runtime),
 		"this test only covers the restart that keeps its process; it launched a new one")
-	require.Equal(t, runtimev0.StartStatus_STARTED, second.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_STARTED, second.GetStatus().GetState())
 
 	repeated := second.GetStatus().GetStartedArtifact()
 	require.NotNil(t, repeated, "a restart that keeps its process must name that process's build again")
@@ -179,17 +179,17 @@ func TestARestartThatReplacesItsProcessNamesTheNewBuild(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	running := currentRunner(runtime)
 
 	// A different environment is a different process: --reload re-executes the
 	// app inside the process it was launched in, which keeps that environment.
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{
 		Overrides: map[string]string{"LOG_LEVEL": "trace"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.NotSame(t, running, currentRunner(runtime), "a changed request must launch a new process")
 	require.NotNil(t, resp.GetStatus().GetStartedArtifact(), "the replacement process must be named too")
 	requireDeliverable(t, resp.GetStatus().GetStartedArtifact())
@@ -204,17 +204,17 @@ func TestAFailedStartNamesNoBuild(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.serveAddress = fmt.Sprintf("127.0.0.1:%d", runtime.port)
 
-	resp, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Nil(t, resp.GetStatus().GetStartedArtifact(),
 		"a start that failed must name no build: the next attempt's report is the only one that describes a running process")
 
 	// And the start that does serve names its own.
 	writeApp(t, source, servingApp)
-	resp, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	resp, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.NotNil(t, resp.GetStatus().GetStartedArtifact())
 }
 
@@ -251,9 +251,9 @@ func TestAFailedInterpreterProbeStillStarts(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	// A fake environment's process produces no output, so the probe finds no
 	// answer in it — the shape of a uv that cannot be asked.
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Nil(t, resp.GetStatus().GetStartedArtifact())
 	require.Empty(t, runtime.interpreter)
 	require.NotEmpty(t, uvicornProcs(env), "the service must still have been launched")
@@ -270,7 +270,7 @@ func TestTheProbeRunsWithTheEnvironmentTheAppIsLaunchedWith(t *testing.T) {
 	runtime, env := startTestRuntime(t)
 	const key = "UV_PROJECT_ENVIRONMENT"
 
-	_, err := runtime.Start(context.Background(), &runtimev0.StartRequest{
+	_, err := runtime.Start(context.Background(), &runtimev1.StartRequest{
 		Overrides: map[string]string{key: "/tmp/codefly-probe-venv"},
 	})
 	require.NoError(t, err)
@@ -591,7 +591,7 @@ func treeState(t *testing.T, root string) map[string]string {
 // that stopped reporting would have to stop advertising, so the two are held
 // together here.
 func TestAdvertisementAdoptsRuntimeStartedArtifact(t *testing.T) {
-	info, err := NewService().GetAgentInformation(context.Background(), &agentv0.AgentInformationRequest{})
+	info, err := NewService().GetAgentInformation(context.Background(), &agentv1.AgentInformationRequest{})
 	require.NoError(t, err)
 	require.Contains(t, info.GetContract().GetCapabilities(), contract.RuntimeStartedArtifact)
 	require.NoError(t, contract.Check(info.GetContract(), contract.RuntimeStartedArtifact))

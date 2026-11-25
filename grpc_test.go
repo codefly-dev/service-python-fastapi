@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
@@ -40,13 +40,13 @@ grpc-server:
 	require.False(t, absent.GRPCServer.Enabled)
 }
 
-func confirmAnswer(value bool) *agentv0.Answer {
-	return &agentv0.Answer{Value: &agentv0.Answer_Confirm{Confirm: &agentv0.ConfirmAnswer{Confirmed: value}}}
+func confirmAnswer(value bool) *agentv1.Answer {
+	return &agentv1.Answer{Value: &agentv1.Answer_Confirm{Confirm: &agentv1.ConfirmAnswer{Confirmed: value}}}
 }
 
 // createServiceForTest drives Load + Create in a temp workspace, mirroring the
 // setup in main_test but stopping before Runtime so it needs no docker/network.
-func createServiceForTest(t *testing.T, answers map[string]*agentv0.Answer) (*Builder, string) {
+func createServiceForTest(t *testing.T, answers map[string]*agentv1.Answer) (*Builder, string) {
 	t.Helper()
 	ctx := context.Background()
 	tmpDir, err := os.MkdirTemp("testdata", "grpc")
@@ -58,7 +58,7 @@ func createServiceForTest(t *testing.T, answers map[string]*agentv0.Answer) (*Bu
 	service := resources.Service{Name: serviceName, Version: "0.0.0"}
 	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, fmt.Sprintf("mod/%s", service.Name))))
 
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
 		Module:              "mod",
@@ -71,13 +71,13 @@ func createServiceForTest(t *testing.T, answers map[string]*agentv0.Answer) (*Bu
 	builder := NewBuilder(svc)
 
 	communicate := answers != nil
-	_, err = builder.Load(ctx, &builderv0.LoadRequest{Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: communicate}})
+	_, err = builder.Load(ctx, &builderv1.LoadRequest{Identity: identity, CreationMode: &builderv1.CreationMode{Communicate: communicate}})
 	require.NoError(t, err)
 	if communicate {
 		builder.answers = answers
 	}
 
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	_, err = builder.Create(ctx, &builderv1.CreateRequest{})
 	require.NoError(t, err)
 	return builder, path.Join(tmpDir, fmt.Sprintf("mod/%s", service.Name))
 }
@@ -110,7 +110,7 @@ func TestCreateRESTOnlyByDefault(t *testing.T) {
 // server/servicer seam, the dependencies and boot code, and advertises a
 // second gRPC endpoint alongside REST.
 func TestCreateWithGRPCServer(t *testing.T) {
-	builder, root := createServiceForTest(t, map[string]*agentv0.Answer{
+	builder, root := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),
@@ -167,7 +167,7 @@ func assertMainImportsGRPCLazily(t *testing.T, mainPath string) {
 // else, the reloaded endpoint would silently carry zero RPCs and dependent
 // services could not generate clients.
 func TestGRPCEndpointReloadsContract(t *testing.T) {
-	builder, _ := createServiceForTest(t, map[string]*agentv0.Answer{
+	builder, _ := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),

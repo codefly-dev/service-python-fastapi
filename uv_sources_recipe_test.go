@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,18 +73,18 @@ func escapingSourceBuilder(t *testing.T) (*Builder, bool) {
 
 // emitRecipe runs Build into a fresh directory and returns the plan and that
 // directory.
-func emitRecipe(t *testing.T, builder *Builder, outputDir string) *builderv0.DockerBuildPlan {
+func emitRecipe(t *testing.T, builder *Builder, outputDir string) *builderv1.DockerBuildPlan {
 	t.Helper()
 	resp, err := builder.Build(t.Context(), recipeBuildRequest(outputDir))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	plan := resp.GetResult().GetDockerBuildPlan()
 	require.NotNil(t, plan)
 	return plan
 }
 
 // dockerfileOf reads the Dockerfile a plan's single recipe names.
-func dockerfileOf(t *testing.T, outputDir string, plan *builderv0.DockerBuildPlan) string {
+func dockerfileOf(t *testing.T, outputDir string, plan *builderv1.DockerBuildPlan) string {
 	t.Helper()
 	require.Len(t, plan.GetRecipes(), 1)
 	content, err := os.ReadFile(filepath.Join(outputDir, plan.GetRecipes()[0].GetDockerfile()))
@@ -109,7 +109,7 @@ func TestBuildRecipeCarriesEscapingUVPathSource(t *testing.T) {
 
 	// The whole destination is this build's output, so the plan claims all of
 	// it and the CLI roots the docker context there instead of at the service.
-	require.Equal(t, builderv0.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope())
+	require.Equal(t, builderv1.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope())
 	require.NoError(t, services.VerifyDockerBuildPlan(outputDir, plan))
 
 	service, err := filepath.Rel(repositoryOf(t, builder.Location), evalSymlinks(t, builder.Location))
@@ -167,7 +167,7 @@ func TestBuildRecipeWithoutEscapingPathSourceIsUnchanged(t *testing.T) {
 	outputDir := t.TempDir()
 	plan := emitRecipe(t, builder, outputDir)
 
-	require.Equal(t, builderv0.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_EMITTED, plan.GetScope())
+	require.Equal(t, builderv1.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_EMITTED, plan.GetScope())
 	require.NoDirExists(t, filepath.Join(outputDir, "context"))
 
 	dockerfile := dockerfileOf(t, outputDir, plan)
@@ -189,7 +189,7 @@ func TestBuildRecipeCarryIsIdempotentInAReusedDirectory(t *testing.T) {
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		plan := emitRecipe(t, builder, outputDir)
-		require.Equal(t, builderv0.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope(),
+		require.Equal(t, builderv1.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope(),
 			"emission %d", attempt)
 		require.NoError(t, services.VerifyDockerBuildPlan(outputDir, plan), "emission %d", attempt)
 		if attempt == 1 {
@@ -211,7 +211,7 @@ func TestBuildRecipeRefusesPathSourceOutsideRepository(t *testing.T) {
 
 	resp, err := builder.Build(t.Context(), recipeBuildRequest(t.TempDir()))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, builderv1.BuildStatus_ERROR, resp.GetState().GetState())
 	require.Contains(t, resp.GetState().GetMessage(), "[tool.uv.sources] example-lib")
 	require.Contains(t, resp.GetState().GetMessage(), "outside the repository")
 }
@@ -225,7 +225,7 @@ func TestBuildRecipeReportsAMissingPathSource(t *testing.T) {
 
 	resp, err := builder.Build(t.Context(), recipeBuildRequest(t.TempDir()))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, builderv1.BuildStatus_ERROR, resp.GetState().GetState())
 	require.Contains(t, resp.GetState().GetMessage(), "does not exist")
 }
 
@@ -277,7 +277,7 @@ func TestAssembledContextBuildsTheImage(t *testing.T) {
 	require.True(t, locked)
 	outputDir := t.TempDir()
 	plan := emitRecipe(t, builder, outputDir)
-	require.Equal(t, builderv0.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope())
+	require.Equal(t, builderv1.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_TREE, plan.GetScope())
 
 	tag := fmt.Sprintf("codefly-fastapi-uv-context-test:%d", time.Now().UnixMilli())
 	// The context root a TREE plan declares is the assembled output directory,

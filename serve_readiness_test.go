@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,9 +49,9 @@ func TestStartedMeansTheEndpointAnswers(t *testing.T) {
 	}()
 
 	began := time.Now()
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	select {
 	case <-served:
 	default:
@@ -74,9 +74,9 @@ func TestStartAcceptsAnyHTTPAnswer(t *testing.T) {
 	// The carrier may hold host:port without a scheme.
 	runtime.serveAddress = strings.TrimPrefix(server.URL, "http://")
 
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 }
 
 // TestStartFailsWhenTheAppExitsBeforeServing: a process that dies before its
@@ -95,9 +95,9 @@ func TestStartFailsWhenTheAppExitsBeforeServing(t *testing.T) {
 		proc.die(errors.New("exit status 1"))
 	}()
 
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "exited before its HTTP endpoint")
 	require.Contains(t, resp.GetStatus().GetMessage(), "ModuleNotFoundError")
 	require.Nil(t, currentRunner(runtime), "a process that never served must not stay the service's runner")
@@ -110,9 +110,9 @@ func TestStartFailsWhenTheEndpointNeverAnswers(t *testing.T) {
 	runtime.serveAddress = "http://" + closedAddress(t)
 	runtime.serveTimeout = 600 * time.Millisecond
 
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "did not answer within")
 	require.Len(t, uvicornProcs(env), 1)
 	require.True(t, uvicornProcs(env)[0].isStopped(), "the process that never served must be stopped")
@@ -120,9 +120,9 @@ func TestStartFailsWhenTheEndpointNeverAnswers(t *testing.T) {
 
 	// The next Start is a fresh attempt, not an answer from the failed one.
 	runtime.serveAddress = ""
-	resp, err = runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err = runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Len(t, uvicornProcs(env), 2)
 }
 
@@ -137,9 +137,9 @@ func TestStartRefusesAConnectFaceNobodyServes(t *testing.T) {
 	runtime.serveAddress = server.URL
 	runtime.connectAddress = closedAddress(t)
 
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "connect-endpoint is on but nothing serves the Connect face")
 	require.Contains(t, resp.GetStatus().GetMessage(), "connect_gen.start")
 	require.True(t, env.started()[0].isStopped(), "the app that does not serve its face must be stopped")
@@ -159,7 +159,7 @@ func TestStartWaitsForTheConnectFace(t *testing.T) {
 	runtime.serveAddress = server.URL
 	runtime.connectAddress = strings.TrimPrefix(face.URL, "http://")
 
-	resp, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	resp, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 }

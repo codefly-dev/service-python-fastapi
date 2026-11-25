@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/codefly-dev/core/agents/services"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -72,7 +72,7 @@ func uvLockPath(serviceDir, sourceDir string, membership *uvWorkspaceMembership)
 // insteadOf rewrites by prefix and would send that source to this mirror. A
 // source whose commit is missing or not a full object id makes the lock
 // malformed.
-func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload, unmirrored []unmirroredSource, err error) {
+func lockedGitSources(lockPath string) (downloads []*builderv1.GitSourceDownload, unmirrored []unmirroredSource, err error) {
 	content, err := os.ReadFile(lockPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil
@@ -145,7 +145,7 @@ func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload
 			continue
 		}
 		seen[key] = struct{}{}
-		downloads = append(downloads, &builderv0.GitSourceDownload{Repository: candidate.repository, Commit: candidate.commit, MirrorContext: uvSourcesContext})
+		downloads = append(downloads, &builderv1.GitSourceDownload{Repository: candidate.repository, Commit: candidate.commit, MirrorContext: uvSourcesContext})
 	}
 	sort.Slice(downloads, func(i, j int) bool {
 		if downloads[i].GetRepository() != downloads[j].GetRepository() {
@@ -158,7 +158,7 @@ func lockedGitSources(lockPath string) (downloads []*builderv0.GitSourceDownload
 
 // uvGitMirrors is each declared repository once, in declaration order, with
 // the mirror the caller fetches it into.
-func uvGitMirrors(downloads []*builderv0.GitSourceDownload) []uvGitMirror {
+func uvGitMirrors(downloads []*builderv1.GitSourceDownload) []uvGitMirror {
 	var mirrors []uvGitMirror
 	for _, download := range downloads {
 		repository := download.GetRepository()

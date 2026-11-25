@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/stretchr/testify/require"
@@ -36,7 +36,7 @@ func createdBuilder(t *testing.T) (*Builder, string) {
 	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, fmt.Sprintf("mod/%s", service.Name))))
 	service.WithModule("mod")
 
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
 		Module:              "mod",
@@ -46,19 +46,19 @@ func createdBuilder(t *testing.T) (*Builder, string) {
 	}
 
 	builder := NewBuilder(NewService())
-	_, err = builder.Load(ctx, &builderv0.LoadRequest{Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: false}})
+	_, err = builder.Load(ctx, &builderv1.LoadRequest{Identity: identity, CreationMode: &builderv1.CreationMode{Communicate: false}})
 	require.NoError(t, err)
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	_, err = builder.Create(ctx, &builderv1.CreateRequest{})
 	require.NoError(t, err)
 
 	return builder, builder.Local("builder")
 }
 
-func recipeBuildRequest(outputDir string) *builderv0.BuildRequest {
-	return &builderv0.BuildRequest{
-		BuildContext: &builderv0.BuildContext{
-			Kind: &builderv0.BuildContext_DockerBuildContext{
-				DockerBuildContext: &builderv0.DockerBuildContext{DockerRepository: "example.com/test"},
+func recipeBuildRequest(outputDir string) *builderv1.BuildRequest {
+	return &builderv1.BuildRequest{
+		BuildContext: &builderv1.BuildContext{
+			Kind: &builderv1.BuildContext_DockerBuildContext{
+				DockerBuildContext: &builderv1.DockerBuildContext{DockerRepository: "example.com/test"},
 			},
 		},
 		OutputDirectory: outputDir,
@@ -70,7 +70,7 @@ func recipeClient(t *testing.T, builder *Builder) *services.BuilderAgent {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	builderv0.RegisterBuilderServer(server, builder)
+	builderv1.RegisterBuilderServer(server, builder)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -96,16 +96,16 @@ func TestBuildEmitsRecipePlan(t *testing.T) {
 				docker.BuildxBuilder = "cli-selected"
 			}
 			if selection == "cache-selected" {
-				docker.Cache = &builderv0.BuildCacheOptions{Backend: "registry", Scope: "service", Imports: []string{"example.com/test/cache"}, Exports: []string{"example.com/test/cache"}}
+				docker.Cache = &builderv1.BuildCacheOptions{Backend: "registry", Scope: "service", Imports: []string{"example.com/test/cache"}, Exports: []string{"example.com/test/cache"}}
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			capabilities, err := client.BuildCapabilities(ctx, &builderv0.BuildCapabilitiesRequest{})
+			capabilities, err := client.BuildCapabilities(ctx, &builderv1.BuildCapabilitiesRequest{})
 			require.NoError(t, err)
 			require.True(t, capabilities.GetBuildxSelection())
 			resp, err := client.Build(ctx, req)
 			require.NoError(t, err)
-			require.Equal(t, builderv0.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+			require.Equal(t, builderv1.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 			require.Empty(t, resp.GetBuildxBuilder())
 			require.Empty(t, resp.GetCacheContractVersion())
 			plan := resp.GetResult().GetDockerBuildPlan()
@@ -144,7 +144,7 @@ func TestBuildRejectsInvalidOutputDirectoryBeforePreparation(t *testing.T) {
 			req.GetBuildContext().GetDockerBuildContext().BuildxBuilder = "cli-selected"
 			resp, err := client.Build(ctx, req)
 			require.NoError(t, err)
-			require.Equal(t, builderv0.BuildStatus_ERROR, resp.GetState().GetState())
+			require.Equal(t, builderv1.BuildStatus_ERROR, resp.GetState().GetState())
 			require.Contains(t, resp.GetState().GetMessage(), "output_directory")
 			require.Nil(t, resp.GetResult())
 			content, err := os.ReadFile(dockerfile)
@@ -181,7 +181,7 @@ func TestBuildShipsSiblingPackages(t *testing.T) {
 	defer cancel()
 	resp, err := recipeClient(t, builder).Build(ctx, recipeBuildRequest(outputDir))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 
 	content, err := os.ReadFile(path.Join(outputDir, "Dockerfile"))
 	require.NoError(t, err)

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,7 +138,7 @@ func TestWorkspaceMemberRecipeCopiesTheWorkspace(t *testing.T) {
 	outputDir := t.TempDir()
 	plan := emitRecipe(t, builder, outputDir)
 	require.NoError(t, services.VerifyDockerBuildPlan(outputDir, plan))
-	require.Equal(t, builderv0.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_EMITTED, plan.GetScope(),
+	require.Equal(t, builderv1.RecipeInventoryScope_RECIPE_INVENTORY_SCOPE_EMITTED, plan.GetScope(),
 		"the service directory is the context: the recipe assembles nothing")
 
 	dockerfile := dockerfileOf(t, outputDir, plan)

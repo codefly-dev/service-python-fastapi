@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,18 +19,18 @@ import (
 // uv, a cache location for the dependency hashes, and a configuration, so Init
 // still has environment-manager work to do after its runner section — the
 // window a Start can land in.
-func initStartTestRuntime(t *testing.T) (*Runtime, *fakeRunnerEnvironment, *runtimev0.InitRequest) {
+func initStartTestRuntime(t *testing.T) (*Runtime, *fakeRunnerEnvironment, *runtimev1.InitRequest) {
 	t.Helper()
 
 	runtime, req := initTestRuntime(t)
 	runtime.cacheLocation = t.TempDir()
 	env := &fakeRunnerEnvironment{}
 	runtime.runnerEnvironment = env
-	req.Configuration = &basev0.Configuration{
+	req.Configuration = &basev1.Configuration{
 		Origin: "mod/probe",
-		Infos: []*basev0.ConfigurationInformation{{
+		Infos: []*basev1.ConfigurationInformation{{
 			Name:                "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{{Key: "url", Value: "postgres://localhost"}},
+			ConfigurationValues: []*basev1.ConfigurationValue{{Key: "url", Value: "postgres://localhost"}},
 		}},
 	}
 	return runtime, env, req
@@ -95,7 +95,7 @@ func runInitAgainstStart(t *testing.T) {
 	runtime.runnerEnvironment = env
 
 	var wg sync.WaitGroup
-	var initResp *runtimev0.InitResponse
+	var initResp *runtimev1.InitResponse
 	var initErr error
 	wg.Add(1)
 	go func() {
@@ -106,12 +106,12 @@ func runInitAgainstStart(t *testing.T) {
 	<-env.entered
 
 	startDone := make(chan struct{})
-	var startResp *runtimev0.StartResponse
+	var startResp *runtimev1.StartResponse
 	var startErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		startResp, startErr = runtime.Start(context.Background(), &runtimev0.StartRequest{})
+		startResp, startErr = runtime.Start(context.Background(), &runtimev1.StartRequest{})
 		close(startDone)
 	}()
 
@@ -130,9 +130,9 @@ func runInitAgainstStart(t *testing.T) {
 	wg.Wait()
 
 	require.NoError(t, initErr)
-	require.Equal(t, runtimev0.InitStatus_READY, initResp.GetStatus().GetState(), initResp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initResp.GetStatus().GetState(), initResp.GetStatus().GetMessage())
 	require.NoError(t, startErr)
-	require.Equal(t, runtimev0.StartStatus_STARTED, startResp.GetStatus().GetState(), startResp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, startResp.GetStatus().GetState(), startResp.GetStatus().GetMessage())
 	require.Equal(t, "9999", uvicornPort(t, fake))
 }
 
@@ -159,9 +159,9 @@ func runColdInitAgainstStart(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(runtime.Service.SourceLocation, "pyproject.toml")))
 	runtime.Service.SourceLocation = filepath.Join(runtime.Service.SourceLocation, "does-not-exist")
 
-	var initResp *runtimev0.InitResponse
+	var initResp *runtimev1.InitResponse
 	var initErr error
-	var startResp *runtimev0.StartResponse
+	var startResp *runtimev1.StartResponse
 
 	gate := make(chan struct{})
 	var wg sync.WaitGroup
@@ -178,7 +178,7 @@ func runColdInitAgainstStart(t *testing.T) {
 		// published Start refuses at once, having read none of the state Init
 		// is writing, and the accesses that would race never execute.
 		waitForRunnerEnvironment(runtime)
-		startResp, _ = runtime.Start(context.Background(), &runtimev0.StartRequest{})
+		startResp, _ = runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	}()
 	close(gate)
 	wg.Wait()

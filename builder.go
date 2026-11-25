@@ -16,9 +16,9 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	"github.com/codefly-dev/core/companions/proto"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/languages"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
@@ -50,7 +50,7 @@ type Builder struct {
 
 	FastAPI *Service
 
-	answers map[string]*agentv0.Answer
+	answers map[string]*agentv1.Answer
 }
 
 // NewBuilder composes a fastapi Builder from the generic Python Builder.
@@ -64,7 +64,7 @@ func NewBuilder(svc *Service) *Builder {
 // Load overrides generic to place source under <service>/code and to find
 // the endpoint the app's HTTP listener serves, which a service whose faces are
 // gRPC and Connect alone does not declare.
-func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
+func (s *Builder) Load(ctx context.Context, req *builderv1.LoadRequest) (*builderv1.LoadResponse, error) {
 	defer s.Wool.Catch()
 
 	// The generic load with this agent's Settings: it loads them, the
@@ -76,7 +76,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	// response carries that cause.
 	resp, err := s.Base.Builder.LoadService(ctx, req, services.BuilderLoad{Settings: s.FastAPI.Settings})
 	s.Service.SourceLocation = s.Service.ResolveSourceLocation()
-	if err != nil || resp.GetState().GetState() == builderv0.LoadStatus_ERROR {
+	if err != nil || resp.GetState().GetState() == builderv1.LoadStatus_ERROR {
 		return resp, err
 	}
 	requirements.Localize(s.Location)
@@ -119,7 +119,7 @@ func (s *Builder) renderGettingStarted(ctx context.Context) (string, error) {
 // Update re-applies builder templates and carries the readiness probe of a
 // hand-migrated service off the route the hop now admits. Generic has this as a
 // no-op.
-func (s *Builder) Update(ctx context.Context, _ *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
+func (s *Builder) Update(ctx context.Context, _ *builderv1.UpdateRequest) (*builderv1.UpdateResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	if err := s.Base.Templates(ctx, services.WithBuilder(builderFS)); err != nil {
@@ -131,7 +131,7 @@ func (s *Builder) Update(ctx context.Context, _ *builderv0.UpdateRequest) (*buil
 	if err := s.adoptHopEntry(ctx); err != nil {
 		return nil, err
 	}
-	return &builderv0.UpdateResponse{}, nil
+	return &builderv1.UpdateResponse{}, nil
 }
 
 // adoptHopEntry is what every agent call that touches a migrated service's tree
@@ -229,7 +229,7 @@ func servesRoute(sourceDir, route string) (bool, error) {
 }
 
 // Sync generates gRPC client stubs for declared dependencies.
-func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
+func (s *Builder) Sync(ctx context.Context, _ *builderv1.SyncRequest) (*builderv1.SyncResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -404,11 +404,11 @@ func httpContainerPort() int { return int(standards.Port(standards.REST)) }
 // HTTP endpoint.
 func (DockerTemplating) HTTPPort() int { return httpContainerPort() }
 
-func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
-	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
+func (s *Builder) BuildCapabilities(context.Context, *builderv1.BuildCapabilitiesRequest) (*builderv1.BuildCapabilitiesResponse, error) {
+	return &builderv1.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
 
-func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
+func (s *Builder) Build(ctx context.Context, req *builderv1.BuildRequest) (*builderv1.BuildResponse, error) {
 	defer s.Wool.Catch()
 	if req.GetOutputDirectory() == "" {
 		return s.Base.Builder.BuildError(errors.New("output_directory is required for CLI image builds"))
@@ -524,7 +524,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	// The whole destination was assembled by this build, so the plan claims all
 	// of it and the caller builds the assembled tree rather than the service
 	// directory — which is what RECIPE_INVENTORY_SCOPE_TREE declares.
-	recipe := &builderv0.DockerBuildRecipe{
+	recipe := &builderv1.DockerBuildRecipe{
 		Name:         "app",
 		Dockerfile:   "Dockerfile",
 		Context:      ".",
@@ -535,7 +535,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	for _, option := range options {
 		option(recipe)
 	}
-	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv0.DockerBuildRecipe{recipe})
+	plan, err := services.BuildDockerBuildPlan(outputDir, []*builderv1.DockerBuildRecipe{recipe})
 	if err != nil {
 		return s.Base.Builder.BuildError(err)
 	}
@@ -618,9 +618,9 @@ func dockerignoreOf(emitted []string) string {
 // Image scope goes to core's shared scanner. This agent emits a build recipe
 // and never runs buildx, so the digests only exist on the caller's side and
 // arrive as explicit subjects.
-func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+func (s *Builder) SBOM(ctx context.Context, req *builderv1.SBOMRequest) (*builderv1.SBOMResponse, error) {
 	defer s.Wool.Catch()
-	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if req.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		return s.Builder.SBOM(ctx, req)
 	}
 	ctx = s.Wool.Inject(ctx)
@@ -629,14 +629,14 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 
 // imageSBOM preserves each caller-supplied immutable image identity and source.
 // Core refuses unpinned subjects and never substitutes another scanner source.
-func (s *Builder) imageSBOM(ctx context.Context, subjects []*builderv0.ImageSubject) (*builderv0.SBOMResponse, error) {
+func (s *Builder) imageSBOM(ctx context.Context, subjects []*builderv1.ImageSubject) (*builderv1.SBOMResponse, error) {
 	return s.Base.Builder.SBOMImages(ctx, subjects)
 }
 
 // Upgrade bumps Python dependencies in requirements.txt (pip list
 // --outdated + rewrite + pip install --upgrade). --major allows major
 // version jumps; --dry-run skips the write.
-func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*builderv0.UpgradeResponse, error) {
+func (s *Builder) Upgrade(ctx context.Context, req *builderv1.UpgradeRequest) (*builderv1.UpgradeResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	dir := s.Local("code")
@@ -711,7 +711,7 @@ func preparePodOverlay(overlay *services.PodTemplateOverlay) error {
 }
 
 // Deploy renders and applies k8s manifests.
-func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
+func (s *Builder) Deploy(ctx context.Context, req *builderv1.DeploymentRequest) (*builderv1.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
 	// The rendered pod is probed on the app's HTTP listener, the container's
@@ -778,11 +778,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 }
 
 // Options returns the two-question set shown during `codefly add service`.
-func (s *Builder) Options() []*agentv0.Question {
-	return []*agentv0.Question{
-		communicate.NewConfirm(&agentv0.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
-		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
-		communicate.NewConfirm(&agentv0.Message{Name: GRPCServer, Message: "Add a gRPC server?", Description: "runs a grpc.aio listener alongside FastAPI with a proto contract ⚙️"}, false),
+func (s *Builder) Options() []*agentv1.Question {
+	return []*agentv1.Question{
+		communicate.NewConfirm(&agentv1.Message{Name: PublicEndpoint, Message: "Expose API as public", Description: "is that directly accessible from the internet?"}, true),
+		communicate.NewConfirm(&agentv1.Message{Name: HotReload, Message: "Code hot-reload (Recommended)?", Description: "codefly can restart your service when code changes are detected 🔎"}, true),
+		communicate.NewConfirm(&agentv1.Message{Name: GRPCServer, Message: "Add a gRPC server?", Description: "runs a grpc.aio listener alongside FastAPI with a proto contract ⚙️"}, false),
 	}
 }
 
@@ -799,7 +799,7 @@ type CreateConfiguration struct {
 
 // Create applies factory templates, scaffolds src/tests dirs, and
 // creates the REST endpoint.
-func (s *Builder) Create(ctx context.Context, _ *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
+func (s *Builder) Create(ctx context.Context, _ *builderv1.CreateRequest) (*builderv1.CreateResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -902,7 +902,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot declare scaffold health")
 	}
 	s.FastAPI.HTTPEndpoint = api
-	s.Endpoints = []*basev0.Endpoint{api}
+	s.Endpoints = []*basev1.Endpoint{api}
 
 	if s.FastAPI.Settings.GRPCServer.Enabled {
 		grpcEndpoint, grpcErr := s.grpcEndpoint(ctx)
@@ -920,7 +920,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 // core's LoadEndpoints re-reads it from — so the endpoint keeps its RPCs across
 // reloads and stays consumable by dependent services. It inherits the same
 // public/private visibility as the REST endpoint.
-func (s *Builder) grpcEndpoint(ctx context.Context) (*basev0.Endpoint, error) {
+func (s *Builder) grpcEndpoint(ctx context.Context) (*basev1.Endpoint, error) {
 	protoPath := s.Local("%s", s.FastAPI.Settings.GRPCServer.Proto)
 	grpc, err := resources.LoadGrpcAPI(ctx, shared.Pointer(protoPath))
 	if err != nil {
@@ -984,7 +984,7 @@ func (s *Builder) populateSettingsFromDefaults() error {
 	return nil
 }
 
-func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
+func (s *Builder) Communicate(stream builderv1.Builder_CommunicateServer) error {
 	asker := communicate.NewQuestionAsker(stream)
 	answers, err := asker.RunSequence(s.Options())
 	if err != nil {

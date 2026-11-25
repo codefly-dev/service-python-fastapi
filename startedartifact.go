@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/wool"
@@ -176,7 +176,7 @@ func (s *Runtime) launchedInterpreter(ctx context.Context, startEnvs []*resource
 // refuses by naming the agent instead of approving a build nobody confirmed.
 // The start itself still succeeds — the service is up, and describing it is a
 // separate question from running it.
-func (s *Runtime) startedArtifact() *runtimev0.StartedArtifact {
+func (s *Runtime) startedArtifact() *runtimev1.StartedArtifact {
 	if s.Base.Runtime.IsContainerRuntime() {
 		// A container start's paths name files in the image; the run approves
 		// that image's digest, not a closure on this host.
@@ -196,7 +196,7 @@ func (s *Runtime) startedArtifact() *runtimev0.StartedArtifact {
 		s.Wool.Error("cannot name the sources this start ran, so it reports no started artifact", wool.ErrField(err))
 		return nil
 	}
-	return &runtimev0.StartedArtifact{Executable: s.interpreter, Sources: sources}
+	return &runtimev1.StartedArtifact{Executable: s.interpreter, Sources: sources}
 }
 
 // probeInterpreter is the absolute path of the interpreter `uv run` executes

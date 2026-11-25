@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,13 +78,13 @@ version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 `, commitA, commitB)
 
-var gitSourcesDeclared = []*builderv0.GitSourceDownload{
+var gitSourcesDeclared = []*builderv1.GitSourceDownload{
 	{Repository: "https://git.example.invalid/acme/mono", Commit: commitA, MirrorContext: "uvsources"},
 	{Repository: "https://git.example.invalid/acme/mono", Commit: commitB, MirrorContext: "uvsources"},
 	{Repository: "ssh://git@git.example.invalid:2222/acme/tools.git", Commit: commitB, MirrorContext: "uvsources"},
 }
 
-func requireDeclares(t *testing.T, want, got []*builderv0.GitSourceDownload) {
+func requireDeclares(t *testing.T, want, got []*builderv1.GitSourceDownload) {
 	t.Helper()
 	require.Len(t, got, len(want))
 	for i := range want {
@@ -130,7 +130,7 @@ func TestLockedGitSourcesRefusesAnUnpinnedSource(t *testing.T) {
 }
 
 // TestBuildDeclaresTheLockedGitSources holds the recipe: exactly the lock's git
-// sources, the v6 contract, and the mirror mapping in the Dockerfile; without
+// sources, the v1 contract, and the mirror mapping in the Dockerfile; without
 // git sources, no declaration, the contract and Dockerfile of before.
 func TestBuildDeclaresTheLockedGitSources(t *testing.T) {
 	builder, _ := createdBuilder(t)
@@ -145,7 +145,7 @@ func TestBuildDeclaresTheLockedGitSources(t *testing.T) {
 	plan = emitRecipe(t, builder, outputDir)
 	require.NoError(t, services.VerifyDockerBuildPlan(outputDir, plan))
 	requireDeclares(t, gitSourcesDeclared, plan.GetRecipes()[0].GetGitSourceDownloads())
-	require.Equal(t, services.DockerBuildRecipeGitSourcesContractVersion, plan.GetContractVersion())
+	require.Equal(t, services.DockerBuildRecipeContractVersion, plan.GetContractVersion())
 	requireGolden(t, "git-sources", dockerfileOf(t, outputDir, plan))
 	// What a recipe cannot declare reaches neither the plan nor the Dockerfile.
 	for _, rendered := range []string{plan.String(), dockerfileOf(t, outputDir, plan)} {
@@ -248,7 +248,7 @@ example-git-lib = { git = %q, subdirectory = "lib", rev = %q }
 	outputDir := t.TempDir()
 	plan := emitRecipe(t, builder, outputDir)
 	recipe := plan.GetRecipes()[0]
-	requireDeclares(t, []*builderv0.GitSourceDownload{{Repository: repository, Commit: commit, MirrorContext: "uvsources"}}, recipe.GetGitSourceDownloads())
+	requireDeclares(t, []*builderv1.GitSourceDownload{{Repository: repository, Commit: commit, MirrorContext: "uvsources"}}, recipe.GetGitSourceDownloads())
 
 	// The mirror context as the caller fills it.
 	mirrors := filepath.Join(work, "mirrors")
@@ -293,7 +293,7 @@ func TestLockedGitSourcesLeavesOutAPrefixOfAnUndeclaredSource(t *testing.T) {
 		"https://h.example/acme/x", "https://h.example/acme/xy", "https://h.example/acme/xyz@v1", "https://h.example/acme/kept"))
 	declared, unmirrored, err := lockedGitSources(lock)
 	require.NoError(t, err)
-	requireDeclares(t, []*builderv0.GitSourceDownload{{Repository: "https://h.example/acme/kept", Commit: commitA, MirrorContext: "uvsources"}}, declared)
+	requireDeclares(t, []*builderv1.GitSourceDownload{{Repository: "https://h.example/acme/kept", Commit: commitA, MirrorContext: "uvsources"}}, declared)
 	var names []string
 	for _, source := range unmirrored {
 		names = append(names, source.Package)

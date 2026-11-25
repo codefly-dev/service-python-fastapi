@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"gopkg.in/yaml.v3"
 )
@@ -41,7 +41,7 @@ type localProbe struct {
 // predicate, no redirect refusal, no certificate pinning, and the kubelet takes
 // any 200–399 status as success), so a predicate it cannot express is refused
 // at render rather than weakened.
-func deploymentProbes(endpoint *basev0.Endpoint, native bool) (string, error) {
+func deploymentProbes(endpoint *basev1.Endpoint, native bool) (string, error) {
 	if endpoint == nil {
 		return "", fmt.Errorf("HTTP endpoint is required for deployment probes")
 	}
@@ -52,7 +52,7 @@ func deploymentProbes(endpoint *basev0.Endpoint, native bool) (string, error) {
 	rendered := make(map[string]any)
 	for _, intent := range []struct {
 		name  string
-		probe *basev0.Probe
+		probe *basev1.Probe
 	}{
 		{"readinessProbe", plan.Readiness}, {"startupProbe", plan.Startup}, {"livenessProbe", plan.Liveness},
 	} {
@@ -72,12 +72,12 @@ func deploymentProbes(endpoint *basev0.Endpoint, native bool) (string, error) {
 	return "          " + strings.ReplaceAll(strings.TrimSuffix(string(raw), "\n"), "\n", "\n          "), nil
 }
 
-func kubernetesProbe(endpoint *basev0.Endpoint, probe *basev0.Probe, intent string, native bool) (map[string]any, error) {
+func kubernetesProbe(endpoint *basev1.Endpoint, probe *basev1.Probe, intent string, native bool) (map[string]any, error) {
 	config := localProbe{Port: httpContainerPort(), Secured: resources.EndpointSecured(endpoint), Timeout: 1}
 	switch predicate := probe.GetPredicate().(type) {
-	case *basev0.Probe_Transport:
+	case *basev1.Probe_Transport:
 		config.Kind = "transport"
-	case *basev0.Probe_Http:
+	case *basev1.Probe_Http:
 		config.Kind, config.Path, config.Body = "http", predicate.Http.GetPath(), predicate.Http.GetBodyContains()
 		// HTTP request lines cannot contain controls, spaces or non-ASCII bytes.
 		for _, c := range config.Path {
@@ -143,14 +143,14 @@ func kubernetesProbe(endpoint *basev0.Endpoint, probe *basev0.Probe, intent stri
 // deploymentProbesFor renders the endpoint's probes for the requested output
 // profile: native for a restricted render (what a cell runs), the
 // container-local exec probe otherwise.
-func deploymentProbesFor(endpoint *basev0.Endpoint, profile builderv0.KubernetesOutputProfile) (string, error) {
+func deploymentProbesFor(endpoint *basev1.Endpoint, profile builderv1.KubernetesOutputProfile) (string, error) {
 	return deploymentProbes(endpoint, restrictedOutput(profile))
 }
 
 // restrictedOutput reports whether the deployment selects the restricted,
 // portable output contract a cell runs. An unparseable profile is treated as
 // restricted, the stricter of the two.
-func restrictedOutput(profile builderv0.KubernetesOutputProfile) bool {
+func restrictedOutput(profile builderv1.KubernetesOutputProfile) bool {
 	parsed, err := services.ParseOutputProfile(profile)
 	if err != nil {
 		return true

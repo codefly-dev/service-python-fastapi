@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/languages"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/shared"
@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/runners/recoveryscope"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 )
 
 func TestCreateToRunNative(t *testing.T) {
@@ -37,7 +37,7 @@ func TestCreateToRunDocker(t *testing.T) {
 	testCreateToRun(t, resources.NewRuntimeContextContainer())
 }
 
-func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
+func testCreateToRun(t *testing.T, runtimeContext *basev1.RuntimeContext) {
 	wool.SetGlobalLogLevel(wool.DEBUG)
 	workspace := &resources.Workspace{Name: "test"}
 	ctx := context.Background()
@@ -61,7 +61,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	require.NoError(t, err)
 
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
 		Module:              "mod",
@@ -73,11 +73,11 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	svc := NewService()
 	builder := NewBuilder(svc)
 
-	resp, err := builder.Load(ctx, &builderv0.LoadRequest{Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: false}})
+	resp, err := builder.Load(ctx, &builderv1.LoadRequest{Identity: identity, CreationMode: &builderv1.CreationMode{Communicate: false}})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	_, err = builder.Create(ctx, &builderv1.CreateRequest{})
 	require.NoError(t, err)
 
 	// Now run it
@@ -90,12 +90,12 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	runtime := NewRuntime(svc)
 
 	defer func() {
-		_, _ = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		_, _ = runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	}()
 
 	env := resources.LocalEnvironment()
 
-	_, err = runtime.Load(ctx, &runtimev0.LoadRequest{
+	_, err = runtime.Load(ctx, &runtimev1.LoadRequest{
 		Identity:     identity,
 		Environment:  shared.Must(env.Proto()),
 		DisableCatch: true})
@@ -125,22 +125,22 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings, authority, admits)
 
-	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
+	_, err = runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 
 	// Running again should work
 	testRun(t, runtime, ctx, identity, runtimeContext, networkMappings, authority, admits)
 
 	// Test
-	test, err := runtime.Test(ctx, &runtimev0.TestRequest{})
+	test, err := runtime.Test(ctx, &runtimev1.TestRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.TestRunResult_PASSED, test.GetResult().GetState(), test.GetResult().GetMessage())
+	require.Equal(t, runtimev1.TestRunResult_PASSED, test.GetResult().GetState(), test.GetResult().GetMessage())
 
 }
 
-func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *basev0.ServiceIdentity, runtimeContext *basev0.RuntimeContext, networkMappings []*basev0.NetworkMapping, authority *hopAuthority, admits bool) {
+func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *basev1.ServiceIdentity, runtimeContext *basev1.RuntimeContext, networkMappings []*basev1.NetworkMapping, authority *hopAuthority, admits bool) {
 
-	init, err := runtime.Init(ctx, &runtimev0.InitRequest{
+	init, err := runtime.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 		WorkspaceConfigurations: authority.configurations()})
@@ -149,12 +149,12 @@ func testRun(t *testing.T, runtime *Runtime, ctx context.Context, identity *base
 	// Init reports failures through the response status, not the Go error, so a
 	// bare NoError check would let a failed Init through and surface as a
 	// confusing empty-network-mappings error further down.
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, init.NetworkMappings, runtime.FastAPI.HTTPEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
 
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 
 	client := http.Client{Timeout: 2 * time.Second}

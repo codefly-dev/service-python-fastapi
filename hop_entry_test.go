@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/stretchr/testify/require"
 )
@@ -107,7 +107,7 @@ func TestStartServesTheEntryAndRewritesIt(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(code, hopEntryModule),
 		[]byte("from src.main import app\n"), 0o644))
 
-	_, err = runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	_, err = runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 	require.Contains(t, uvicornProcs(env)[0].args, hopEntryApp)
@@ -143,14 +143,14 @@ func TestInitWarnsThenRefusesAServiceThatCannotAdmitACall(t *testing.T) {
 
 	open, err := runtime.Init(context.Background(), req)
 	require.NoError(t, err)
-	require.NotEqual(t, runtimev0.InitStatus_ERROR, open.GetStatus().GetState(), open.GetStatus().GetMessage())
+	require.NotEqual(t, runtimev1.InitStatus_ERROR, open.GetStatus().GetState(), open.GetStatus().GetMessage())
 	require.Equal(t, unadmittedApp, servedApp(runtime.hopStack),
 		"a service with no verifier was pointed at an entry whose import cannot resolve")
 
 	migrationClosed(t)
 	closed, err := runtime.Init(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_ERROR, closed.GetStatus().GetState())
+	require.Equal(t, runtimev1.InitStatus_ERROR, closed.GetStatus().GetState())
 	require.Contains(t, closed.GetStatus().GetMessage(), "src/hop.py does not define class HopAdmission")
 	require.Contains(t, closed.GetStatus().GetMessage(), "docs/hop-migration.md")
 }
@@ -163,7 +163,7 @@ func TestDeployRefusesAServiceThatCannotAdmitACall(t *testing.T) {
 	builder.SourceLocation = unmigratedProject(t)
 	migrationClosed(t)
 
-	_, err := builder.Deploy(context.Background(), &builderv0.DeploymentRequest{})
+	_, err := builder.Deploy(context.Background(), &builderv1.DeploymentRequest{})
 	require.ErrorContains(t, err, "no listener it starts verifies the hop's admission")
 	require.ErrorContains(t, err, "docs/hop-migration.md")
 }
@@ -185,7 +185,7 @@ func TestUpdateMovesALegacyReadinessProbeOffTheAdmittedRoute(t *testing.T) {
 	}
 	require.NoError(t, builder.Base.Service.Save(ctx))
 
-	_, err := builder.Update(ctx, &builderv0.UpdateRequest{})
+	_, err := builder.Update(ctx, &builderv1.UpdateRequest{})
 	require.NoError(t, err)
 	require.Equal(t, hopReadinessPath, builder.Base.Service.Endpoints[0].Health.Readiness.Path)
 
@@ -212,7 +212,7 @@ func TestUpdateLeavesAnUnmigratedReadinessProbeAlone(t *testing.T) {
 	}
 	require.NoError(t, builder.Base.Service.Save(ctx))
 
-	_, err := builder.Update(ctx, &builderv0.UpdateRequest{})
+	_, err := builder.Update(ctx, &builderv1.UpdateRequest{})
 	require.NoError(t, err)
 	require.Equal(t, legacyReadinessPath, builder.Base.Service.Endpoints[0].Health.Readiness.Path)
 }
@@ -339,7 +339,7 @@ func TestAServiceThatInstallsTheWrapItselfIsRefused(t *testing.T) {
 	runtime.Service.SourceLocation = source
 	resp, err := runtime.Init(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.InitStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "the entry is the only wrap")
 }
 
@@ -355,12 +355,12 @@ func TestStartRefusesAfterTheDeadlineEvenWhenInitPassed(t *testing.T) {
 
 	passed, err := runtime.Init(context.Background(), req)
 	require.NoError(t, err)
-	require.NotEqual(t, runtimev0.InitStatus_ERROR, passed.GetStatus().GetState())
+	require.NotEqual(t, runtimev1.InitStatus_ERROR, passed.GetStatus().GetState())
 
 	migrationClosed(t)
-	started, err := runtime.Start(context.Background(), &runtimev0.StartRequest{})
+	started, err := runtime.Start(context.Background(), &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, started.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, started.GetStatus().GetState())
 	require.Contains(t, started.GetStatus().GetMessage(), "docs/hop-migration.md")
 }
 
@@ -374,7 +374,7 @@ func TestStartRewritesTheEntryEvenWhenItKeepsTheProcess(t *testing.T) {
 	runtime.Service.SourceLocation = code
 
 	ctx := context.Background()
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1)
 
@@ -382,7 +382,7 @@ func TestStartRewritesTheEntryEvenWhenItKeepsTheProcess(t *testing.T) {
 	// the process is kept, and the entry is still the agent's.
 	require.NoError(t, os.WriteFile(filepath.Join(code, hopEntryModule),
 		[]byte("from src.main import app\n"), 0o644))
-	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err = runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Len(t, uvicornProcs(env), 1, "the process was replaced, so this is not the branch under test")
 
@@ -418,7 +418,7 @@ func TestSyncMovesTheReadinessProbeWithTheEntry(t *testing.T) {
 	ctx := context.Background()
 	legacyReadiness(t, builder, legacyReadinessPath, []string{"200"})
 
-	_, err := builder.Sync(ctx, &builderv0.SyncRequest{})
+	_, err := builder.Sync(ctx, &builderv1.SyncRequest{})
 	require.NoError(t, err)
 	require.Equal(t, hopReadinessPath, builder.Base.Service.Endpoints[0].Health.Readiness.Path)
 
@@ -436,7 +436,7 @@ func TestAHalfwayMigrationKeepsItsReadinessProbe(t *testing.T) {
 	builder.SourceLocation = migratedSource(t, false)
 	legacyReadiness(t, builder, legacyReadinessPath, []string{"200"})
 
-	_, err := builder.Update(ctx, &builderv0.UpdateRequest{})
+	_, err := builder.Update(ctx, &builderv1.UpdateRequest{})
 	require.NoError(t, err)
 	require.Equal(t, legacyReadinessPath, builder.Base.Service.Endpoints[0].Health.Readiness.Path)
 }
@@ -450,7 +450,7 @@ func TestTheReadinessMoveReverses(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(builder.SourceLocation, "src", "hop.py")))
 	legacyReadiness(t, builder, hopReadinessPath, []string{"200"})
 
-	_, err := builder.Update(ctx, &builderv0.UpdateRequest{})
+	_, err := builder.Update(ctx, &builderv1.UpdateRequest{})
 	require.NoError(t, err)
 	require.Equal(t, legacyReadinessPath, builder.Base.Service.Endpoints[0].Health.Readiness.Path)
 }
@@ -462,7 +462,7 @@ func TestTheReadinessMoveKeepsAuthoredStatuses(t *testing.T) {
 	ctx := context.Background()
 	legacyReadiness(t, builder, legacyReadinessPath, []string{"200", "204"})
 
-	_, err := builder.Update(ctx, &builderv0.UpdateRequest{})
+	_, err := builder.Update(ctx, &builderv1.UpdateRequest{})
 	require.NoError(t, err)
 	readiness := builder.Base.Service.Endpoints[0].Health.Readiness
 	require.Equal(t, hopReadinessPath, readiness.Path)
@@ -479,7 +479,7 @@ func TestBuildRefusesAServiceThatCannotAdmitACall(t *testing.T) {
 
 	resp, err := builder.Build(t.Context(), recipeBuildRequest(t.TempDir()))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, builderv1.BuildStatus_ERROR, resp.GetState().GetState())
 	require.Contains(t, resp.GetState().GetMessage(), "docs/hop-migration.md")
 }
 

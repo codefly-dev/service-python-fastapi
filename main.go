@@ -16,8 +16,8 @@ import (
 	"github.com/codefly-dev/core/agents/contract"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
-	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
 	"github.com/codefly-dev/core/resources"
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	pythonrunner "github.com/codefly-dev/core/runners/python"
@@ -172,22 +172,22 @@ type Service struct {
 	// the service's REST endpoint, whose routes src/openapi.py documents, or a
 	// plain HTTP one, which carries no API document (probes, a solution's own
 	// routes). Nil for a service whose faces are gRPC and Connect alone.
-	HTTPEndpoint *v0.Endpoint
+	HTTPEndpoint *basev1.Endpoint
 
 	// GRPCEndpoint is the service-owned gRPC endpoint, present only when
 	// Settings.GRPCServer.Enabled.
-	GRPCEndpoint *v0.Endpoint
+	GRPCEndpoint *basev1.Endpoint
 
 	// ConnectEndpoint is the Connect-family endpoint, present only when
 	// Settings.ConnectEndpoint.
-	ConnectEndpoint *v0.Endpoint
+	ConnectEndpoint *basev1.Endpoint
 }
 
 // findHTTPEndpoint returns the one endpoint the app's HTTP listener serves: a
 // REST or a plain HTTP endpoint. None is not an error — a service whose faces
 // are gRPC and Connect alone declares no HTTP endpoint — but two are, because
 // the process has one HTTP listener and could serve only one of them.
-func findHTTPEndpoint(ctx context.Context, endpoints []*v0.Endpoint) (*v0.Endpoint, error) {
+func findHTTPEndpoint(ctx context.Context, endpoints []*basev1.Endpoint) (*basev1.Endpoint, error) {
 	found := resources.FindEndpointsByAPI(ctx, standards.REST, endpoints)
 	found = append(found, resources.FindEndpointsByAPI(ctx, standards.HTTP, endpoints)...)
 	switch len(found) {
@@ -208,7 +208,7 @@ func findHTTPEndpoint(ctx context.Context, endpoints []*v0.Endpoint) (*v0.Endpoi
 // no gRPC endpoint for a gRPC server to serve. A manifest that lost its
 // endpoints would otherwise start a process nobody can reach, and Start would
 // have nothing to wait on before it answered STARTED.
-func (s *Service) unservedError(ctx context.Context, endpoints []*v0.Endpoint) error {
+func (s *Service) unservedError(ctx context.Context, endpoints []*basev1.Endpoint) error {
 	if s.HTTPEndpoint != nil {
 		return nil
 	}
@@ -230,7 +230,7 @@ func (s *Settings) connectSettingError() error {
 // GetAgentInformation overrides the generic info to advertise HTTP protocol
 // and hot-reload capability. Runtime requirement is the same NIX advertised
 // by the generic; dep tooling is uv (no poetry).
-func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
+func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv1.AgentInformationRequest) (*agentv1.AgentInformation, error) {
 	defer s.Wool.Catch()
 
 	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readmeFS), "templates/agent/README.md", s.Information)
@@ -244,14 +244,14 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 			Nix:    true,
 			Docker: true,
 		},
-		Toolchains: []agentv0.Toolchain_Type{agentv0.Toolchain_PYTHON},
+		Toolchains: []agentv1.Toolchain_Type{agentv1.Toolchain_PYTHON},
 		HotReload:  true,
-		Languages:  []agentv0.Language_Type{agentv0.Language_PYTHON},
+		Languages:  []agentv1.Language_Type{agentv1.Language_PYTHON},
 		// The agent serves HTTP when a service declares a REST or HTTP endpoint
 		// and gRPC when it opts in via grpc-server (and Connect beside it, over
 		// HTTP); advertising both declares the capability, not that every
 		// service exposes both.
-		Protocols: []agentv0.Protocol_Type{agentv0.Protocol_HTTP, agentv0.Protocol_GRPC},
+		Protocols: []agentv1.Protocol_Type{agentv1.Protocol_HTTP, agentv1.Protocol_GRPC},
 		ReadMe:    readme,
 	}.Build()
 	// The deployment path is core's DeployKustomize, which judges dependency

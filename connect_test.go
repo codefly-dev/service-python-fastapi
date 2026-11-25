@@ -17,8 +17,8 @@ import (
 	"time"
 
 	agenttesting "github.com/codefly-dev/core/agents/testing"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -115,7 +115,7 @@ func TestConnectFaceServesEveryProtocol(t *testing.T) {
 // connect-endpoint, or Sync writes neither the gRPC stubs nor the Connect face
 // and Deploy renders neither port.
 func TestBuilderLoadReadsTheAgentsSettings(t *testing.T) {
-	created, _ := createServiceForTest(t, map[string]*agentv0.Answer{
+	created, _ := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),
@@ -136,9 +136,9 @@ func TestBuilderLoadReadsTheAgentsSettings(t *testing.T) {
 	identity, err := created.Identity.Proto()
 	require.NoError(t, err)
 	loaded := NewBuilder(NewService())
-	resp, err := loaded.Load(ctx, &builderv0.LoadRequest{Identity: identity})
+	resp, err := loaded.Load(ctx, &builderv1.LoadRequest{Identity: identity})
 	require.NoError(t, err)
-	require.NotEqual(t, builderv0.LoadStatus_ERROR, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.NotEqual(t, builderv1.LoadStatus_ERROR, resp.GetState().GetState(), resp.GetState().GetMessage())
 	require.True(t, loaded.FastAPI.Settings.GRPCServer.Enabled)
 	require.True(t, loaded.FastAPI.Settings.ConnectEndpoint)
 	require.Equal(t, filepath.Join(created.Location, "code"), loaded.Service.SourceLocation)
@@ -180,7 +180,7 @@ func TestGeneratedMainServesConnect(t *testing.T) {
 	if _, err := exec.LookPath("uv"); err != nil {
 		t.Skip("uv is not installed: the scaffolded service cannot run")
 	}
-	builder, root := createServiceForTest(t, map[string]*agentv0.Answer{
+	builder, root := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),

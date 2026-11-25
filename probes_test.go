@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"encoding/pem"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,20 +15,20 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
-func healthEndpoint(t *testing.T, secured bool, health *resources.Health) *basev0.Endpoint {
+func healthEndpoint(t *testing.T, secured bool, health *resources.Health) *basev1.Endpoint {
 	t.Helper()
 	endpoint, err := (&resources.Endpoint{Name: "http", Service: "worker", Module: "example", Visibility: "private", API: "rest", Secured: secured, Health: health}).Proto()
 	require.NoError(t, err)
 	return endpoint
 }
 
-func renderedProbe(t *testing.T, endpoint *basev0.Endpoint) map[string]any {
+func renderedProbe(t *testing.T, endpoint *basev1.Endpoint) map[string]any {
 	t.Helper()
 	probes, err := deploymentProbes(endpoint, false)
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestBuilderLoadsAuthoredTLSAndHealthBeforeProjection(t *testing.T) {
 	identity, err := original.Identity.Proto()
 	require.NoError(t, err)
 	loaded := NewBuilder(NewService())
-	_, err = loaded.Load(t.Context(), &builderv0.LoadRequest{Identity: identity})
+	_, err = loaded.Load(t.Context(), &builderv1.LoadRequest{Identity: identity})
 	require.NoError(t, err)
 	endpoint := loaded.FastAPI.HTTPEndpoint
 	require.True(t, resources.EndpointSecured(endpoint))
@@ -241,11 +241,11 @@ func TestRestrictedRenderProbesNativelyAndRefusesWhatItCannotExpress(t *testing.
 // natively; the ephemeral local apply keeps the container-local exec probe.
 func TestTheOutputProfileSelectsTheProbe(t *testing.T) {
 	endpoint := healthEndpoint(t, false, &resources.Health{Readiness: &resources.Probe{Kind: "http", Path: "/readyz", Statuses: []string{"200"}}})
-	restricted, err := deploymentProbesFor(endpoint, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
+	restricted, err := deploymentProbesFor(endpoint, builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1)
 	require.NoError(t, err)
 	require.NotContains(t, restricted, "exec:")
 	require.Contains(t, restricted, "httpGet:")
-	local, err := deploymentProbesFor(endpoint, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
+	local, err := deploymentProbesFor(endpoint, builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1)
 	require.NoError(t, err)
 	require.Contains(t, local, "exec:")
 }

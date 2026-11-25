@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/standards"
@@ -32,7 +32,7 @@ func isolateWorkingDir(t *testing.T) {
 // initTestRuntime stands a Runtime up at the point Init is called from: a
 // native runtime, a source tree holding the files Init hashes, and the REST
 // endpoint the proposed mappings resolve.
-func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
+func initTestRuntime(t *testing.T) (*Runtime, *runtimev1.InitRequest) {
 	t.Helper()
 
 	runtime := NewRuntime(NewService())
@@ -42,7 +42,7 @@ func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
 	// start are stand-ins that serve nothing: count them as answering.
 	runtime.answers = func(context.Context, string) error { return nil }
 	// Load is what normally supplies these; these tests call Init directly.
-	runtime.Identity = resources.ServiceIdentityFromProto(&basev0.ServiceIdentity{
+	runtime.Identity = resources.ServiceIdentityFromProto(&basev1.ServiceIdentity{
 		Name:          "probe",
 		Module:        "mod",
 		Workspace:     "workspace",
@@ -57,15 +57,15 @@ func initTestRuntime(t *testing.T) (*Runtime, *runtimev0.InitRequest) {
 	require.NoError(t, os.WriteFile(filepath.Join(source, openAPIScript), []byte("# the scaffold's generator\n"), 0o600))
 	runtime.Service.SourceLocation = source
 
-	endpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "rest", Api: standards.REST}
+	endpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "rest", Api: standards.REST}
 	runtime.FastAPI.HTTPEndpoint = endpoint
 	t.Cleanup(runtime.Base.StopWatcher)
 
-	return runtime, &runtimev0.InitRequest{
+	return runtime, &runtimev1.InitRequest{
 		RuntimeContext: resources.NewRuntimeContextNative(),
-		ProposedNetworkMappings: []*basev0.NetworkMapping{{
+		ProposedNetworkMappings: []*basev1.NetworkMapping{{
 			Endpoint: endpoint,
-			Instances: []*basev0.NetworkInstance{{
+			Instances: []*basev1.NetworkInstance{{
 				Access:   resources.NewNativeNetworkAccess(),
 				Hostname: "localhost",
 				Port:     9999,
@@ -107,7 +107,7 @@ func TestInitWorksAgainstTheEnvironmentItCaptured(t *testing.T) {
 
 	resp, err := runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	var commands [][]string
 	for _, proc := range env.started() {
@@ -133,13 +133,13 @@ func TestInitWithoutAnOpenAPIGeneratorRunsNone(t *testing.T) {
 	runtime, req := initTestRuntime(t)
 	require.NoError(t, os.Remove(filepath.Join(runtime.Service.SourceLocation, openAPIScript)))
 
-	connect := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	connect := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
 	runtime.FastAPI.Settings.GRPCServer.Enabled = true
 	runtime.FastAPI.Settings.ConnectEndpoint = true
 	runtime.FastAPI.ConnectEndpoint = connect
-	req.ProposedNetworkMappings = append(req.ProposedNetworkMappings, &basev0.NetworkMapping{
+	req.ProposedNetworkMappings = append(req.ProposedNetworkMappings, &basev1.NetworkMapping{
 		Endpoint: connect,
-		Instances: []*basev0.NetworkInstance{{
+		Instances: []*basev1.NetworkInstance{{
 			Access: resources.NewNativeNetworkAccess(), Hostname: "localhost", Port: 9998, Address: "localhost:9998",
 		}},
 	})
@@ -150,7 +150,7 @@ func TestInitWithoutAnOpenAPIGeneratorRunsNone(t *testing.T) {
 
 	resp, err := runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	var commands [][]string
 	for _, proc := range env.started() {
 		commands = append(commands, append([]string{proc.bin}, proc.args...))
@@ -170,11 +170,11 @@ func TestInitIsSafeWithConcurrentTeardown(t *testing.T) {
 		teardown func(*Runtime) bool
 	}{
 		{"destroy", func(r *Runtime) bool {
-			resp, err := r.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+			resp, err := r.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 			return err == nil && resp != nil
 		}},
 		{"stop", func(r *Runtime) bool {
-			resp, err := r.Stop(context.Background(), &runtimev0.StopRequest{})
+			resp, err := r.Stop(context.Background(), &runtimev1.StopRequest{})
 			return err == nil && resp != nil
 		}},
 	} {
@@ -199,7 +199,7 @@ func runInitAgainstTeardown(t *testing.T, teardown func(*Runtime) bool) {
 	// reach for uv.
 	require.NoError(t, os.Remove(filepath.Join(runtime.Service.SourceLocation, "pyproject.toml")))
 
-	var initResp *runtimev0.InitResponse
+	var initResp *runtimev1.InitResponse
 	var initErr error
 	var teardownOK bool
 
@@ -226,7 +226,7 @@ func runInitAgainstTeardown(t *testing.T, teardown func(*Runtime) bool) {
 
 	require.NoError(t, initErr)
 	require.NotNil(t, initResp, "Init must not panic when a teardown lands mid-flight")
-	require.Equal(t, runtimev0.InitStatus_ERROR, initResp.GetStatus().GetState())
+	require.Equal(t, runtimev1.InitStatus_ERROR, initResp.GetStatus().GetState())
 	require.Contains(t, initResp.GetStatus().GetMessage(), "no pyproject.toml",
 		"Init must run past its runner section, or this tests nothing")
 	require.True(t, teardownOK, "the teardown must not panic against a concurrent Init")
@@ -293,9 +293,9 @@ func TestInitAfterStopBuildsAFreshEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, first)
 
-	resp, err := runtime.Stop(ctx, &runtimev0.StopRequest{})
+	resp, err := runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Nil(t, runtime.FastAPI.Service.ActiveEnvironment(), "Code and the REPL must not be left holding a dead environment")
 
 	second, _, err := runtime.runnerEnv(ctx)

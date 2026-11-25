@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
@@ -53,9 +53,9 @@ func TestDestroyEndsExecutionBeforeClearingCache(t *testing.T) {
 	ctx := context.Background()
 	runtime, proc, cache := destroyRuntime(t)
 
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	alive, err := proc.IsRunning(ctx)
 	require.NoError(t, err)
@@ -83,7 +83,7 @@ func TestDestroyStopsWatcher(t *testing.T) {
 	require.NoError(t, runtime.SetupWatcher(ctx, services.NewWatchConfiguration(requirements), runtime.EventHandler))
 	events := runtime.Events
 
-	_, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	_, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 
 	select {
@@ -106,9 +106,9 @@ func TestDestroyReportsCacheFailureAfterEndingExecution(t *testing.T) {
 	require.NoError(t, os.Chmod(cache, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(cache, 0o700) })
 
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_ERROR, resp.GetStatus().GetState(),
+	require.Equal(t, runtimev1.DestroyStatus_ERROR, resp.GetStatus().GetState(),
 		"a failed cache wipe must be observable, not merely logged")
 	require.Contains(t, resp.GetStatus().GetMessage(), "cannot remove cache")
 
@@ -130,9 +130,9 @@ func TestDestroyReportsRunnerFailureAndStillClearsCache(t *testing.T) {
 	runtime, _, cache := destroyRuntime(t)
 	runtime.runner = &runnerHandle{proc: stubbornProc{}, cancel: func() {}}
 
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_ERROR, resp.GetStatus().GetState(),
+	require.Equal(t, runtimev1.DestroyStatus_ERROR, resp.GetStatus().GetState(),
 		"Destroy must not report success after only logging a failed process stop")
 	require.Contains(t, resp.GetStatus().GetMessage(), "cannot stop the fastapi app")
 
@@ -148,25 +148,25 @@ func TestDestroyIsIdempotent(t *testing.T) {
 	// Before Init: no runner, no environment, no cache location claimed.
 	fresh := NewRuntime(NewService())
 	fresh.Location = t.TempDir()
-	resp, err := fresh.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := fresh.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	runtime, _, _ := destroyRuntime(t)
 	for range 3 {
-		resp, err = runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+		resp, err = runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 		require.NoError(t, err)
-		require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+		require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	}
 
 	// After Stop, Destroy still succeeds and has nothing left to release.
 	stopped, _, _ := destroyRuntime(t)
-	stop, err := stopped.Stop(ctx, &runtimev0.StopRequest{})
+	stop, err := stopped.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, stop.GetStatus().GetState(), stop.GetStatus().GetMessage())
-	resp, err = stopped.Destroy(ctx, &runtimev0.DestroyRequest{})
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, stop.GetStatus().GetState(), stop.GetStatus().GetMessage())
+	resp, err = stopped.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 }
 
 // TestStartAfterDestroyCannotLeaveAReplacement covers the race `codefly`
@@ -178,12 +178,12 @@ func TestStartAfterDestroyCannotLeaveAReplacement(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, _ := destroyRuntime(t)
 
-	_, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	_, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 
-	start, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	start, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, start.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, start.GetStatus().GetState())
 	require.Nil(t, currentRunner(runtime), "no process may survive Destroy")
 }
 
@@ -196,15 +196,15 @@ func TestDestroyStopsRealUvicornWithoutStop(t *testing.T) {
 	runtime := uvicornRuntime(t, source, false)
 	runtime.cacheLocation = t.TempDir()
 
-	_, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	_, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return serves(runtime.port) }, 30*time.Second, 200*time.Millisecond,
 		"the fixture must be serving before Destroy means anything")
 
 	handle := currentRunner(runtime)
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	running, err := handle.proc.IsRunning(ctx)
 	require.NoError(t, err)
@@ -235,15 +235,15 @@ func TestStartAfterFailedDestroyCannotLaunchReplacement(t *testing.T) {
 	env := &unstoppableEnv{}
 	runtime.runnerEnvironment = env
 
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.DestroyStatus_ERROR, resp.GetStatus().GetState())
 	require.NotNil(t, runtime.runnerEnvironment,
 		"a failed shutdown must keep the environment reachable for a retry")
 
-	start, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	start, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_ERROR, start.GetStatus().GetState())
+	require.Equal(t, runtimev1.StartStatus_ERROR, start.GetStatus().GetState())
 	require.Zero(t, env.processes, "no replacement process may be launched after Destroy")
 	require.Nil(t, currentRunner(runtime))
 }
@@ -255,7 +255,7 @@ func TestInitReopensLifecycleAfterDestroy(t *testing.T) {
 	ctx := context.Background()
 	runtime, _, _ := destroyRuntime(t)
 
-	_, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	_, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 
 	runtime.runnerMu.Lock()
@@ -264,7 +264,7 @@ func TestInitReopensLifecycleAfterDestroy(t *testing.T) {
 
 	// Init fails well before it would need a real environment; what matters is
 	// that it reopened the lifecycle on its way through.
-	_, _ = runtime.Init(ctx, &runtimev0.InitRequest{RuntimeContext: resources.NewRuntimeContextNative()})
+	_, _ = runtime.Init(ctx, &runtimev1.InitRequest{RuntimeContext: resources.NewRuntimeContextNative()})
 
 	runtime.runnerMu.Lock()
 	defer runtime.runnerMu.Unlock()
@@ -338,9 +338,9 @@ func TestDestroyRemovesContainerBeforeClearingCache(t *testing.T) {
 	}, 30*time.Second, 100*time.Millisecond, "the container must be writing into the mounted cache")
 
 	require.Nil(t, runtime.runnerEnvironment)
-	resp, err := runtime.Destroy(ctx, &runtimev0.DestroyRequest{})
+	resp, err := runtime.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.DestroyStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 
 	entries, err := os.ReadDir(cache)
 	require.NoError(t, err)

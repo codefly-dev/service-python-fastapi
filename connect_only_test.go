@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/stretchr/testify/require"
@@ -32,20 +32,20 @@ import (
 // TestFindHTTPEndpoint pins which endpoint the app's HTTP listener serves.
 func TestFindHTTPEndpoint(t *testing.T) {
 	ctx := context.Background()
-	rest := &basev0.Endpoint{Name: "rest", Api: standards.REST}
-	http := &basev0.Endpoint{Name: "probes", Api: standards.HTTP}
-	grpc := &basev0.Endpoint{Name: "grpc", Api: standards.GRPC}
-	connect := &basev0.Endpoint{Name: "connect", Api: standards.CONNECT}
+	rest := &basev1.Endpoint{Name: "rest", Api: standards.REST}
+	http := &basev1.Endpoint{Name: "probes", Api: standards.HTTP}
+	grpc := &basev1.Endpoint{Name: "grpc", Api: standards.GRPC}
+	connect := &basev1.Endpoint{Name: "connect", Api: standards.CONNECT}
 
 	for name, tc := range map[string]struct {
-		endpoints []*basev0.Endpoint
-		want      *basev0.Endpoint
+		endpoints []*basev1.Endpoint
+		want      *basev1.Endpoint
 		refused   string
 	}{
-		"gRPC and Connect alone": {endpoints: []*basev0.Endpoint{grpc, connect}},
-		"REST":                   {endpoints: []*basev0.Endpoint{rest, grpc}, want: rest},
-		"plain HTTP":             {endpoints: []*basev0.Endpoint{http, grpc, connect}, want: http},
-		"two listeners":          {endpoints: []*basev0.Endpoint{rest, http}, refused: "declares 2 HTTP endpoints (probes, rest)"},
+		"gRPC and Connect alone": {endpoints: []*basev1.Endpoint{grpc, connect}},
+		"REST":                   {endpoints: []*basev1.Endpoint{rest, grpc}, want: rest},
+		"plain HTTP":             {endpoints: []*basev1.Endpoint{http, grpc, connect}, want: http},
+		"two listeners":          {endpoints: []*basev1.Endpoint{rest, http}, refused: "declares 2 HTTP endpoints (probes, rest)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := findHTTPEndpoint(ctx, tc.endpoints)
@@ -64,7 +64,7 @@ func TestFindHTTPEndpoint(t *testing.T) {
 // endpoints in place of the scaffold's REST endpoint.
 func createConnectOnlyService(t *testing.T) (*Builder, string) {
 	t.Helper()
-	builder, root := createServiceForTest(t, map[string]*agentv0.Answer{
+	builder, root := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),
@@ -85,14 +85,14 @@ func createConnectOnlyService(t *testing.T) (*Builder, string) {
 	return builder, root
 }
 
-func localEnvironment(t *testing.T) *basev0.Environment {
+func localEnvironment(t *testing.T) *basev1.Environment {
 	t.Helper()
 	environment, err := resources.LocalEnvironment().Proto()
 	require.NoError(t, err)
 	return environment
 }
 
-func endpointNames(endpoints []*basev0.Endpoint) []string {
+func endpointNames(endpoints []*basev1.Endpoint) []string {
 	var names []string
 	for _, endpoint := range endpoints {
 		names = append(names, endpoint.GetName())
@@ -112,21 +112,21 @@ func TestConnectOnlyServiceLoads(t *testing.T) {
 	require.NoError(t, err)
 
 	builder := NewBuilder(NewService())
-	loaded, err := builder.Load(ctx, &builderv0.LoadRequest{Identity: identity})
+	loaded, err := builder.Load(ctx, &builderv1.LoadRequest{Identity: identity})
 	require.NoError(t, err)
-	require.Equal(t, builderv0.LoadStatus_READY, loaded.GetState().GetState(), loaded.GetState().GetMessage())
+	require.Equal(t, builderv1.LoadStatus_READY, loaded.GetState().GetState(), loaded.GetState().GetMessage())
 	require.Equal(t, []string{"connect", "grpc"}, endpointNames(loaded.GetEndpoints()))
 	require.Nil(t, builder.FastAPI.HTTPEndpoint)
 	require.True(t, builder.FastAPI.Settings.ConnectEndpoint)
 
-	_, err = builder.Deploy(ctx, &builderv0.DeploymentRequest{})
+	_, err = builder.Deploy(ctx, &builderv1.DeploymentRequest{})
 	require.ErrorContains(t, err, "the service declares none")
 
 	runtime := NewRuntime(NewService())
 	t.Cleanup(runtime.Base.StopWatcher)
-	resp, err := runtime.Load(ctx, &runtimev0.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
+	resp, err := runtime.Load(ctx, &runtimev1.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
 	require.NoError(t, err)
-	require.NotEqual(t, runtimev0.LoadStatus_ERROR, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.NotEqual(t, runtimev1.LoadStatus_ERROR, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Nil(t, runtime.FastAPI.HTTPEndpoint)
 	require.Equal(t, "grpc", runtime.FastAPI.GRPCEndpoint.GetName())
 	require.Equal(t, "connect", runtime.FastAPI.ConnectEndpoint.GetName())
@@ -149,13 +149,13 @@ func TestConnectOnlyServiceSyncs(t *testing.T) {
 	require.NoError(t, err)
 
 	builder := NewBuilder(NewService())
-	loaded, err := builder.Load(ctx, &builderv0.LoadRequest{Identity: identity})
+	loaded, err := builder.Load(ctx, &builderv1.LoadRequest{Identity: identity})
 	require.NoError(t, err)
-	require.Equal(t, builderv0.LoadStatus_READY, loaded.GetState().GetState(), loaded.GetState().GetMessage())
+	require.Equal(t, builderv1.LoadStatus_READY, loaded.GetState().GetState(), loaded.GetState().GetMessage())
 
-	synced, err := builder.Sync(ctx, &builderv0.SyncRequest{})
+	synced, err := builder.Sync(ctx, &builderv1.SyncRequest{})
 	require.NoError(t, err)
-	require.NotEqual(t, builderv0.SyncStatus_ERROR, synced.GetState().GetState(), synced.GetState().GetMessage())
+	require.NotEqual(t, builderv1.SyncStatus_ERROR, synced.GetState().GetState(), synced.GetState().GetMessage())
 	require.FileExists(t, filepath.Join(root, connectFacePath))
 	generated, err := filepath.Glob(filepath.Join(root, "code", "src", "rpc", "_generated", "*_pb2_grpc.py"))
 	require.NoError(t, err)
@@ -164,17 +164,17 @@ func TestConnectOnlyServiceSyncs(t *testing.T) {
 
 // connectOnlyMappings are the proposed mappings of a Connect-only service: its
 // gRPC and Connect endpoints, each on a free loopback port.
-func connectOnlyMappings(t *testing.T, grpcEndpoint, connectEndpoint *basev0.Endpoint) ([]*basev0.NetworkMapping, uint16) {
+func connectOnlyMappings(t *testing.T, grpcEndpoint, connectEndpoint *basev1.Endpoint) ([]*basev1.NetworkMapping, uint16) {
 	t.Helper()
-	mapping := func(endpoint *basev0.Endpoint, address func(uint16) string) (*basev0.NetworkMapping, uint16) {
+	mapping := func(endpoint *basev1.Endpoint, address func(uint16) string) (*basev1.NetworkMapping, uint16) {
 		port := freePort(t)
-		return &basev0.NetworkMapping{Endpoint: endpoint, Instances: []*basev0.NetworkInstance{{
+		return &basev1.NetworkMapping{Endpoint: endpoint, Instances: []*basev1.NetworkInstance{{
 			Access: resources.NewNativeNetworkAccess(), Hostname: "localhost", Port: uint32(port), Address: address(port),
 		}}}, port
 	}
 	grpcMapping, _ := mapping(grpcEndpoint, func(port uint16) string { return fmt.Sprintf("localhost:%d", port) })
 	connectMapping, connectPort := mapping(connectEndpoint, func(port uint16) string { return fmt.Sprintf("http://localhost:%d", port) })
-	return []*basev0.NetworkMapping{grpcMapping, connectMapping}, connectPort
+	return []*basev1.NetworkMapping{grpcMapping, connectMapping}, connectPort
 }
 
 // TestConnectOnlyStartPublishesNoHTTPListener: Init resolves no HTTP endpoint
@@ -188,8 +188,8 @@ func TestConnectOnlyStartPublishesNoHTTPListener(t *testing.T) {
 	runtime.runnerEnvironment = env
 	runtime.cacheLocation = t.TempDir()
 
-	grpcEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "grpc", Api: standards.GRPC}
-	connectEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	grpcEndpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "grpc", Api: standards.GRPC}
+	connectEndpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
 	runtime.FastAPI.HTTPEndpoint = nil
 	runtime.FastAPI.GRPCEndpoint = grpcEndpoint
 	runtime.FastAPI.ConnectEndpoint = connectEndpoint
@@ -203,12 +203,12 @@ func TestConnectOnlyStartPublishesNoHTTPListener(t *testing.T) {
 
 	initialized, err := runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 
-	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	started, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
-	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{}) })
+	require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev1.StopRequest{}) })
 	args := uvicornProc(t, env).args
 	require.Equal(t, "0", uvicornPort(t, env))
 	require.Equal(t, "127.0.0.1", args[slices.Index(args, "--host")+1])
@@ -293,31 +293,31 @@ func TestConnectOnlyServiceStarts(t *testing.T) {
 	require.NoError(t, err)
 	// The face Sync writes, from the loaded manifest's settings.
 	builder := NewBuilder(NewService())
-	_, err = builder.Load(ctx, &builderv0.LoadRequest{Identity: identity})
+	_, err = builder.Load(ctx, &builderv1.LoadRequest{Identity: identity})
 	require.NoError(t, err)
 	require.NoError(t, builder.syncConnectFace())
 	generateScaffoldStubs(t, code)
 
 	runtime := NewRuntime(NewService())
-	t.Cleanup(func() { _, _ = runtime.Destroy(context.Background(), &runtimev0.DestroyRequest{}) })
-	loaded, err := runtime.Load(ctx, &runtimev0.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
+	t.Cleanup(func() { _, _ = runtime.Destroy(context.Background(), &runtimev1.DestroyRequest{}) })
+	loaded, err := runtime.Load(ctx, &runtimev1.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
 	require.NoError(t, err)
-	require.NotEqual(t, runtimev0.LoadStatus_ERROR, loaded.GetStatus().GetState(), loaded.GetStatus().GetMessage())
+	require.NotEqual(t, runtimev1.LoadStatus_ERROR, loaded.GetStatus().GetState(), loaded.GetStatus().GetMessage())
 
 	// The generated app refuses to start without the verifier's inputs, so the
 	// run composes an authority for it.
 	authority := serveHopAuthority(t)
 	mappings, connectPort := connectOnlyMappings(t, runtime.FastAPI.GRPCEndpoint, runtime.FastAPI.ConnectEndpoint)
-	initialized, err := runtime.Init(ctx, &runtimev0.InitRequest{
+	initialized, err := runtime.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext: resources.NewRuntimeContextNative(), ProposedNetworkMappings: mappings,
 		WorkspaceConfigurations: authority.configurations(),
 	})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 
-	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	started, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
 
 	request, err := http.NewRequest(http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d/api.EchoService/Echo", connectPort),
@@ -336,7 +336,7 @@ func TestConnectOnlyServiceStarts(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
 	require.JSONEq(t, `{"message":"connect only"}`, string(body))
 
-	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
+	_, err = runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 }
 
@@ -360,10 +360,10 @@ func rewriteManifest(t *testing.T, root string, edit func(document map[string]an
 func TestUnservedServiceIsRefusedAtLoad(t *testing.T) {
 	ctx := context.Background()
 	for name, tc := range map[string]struct {
-		answers map[string]*agentv0.Answer
+		answers map[string]*agentv1.Answer
 	}{
 		"no endpoints, no gRPC server": {answers: nil},
-		"gRPC server with no gRPC endpoint": {answers: map[string]*agentv0.Answer{
+		"gRPC server with no gRPC endpoint": {answers: map[string]*agentv1.Answer{
 			HotReload: confirmAnswer(false), PublicEndpoint: confirmAnswer(false), GRPCServer: confirmAnswer(true),
 		}},
 	} {
@@ -373,16 +373,16 @@ func TestUnservedServiceIsRefusedAtLoad(t *testing.T) {
 			identity, err := created.Identity.Proto()
 			require.NoError(t, err)
 
-			loaded, err := NewBuilder(NewService()).Load(ctx, &builderv0.LoadRequest{Identity: identity})
+			loaded, err := NewBuilder(NewService()).Load(ctx, &builderv1.LoadRequest{Identity: identity})
 			require.NoError(t, err)
-			require.Equal(t, builderv0.LoadStatus_ERROR, loaded.GetState().GetState())
+			require.Equal(t, builderv1.LoadStatus_ERROR, loaded.GetState().GetState())
 			require.Contains(t, loaded.GetState().GetMessage(), "nothing would serve this service")
 
 			runtime := NewRuntime(NewService())
 			t.Cleanup(runtime.Base.StopWatcher)
-			resp, err := runtime.Load(ctx, &runtimev0.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
+			resp, err := runtime.Load(ctx, &runtimev1.LoadRequest{Identity: identity, Environment: localEnvironment(t), DisableCatch: true})
 			require.NoError(t, err)
-			require.Equal(t, runtimev0.LoadStatus_ERROR, resp.GetStatus().GetState())
+			require.Equal(t, runtimev1.LoadStatus_ERROR, resp.GetStatus().GetState())
 			require.Contains(t, resp.GetStatus().GetMessage(), "nothing would serve this service")
 		})
 	}
@@ -390,14 +390,14 @@ func TestUnservedServiceIsRefusedAtLoad(t *testing.T) {
 
 // grpcOnlyInit stands a runtime up at Init for a service whose one face is its
 // gRPC server, with the proposed mapping Init resolves it from.
-func grpcOnlyInit(t *testing.T) (*Runtime, *fakeRunnerEnvironment, *runtimev0.InitRequest, string) {
+func grpcOnlyInit(t *testing.T) (*Runtime, *fakeRunnerEnvironment, *runtimev1.InitRequest, string) {
 	t.Helper()
 	runtime, req := initTestRuntime(t)
 	env := &fakeRunnerEnvironment{}
 	runtime.runnerEnvironment = env
 	runtime.cacheLocation = t.TempDir()
-	grpcEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "grpc", Api: standards.GRPC}
-	connectEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	grpcEndpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "grpc", Api: standards.GRPC}
+	connectEndpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
 	runtime.FastAPI.HTTPEndpoint = nil
 	runtime.FastAPI.GRPCEndpoint = grpcEndpoint
 	mappings, _ := connectOnlyMappings(t, grpcEndpoint, connectEndpoint)
@@ -419,11 +419,11 @@ func TestGRPCOnlyStartWaitsOnTheGRPCServer(t *testing.T) {
 	}
 	initialized, err := runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
-	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	started, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
-	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{}) })
+	require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev1.StopRequest{}) })
 	require.Equal(t, []string{grpcAddress}, asked)
 }
 
@@ -434,30 +434,30 @@ func TestInitDropsTheListenersAReloadRemoved(t *testing.T) {
 	isolateWorkingDir(t)
 	ctx := context.Background()
 	runtime, env, req, grpcAddress := grpcOnlyInit(t)
-	connectEndpoint := &basev0.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
+	connectEndpoint := &basev1.Endpoint{Module: "mod", Service: "probe", Name: "connect", Api: standards.CONNECT}
 	runtime.FastAPI.ConnectEndpoint = connectEndpoint
 	withConnect, _ := connectOnlyMappings(t, runtime.FastAPI.GRPCEndpoint, connectEndpoint)
 	req.ProposedNetworkMappings = append(req.ProposedNetworkMappings, withConnect[1])
 	initialized, err := runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 	require.NotEmpty(t, runtime.connectAddress)
 
 	runtime.FastAPI.ConnectEndpoint = nil
 	req.ProposedNetworkMappings = req.ProposedNetworkMappings[:1]
 	initialized, err = runtime.Init(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 
 	var asked []string
 	runtime.answers = func(_ context.Context, target string) error {
 		asked = append(asked, target)
 		return nil
 	}
-	started, err := runtime.Start(ctx, &runtimev0.StartRequest{})
+	started, err := runtime.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
-	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev0.StopRequest{}) })
+	require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	t.Cleanup(func() { _, _ = runtime.Stop(context.Background(), &runtimev1.StopRequest{}) })
 	require.Equal(t, []string{grpcAddress}, asked)
 	require.Empty(t, processEnv(uvicornProc(t, env), "CODEFLY_CONNECT_PORT"))
 }

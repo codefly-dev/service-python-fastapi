@@ -10,30 +10,30 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/stretchr/testify/require"
 )
 
 // imageSBOMRequest asks for image scope, optionally naming subjects.
-func imageSBOMRequest(subjects ...*builderv0.ImageSubject) *builderv0.SBOMRequest {
-	return &builderv0.SBOMRequest{
-		Scope:    builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+func imageSBOMRequest(subjects ...*builderv1.ImageSubject) *builderv1.SBOMRequest {
+	return &builderv1.SBOMRequest{
+		Scope:    builderv1.SBOMScope_SBOM_SCOPE_IMAGE,
 		Subjects: subjects,
 	}
 }
 
 // emitRecipePlan runs a recipe build and returns the emitted plan together with
 // the directory the Dockerfile was written to.
-func emitRecipePlan(t *testing.T, builder *Builder) (*builderv0.DockerBuildPlan, string) {
+func emitRecipePlan(t *testing.T, builder *Builder) (*builderv1.DockerBuildPlan, string) {
 	t.Helper()
 	outputDir := t.TempDir()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	resp, err := builder.Build(ctx, recipeBuildRequest(outputDir))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.BuildStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	plan := resp.GetResult().GetDockerBuildPlan()
 	require.NotNil(t, plan)
 	return plan, outputDir
@@ -51,10 +51,10 @@ func TestImageSBOMWithoutSubjectsIsPreconditionFailure(t *testing.T) {
 	resp, err := builder.SBOM(t.Context(), imageSBOMRequest())
 	require.NoError(t, err)
 
-	require.Equal(t, builderv0.SBOMStatus_ERROR, resp.GetState().GetState())
-	require.Equal(t, basev0.FailureCode_FAILURE_CODE_PRECONDITION_FAILED, resp.GetState().GetFailure().GetCode())
-	require.Equal(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
-	require.Equal(t, builderv0.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED, resp.GetNoImageReason())
+	require.Equal(t, builderv1.SBOMStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, basev1.FailureCode_FAILURE_CODE_PRECONDITION_FAILED, resp.GetState().GetFailure().GetCode())
+	require.Equal(t, builderv1.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
+	require.Equal(t, builderv1.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED, resp.GetNoImageReason())
 	require.Empty(t, resp.GetImages())
 }
 
@@ -69,16 +69,16 @@ func TestImageSBOMWithoutSubjectsIsPreconditionFailure(t *testing.T) {
 func TestSourceScopeIsNotRoutedToImageEvidence(t *testing.T) {
 	builder, _ := createdBuilder(t)
 
-	for _, scope := range []builderv0.SBOMScope{
-		builderv0.SBOMScope_SBOM_SCOPE_UNSPECIFIED,
-		builderv0.SBOMScope_SBOM_SCOPE_SOURCE,
+	for _, scope := range []builderv1.SBOMScope{
+		builderv1.SBOMScope_SBOM_SCOPE_UNSPECIFIED,
+		builderv1.SBOMScope_SBOM_SCOPE_SOURCE,
 	} {
 		t.Run(scope.String(), func(t *testing.T) {
-			resp, err := builder.SBOM(t.Context(), &builderv0.SBOMRequest{Scope: scope})
+			resp, err := builder.SBOM(t.Context(), &builderv1.SBOMRequest{Scope: scope})
 			require.NoError(t, err)
-			require.NotEqual(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
+			require.NotEqual(t, builderv1.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
 			require.Empty(t, resp.GetImages())
-			require.Equal(t, builderv0.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED, resp.GetNoImageReason())
+			require.Equal(t, builderv1.NoImageReason_NO_IMAGE_REASON_UNSPECIFIED, resp.GetNoImageReason())
 		})
 	}
 }
@@ -113,15 +113,15 @@ func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 	expected := recipeSubjectFixture(t, builder.Identity.Name, plan)
 
 	t.Run("no-image reason contradicting the declared build", func(t *testing.T) {
-		resp, err := builder.Base.Builder.SBOMNoImage(builderv0.NoImageReason_NO_IMAGE_REASON_EXTERNALLY_MANAGED, "vendor image")
+		resp, err := builder.Base.Builder.SBOMNoImage(builderv1.NoImageReason_NO_IMAGE_REASON_EXTERNALLY_MANAGED, "vendor image")
 		require.NoError(t, err)
 		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
 
 	t.Run("source inventory is not image coverage", func(t *testing.T) {
-		resp := &builderv0.SBOMResponse{
-			State: &builderv0.SBOMStatus{State: builderv0.SBOMStatus_COMPLETE},
-			Scope: builderv0.SBOMScope_SBOM_SCOPE_SOURCE,
+		resp := &builderv1.SBOMResponse{
+			State: &builderv1.SBOMStatus{State: builderv1.SBOMStatus_COMPLETE},
+			Scope: builderv1.SBOMScope_SBOM_SCOPE_SOURCE,
 		}
 		require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, expected, resp))
 	})
@@ -134,11 +134,11 @@ func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 
 	t.Run("one platform does not cover a multi-architecture image", func(t *testing.T) {
 		covered := expected[0]
-		resp, err := builder.Base.Builder.SBOMImageResponse([]*builderv0.ImageSBOM{{
+		resp, err := builder.Base.Builder.SBOMImageResponse([]*builderv1.ImageSBOM{{
 			Digest:   "sha256:" + strings.Repeat("a", 64),
 			Platform: covered.GetPlatform(),
-			Subjects: []*builderv0.ImageSubject{covered},
-			Bom:      &agentv0.Bom{Components: []*agentv0.Component{{BomRef: "pkg:apk/alpine/musl@1.2.5"}}},
+			Subjects: []*builderv1.ImageSubject{covered},
+			Bom:      &agentv1.Bom{Components: []*agentv1.Component{{BomRef: "pkg:apk/alpine/musl@1.2.5"}}},
 			Sha256:   strings.Repeat("b", 64),
 		}})
 		require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestImageSBOMCoverageRejectsFalseClaims(t *testing.T) {
 func TestImageSBOMPropagatesScanFailures(t *testing.T) {
 	builder, _ := createdBuilder(t)
 
-	subject := &builderv0.ImageSubject{
+	subject := &builderv1.ImageSubject{
 		// A digest-pinned reference on a closed port fails resolution fast, and
 		// on a host without docker fails the scan instead — an error either way.
 		Reference: "127.0.0.1:1/missing@sha256:" + strings.Repeat("0", 64),
@@ -165,10 +165,10 @@ func TestImageSBOMPropagatesScanFailures(t *testing.T) {
 	resp, err := builder.SBOM(ctx, imageSBOMRequest(subject))
 	require.NoError(t, err)
 
-	require.Equal(t, builderv0.SBOMStatus_ERROR, resp.GetState().GetState())
-	require.Equal(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
+	require.Equal(t, builderv1.SBOMStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, builderv1.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
 	require.Empty(t, resp.GetImages())
-	require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv0.ImageSubject{subject}, resp))
+	require.Error(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv1.ImageSubject{subject}, resp))
 }
 
 // TestImageSBOMInventoriesTheBuiltImage is the end-to-end check: it builds the
@@ -224,17 +224,17 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 	inspect := exec.CommandContext(ctx, "docker", "image", "inspect", tag, "--format", "{{.Id}}")
 	rawID, err := inspect.Output()
 	require.NoError(t, err)
-	subject := &builderv0.ImageSubject{
+	subject := &builderv1.ImageSubject{
 		Digest:    strings.TrimSpace(string(rawID)),
-		Source:    builderv0.ImageSourceKind_IMAGE_SOURCE_KIND_DOCKER_DAEMON,
+		Source:    builderv1.ImageSourceKind_IMAGE_SOURCE_KIND_DOCKER_DAEMON,
 		Reference: tag,
 		Role:      plan.GetRecipes()[0].GetName(),
 		Service:   builder.Identity.Name,
 	}
 	resp, err := builder.SBOM(ctx, imageSBOMRequest(subject))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.SBOMStatus_COMPLETE, resp.GetState().GetState(), resp.GetState().GetMessage())
-	require.Equal(t, builderv0.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
+	require.Equal(t, builderv1.SBOMStatus_COMPLETE, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.SBOMScope_SBOM_SCOPE_IMAGE, resp.GetScope())
 	require.Len(t, resp.GetImages(), 1)
 
 	evidence := resp.GetImages()[0]
@@ -242,7 +242,7 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 	require.NotEmpty(t, evidence.GetPlatform())
 	require.NotEmpty(t, evidence.GetTool())
 	require.NotEmpty(t, evidence.GetSha256())
-	require.Equal(t, []*builderv0.ImageSubject{subject}, evidence.GetSubjects())
+	require.Equal(t, []*builderv1.ImageSubject{subject}, evidence.GetSubjects())
 
 	names := map[string]bool{}
 	for _, component := range evidence.GetBom().GetComponents() {
@@ -269,12 +269,12 @@ func TestImageSBOMInventoriesTheBuiltImage(t *testing.T) {
 		require.True(t, names[name], "image inventory is missing application dependency %s", name)
 	}
 
-	require.NoError(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv0.ImageSubject{subject}, resp))
+	require.NoError(t, sbom.ValidateCoverage(builder.Identity.Name, []*builderv1.ImageSubject{subject}, resp))
 }
 
 // Synthetic resolved identities exercise the pure coverage contract. The real
 // build/scan test above independently uses the image ID observed from Docker.
-func recipeSubjectFixture(t *testing.T, service string, plan *builderv0.DockerBuildPlan) []*builderv0.ImageSubject {
+func recipeSubjectFixture(t *testing.T, service string, plan *builderv1.DockerBuildPlan) []*builderv1.ImageSubject {
 	t.Helper()
 	_, err := sbom.ExpectedFromBuildPlan(service, plan, nil)
 	require.Error(t, err, "unbuilt recipe tags must not count as image evidence")

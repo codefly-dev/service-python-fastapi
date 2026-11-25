@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,7 +33,7 @@ func TestTheScaffoldProvesItsOwnAdmission(t *testing.T) {
 	if _, err := exec.LookPath("uv"); err != nil {
 		t.Skip("uv is not installed: the scaffold's own suite cannot run")
 	}
-	_, root := createServiceForTest(t, map[string]*agentv0.Answer{
+	_, root := createServiceForTest(t, map[string]*agentv1.Answer{
 		HotReload:      confirmAnswer(false),
 		PublicEndpoint: confirmAnswer(false),
 		GRPCServer:     confirmAnswer(true),

@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/agents/manager"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
@@ -59,8 +59,8 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 	assertNativeOwnership(t, ctx, b, true)
 
 	// Ordinary Runtime.Stop must retire A without affecting B's exact birth.
-	stopped, err := a.client.Stop(ctx, &runtimev0.StopRequest{})
-	if err != nil || stopped.GetStatus().GetState() != runtimev0.StopStatus_SUCCESS {
+	stopped, err := a.client.Stop(ctx, &runtimev1.StopRequest{})
+	if err != nil || stopped.GetStatus().GetState() != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("ordinary stop: %v, %v", stopped, err)
 	}
 	waitNativeCondition(t, func() bool { return !a.group.Alive() })
@@ -75,7 +75,7 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 	// birth so no agent Stop/finalizer can mask recovery of an orphan workload.
 	initialized, err := a.client.Init(ctx, a.init)
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, initialized.GetStatus().GetState(), initialized.GetStatus().GetMessage())
 	startNativeWorkload(t, ctx, a)
 	// A stale birth must be refused before SIGKILL delivery. If this guard
 	// delivered to the live PID, the exact owner and workload checks would fail.
@@ -123,8 +123,8 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 	}
 	assertNativeOwnership(t, ctx, b, true)
 	t.Logf("recovery result: %s; sibling preserved", result)
-	stopped, err = b.client.Stop(ctx, &runtimev0.StopRequest{})
-	if err != nil || stopped.GetStatus().GetState() != runtimev0.StopStatus_SUCCESS {
+	stopped, err = b.client.Stop(ctx, &runtimev1.StopRequest{})
+	if err != nil || stopped.GetStatus().GetState() != runtimev1.StopStatus_SUCCESS {
 		t.Fatalf("sibling ordinary stop: %v, %v", stopped, err)
 	}
 	waitNativeCondition(t, func() bool { return !b.group.Alive() })
@@ -135,10 +135,10 @@ func TestNativeAgentOwnershipLifecycle(t *testing.T) {
 type ownedNativeService struct {
 	workspace string
 	conn      *manager.AgentConn
-	client    runtimev0.RuntimeClient
+	client    runtimev1.RuntimeClient
 	group     *runners.TrackedProcessGroup
 	workload  runners.ProcessIdentity
-	init      *runtimev0.InitRequest
+	init      *runtimev1.InitRequest
 	owner     runners.ProcessIdentity
 }
 
@@ -188,32 +188,32 @@ Path("workload.json").write_text(json.dumps({"pid": os.getpid(), "pgid": os.getp
 	require.NoError(t, err)
 	require.Equal(t, owner, current)
 	t.Logf("captured authenticated agent owner: %+v", owner)
-	client := runtimev0.NewRuntimeClient(conn.GRPCConn())
+	client := runtimev1.NewRuntimeClient(conn.GRPCConn())
 	t.Cleanup(func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, _ = client.Stop(cleanup, &runtimev0.StopRequest{})
+		_, _ = client.Stop(cleanup, &runtimev1.StopRequest{})
 	})
 	environment, err := resources.LocalEnvironment().Proto()
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := client.Load(ctx, &runtimev0.LoadRequest{
-		Identity:    &basev0.ServiceIdentity{Name: name, Module: "qualification", Version: "0.0.1", WorkspacePath: workspace, RelativeToWorkspace: "."},
+	loaded, err := client.Load(ctx, &runtimev1.LoadRequest{
+		Identity:    &basev1.ServiceIdentity{Name: name, Module: "qualification", Version: "0.0.1", WorkspacePath: workspace, RelativeToWorkspace: "."},
 		Environment: environment, DisableCatch: true,
 	})
-	if err != nil || loaded.GetStatus().GetState() != runtimev0.LoadStatus_READY {
+	if err != nil || loaded.GetStatus().GetState() != runtimev1.LoadStatus_READY {
 		t.Fatalf("load: %v, %v\n%s", loaded, err, conn.StderrTail())
 	}
 	networkManager, err := network.NewRuntimeManager(ctx, nil)
 	require.NoError(t, err)
 	networkManager.WithTemporaryPorts()
-	identity := resources.ServiceIdentityFromProto(&basev0.ServiceIdentity{Name: name, Module: "qualification", Version: "0.0.1", WorkspacePath: workspace, RelativeToWorkspace: "."})
+	identity := resources.ServiceIdentityFromProto(&basev1.ServiceIdentity{Name: name, Module: "qualification", Version: "0.0.1", WorkspacePath: workspace, RelativeToWorkspace: "."})
 	mappings, err := networkManager.GenerateNetworkMappings(ctx, resources.LocalEnvironment(), &resources.Workspace{Name: "qualification"}, identity, loaded.GetEndpoints(), resources.NewRuntimeContextNative())
 	require.NoError(t, err)
-	initRequest := &runtimev0.InitRequest{RuntimeContext: resources.NewRuntimeContextNative(), ProposedNetworkMappings: mappings}
+	initRequest := &runtimev1.InitRequest{RuntimeContext: resources.NewRuntimeContextNative(), ProposedNetworkMappings: mappings}
 	initialized, err := client.Init(ctx, initRequest)
-	if err != nil || initialized.GetStatus().GetState() != runtimev0.InitStatus_READY {
+	if err != nil || initialized.GetStatus().GetState() != runtimev1.InitStatus_READY {
 		t.Fatalf("init: %v, %v\n%s", initialized, err, conn.StderrTail())
 	}
 	service := &ownedNativeService{workspace: workspace, conn: conn, client: client, init: initRequest, owner: owner}
@@ -227,8 +227,8 @@ func startNativeWorkload(t *testing.T, ctx context.Context, service *ownedNative
 	if err := os.Remove(pidFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	started, err := service.client.Start(ctx, &runtimev0.StartRequest{})
-	if err != nil || started.GetStatus().GetState() != runtimev0.StartStatus_STARTED {
+	started, err := service.client.Start(ctx, &runtimev1.StartRequest{})
+	if err != nil || started.GetStatus().GetState() != runtimev1.StartStatus_STARTED {
 		t.Fatalf("start: %v, %v", started, err)
 	}
 	executable := started.GetStatus().GetStartedArtifact().GetExecutable()

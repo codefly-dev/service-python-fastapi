@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	pythoncode "github.com/codefly-dev/service-python/pkg/code"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +28,7 @@ func TestActiveEnvironmentFollowsTheRunnerLifecycle(t *testing.T) {
 	require.Same(t, env, runtime.FastAPI.Service.ActiveEnvironment(),
 		"Code must resolve the environment this agent actually runs in")
 
-	_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
+	_, err = runtime.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 	require.Nil(t, runtime.FastAPI.Service.ActiveEnvironment(),
 		"a shut-down environment must not stay reachable from Code")
@@ -69,7 +69,7 @@ func TestCodeKeepsAnsweringWhileTheRunnerLifecycleChurns(t *testing.T) {
 			}
 			_, _, err := runtime.CreateRunnerEnvironment(ctx)
 			if err == nil {
-				_, err = runtime.Stop(ctx, &runtimev0.StopRequest{})
+				_, err = runtime.Stop(ctx, &runtimev1.StopRequest{})
 			}
 			if err != nil {
 				lifecycleErr = err
